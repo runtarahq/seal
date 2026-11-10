@@ -1936,8 +1936,9 @@ async fn a_value_from_another_record_is_refused_unless_shared() {
 async fn a_shared_value_is_refused_for_a_grant_its_rule_does_not_allow() {
     let provider = MockProvider::plain().await;
     let harness = Harness::new();
-    let bodies: [&'static [u8]; 5] = [
+    let bodies: [&'static [u8]; 6] = [
         b"grant_type=client_credentials",
+        b"x=1;grant_type=client_credentials&grant_type=refresh_token",
         b"client_id=c",
         b"grant_type=refresh_token&grant_type=client_credentials",
         b"grant_type=refresh_token&grant_type=refresh_token",

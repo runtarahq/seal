@@ -364,6 +364,13 @@ fn the_caller_cannot_set_an_injected_form_field_even_encoded() {
             apply_to_body(&form_body(&[("password", b"s")]), &form_type(), body).unwrap_err();
         assert_eq!(error.code(), ErrorCode::Conflict, "{}", text(body));
     }
+    // Nor behind a separator some servers read and seal's parser does not.
+    for body in [&b"a=1;password=x"[..], b"a=1;", b";"] {
+        let error =
+            apply_to_body(&form_body(&[("password", b"s")]), &form_type(), body).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BadRequest, "{}", text(body));
+    }
+    apply_to_body(&form_body(&[("password", b"s")]), &form_type(), b"a=1%3B2").unwrap();
 }
 
 #[test]

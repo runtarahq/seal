@@ -1190,6 +1190,9 @@ fn check_form_requirements(
     {
         return Err(refused());
     }
+    if crate::inject::has_semicolon_separator(body) {
+        return Err(refused());
+    }
     let pairs: Vec<(String, String)> = form_urlencoded::parse(body).into_owned().collect();
     for (name, allowed) in requirements {
         let mut values = pairs

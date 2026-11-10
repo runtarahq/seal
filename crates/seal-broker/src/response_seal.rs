@@ -295,6 +295,9 @@ fn seal_form(
     if std::str::from_utf8(body).is_err() {
         return Err(refuse("the response is not valid UTF-8"));
     }
+    if crate::inject::has_semicolon_separator(body) {
+        return Err(refuse("the response separates fields with a semicolon"));
+    }
     let pairs: Vec<(Zeroizing<String>, Zeroizing<String>)> = form_urlencoded::parse(body)
         .map(|(key, value)| {
             (
@@ -588,6 +591,32 @@ mod tests {
                 .unwrap()
                 .contains("the-secret")
         );
+    }
+
+    #[test]
+    fn a_form_field_behind_a_semicolon_is_refused_rather_than_missed() {
+        let (_, public) = PrivateKey::generate();
+        let spec = sealing(ResponseFormat::Form, &[("access_token", "access_token")]);
+        for body in [
+            &b"scope=repo;access_token=gh-secret"[..],
+            b"access_token=a&scope=repo;user",
+        ] {
+            let error = seal_response_fields(
+                &spec,
+                &headers("application/x-www-form-urlencoded"),
+                body,
+                sealer(&public),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
+        }
+        seal_response_fields(
+            &spec,
+            &headers("application/x-www-form-urlencoded"),
+            b"access_token=a&scope=repo%3Buser",
+            sealer(&public),
+        )
+        .unwrap();
     }
 
     #[test]

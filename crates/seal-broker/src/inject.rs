@@ -684,10 +684,24 @@ fn json_room(fields: &[(String, Zeroizing<Vec<u8>>)], body: &[u8]) -> usize {
             .sum::<usize>()
 }
 
+/// Whether a form body has a `;` that is not percent-encoded. Some servers split
+/// fields on it as well as on `&`, and seal's parser does not, so the two would
+/// disagree about which fields the body has. A serialiser always encodes it.
+#[must_use]
+pub fn has_semicolon_separator(form: &[u8]) -> bool {
+    form.contains(&b';')
+}
+
 fn apply_to_form(
     fields: &[(String, Zeroizing<Vec<u8>>)],
     body: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
+    if has_semicolon_separator(body) {
+        return Err(BrokerError::new(
+            ErrorCode::BadRequest,
+            "a form body with a semicolon cannot have fields injected",
+        ));
+    }
     for (key, _) in form_urlencoded::parse(body) {
         if fields.iter().any(|(name, _)| *name == key) {
             return Err(BrokerError::new(
