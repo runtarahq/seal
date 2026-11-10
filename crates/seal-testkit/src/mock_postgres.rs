@@ -251,7 +251,8 @@ async fn scram<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, password: &[u8
     let client_first = std::str::from_utf8(initial.get(end + 5..)?).ok()?;
     let gs2_end = client_first.match_indices(',').nth(1)?.0 + 1;
     let (_, bare) = client_first.split_at(gs2_end);
-    let client_nonce = bare.split("r=").nth(1)?;
+    // Everything after the first `,r=`: the nonce is random, and may hold `r=` itself.
+    let (_, client_nonce) = bare.split_once(",r=")?;
     let salt = b"salt-of-sixteen!";
     let server_first = format!(
         "r={client_nonce}server-nonce,s={},i={iterations}",

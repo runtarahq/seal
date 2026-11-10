@@ -71,7 +71,8 @@ async fn scram_server(stream: &mut DuplexStream, server: &Server) -> Option<Stri
         .to_owned();
     let gs2_end = client_first.match_indices(',').nth(1).unwrap().0 + 1;
     let (gs2, bare) = client_first.split_at(gs2_end);
-    let client_nonce = bare.split("r=").nth(1).unwrap().to_owned();
+    // Everything after the first `,r=`: the nonce is random, and may hold `r=` itself.
+    let client_nonce = bare.split_once(",r=").unwrap().1.to_owned();
     let salt = b"salt-of-sixteen!";
     let nonce = format!("{client_nonce}server-nonce");
     let server_first = format!("r={nonce},s={},i=4096", STANDARD.encode(salt));
@@ -176,6 +177,8 @@ async fn run_scram(
         scram_server(&mut server_side, &server).await
     });
     let result = login(&mut client, &credentials).await;
+    // Closed, so that a server still waiting for the client ends instead of hanging.
+    drop(client);
     (result, task.await.unwrap())
 }
 
