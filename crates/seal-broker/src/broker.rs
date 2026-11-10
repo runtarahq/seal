@@ -933,7 +933,7 @@ impl Broker {
             wait_for_head(sending, progress, &limits, total_deadline).await?;
         let (mut parts, incoming) = response.into_parts();
         remove_hop_by_hop(&mut parts.headers);
-        if let Some(secret) = outgoing.path_secret.take() {
+        for secret in std::mem::take(&mut outgoing.injected) {
             remove_headers_repeating(&mut parts.headers, &secret);
         }
         audit.update(|record| record.status = Some(parts.status.as_u16()));
@@ -1322,10 +1322,13 @@ fn remove_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// Drops every header that repeats a secret seal put in the path, as it was written
-/// there: a redirect's `Location` is the usual one. A header is dropped whole, whichever
-/// of its values has it.
+/// Drops every header that repeats a secret seal put in the request head, as it was
+/// written there: a redirect's `Location` is the usual one. A header is dropped whole,
+/// whichever of its values has it.
 fn remove_headers_repeating(headers: &mut HeaderMap, secret: &[u8]) {
+    if secret.is_empty() {
+        return;
+    }
     let repeats = |value: &HeaderValue| {
         value
             .as_bytes()

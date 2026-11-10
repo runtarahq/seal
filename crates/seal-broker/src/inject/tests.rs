@@ -109,10 +109,8 @@ fn a_path_injection_goes_before_the_callers_path() {
         &*head.path_and_query,
         "/bot123:AA-b_c/sendMessage?chat_id=1"
     );
-    assert_eq!(
-        head.path_secret.as_deref().map(Vec::as_slice),
-        Some(&b"123:AA-b_c"[..])
-    );
+    assert_eq!(head.injected.len(), 1);
+    assert_eq!(head.injected[0].as_slice(), b"123:AA-b_c");
 
     let head = head_for(&path("/v1/{}/api"), b"key", URL, &HeaderMap::new()).unwrap();
     assert_eq!(&*head.path_and_query, "/v1/key/api/v2/orders");

@@ -129,6 +129,67 @@ async fn each_injection_kind_reaches_the_provider_as_the_rule_says() {
     assert_eq!(received, json!({ "a": 1, "auth": { "token": "s3cret" } }));
 }
 
+/// A provider that repeats the credential in a response header does not hand it to
+/// the caller, wherever in the request head seal put it.
+#[tokio::test]
+async fn a_secret_a_response_header_repeats_is_not_passed_on() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let reflecting = |values: &[&str]| CannedResponse {
+        status: 200,
+        headers: values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (format!("x-echo-{index}"), (*value).to_owned()))
+            .chain([("x-kept".to_owned(), "yes".to_owned())])
+            .collect(),
+        body: Vec::new(),
+    };
+    let cases = [
+        (
+            bearer(),
+            &b"HEADER-canary_value"[..],
+            vec!["Bearer HEADER-canary_value", "HEADER-canary_value"],
+        ),
+        (
+            json!({ "basic": { "username": { "literal": "user" } } }),
+            b"BASIC-canary",
+            vec!["Basic dXNlcjpCQVNJQy1jYW5hcnk=", "user:BASIC-canary"],
+        ),
+        (
+            json!({ "query": { "name": "api_key" } }),
+            b"QUERY canary",
+            vec!["/reflect?api_key=QUERY%20canary", "QUERY canary"],
+        ),
+    ];
+    for (inject, secret, echoes) in cases {
+        let value = harness.seal("token", secret, &plain_policy(&provider, &inject));
+        provider.respond("/reflect", reflecting(&echoes));
+        let response = harness
+            .get(&url(&provider, "/reflect"), &[("token", &value)])
+            .await
+            .unwrap();
+        assert_eq!(response.headers["x-kept"], "yes");
+        for (index, echo) in echoes.iter().enumerate() {
+            assert!(
+                !response.headers.contains_key(format!("x-echo-{index}")),
+                "{echo}"
+            );
+        }
+        read_body(response).await.unwrap();
+    }
+
+    // A secret too short to search for takes no header with it.
+    let value = harness.seal("token", b"yes", &plain_policy(&provider, &bearer()));
+    provider.respond("/reflect", reflecting(&[]));
+    let response = harness
+        .get(&url(&provider, "/reflect"), &[("token", &value)])
+        .await
+        .unwrap();
+    assert_eq!(response.headers["x-kept"], "yes");
+    read_body(response).await.unwrap();
+}
+
 /// The secret goes in the path, as Telegram's bot API has it. The audit record has the
 /// path the caller named, and a header that repeats the secret is not passed on.
 #[tokio::test]
