@@ -25,6 +25,8 @@ The first release.
   [`docs/policy.md`](docs/policy.md).
 - Injection into a header, basic auth, the query, the path, a form field or a JSON
   field; companion values; shared values, such as a platform-wide OAuth app's client secret.
+- A response that repeats a credential seal sent, in a header or in its body, does not
+  reach the caller with it.
 - Response sealing: declared fields in JSON, form and XML responses come back sealed.
   A policy may name claims of a sealed JWT to return in plaintext, such as its expiry.
 - OAuth: authorization code with PKCE, refresh, client credentials, resource owner

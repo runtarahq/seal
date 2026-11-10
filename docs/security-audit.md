@@ -36,19 +36,18 @@ needs a server that already satisfies TLS verification. Both fail silently.
 ## Resolution
 
 What has changed since, by commit. The findings below are left as they were written,
-against `087de1c`; every one of them has since been fixed or, where that is said, has
-its limit documented.
+against `087de1c`; every one of them has since been fixed.
 
 | Finding | What was done | Commit |
 |---|---|---|
 | 1. mTLS subject | The subject is compared attribute by attribute, and one with a comma in a value or a multi-valued name is refused | `6d52265` |
 | 1. Identity bound to the subject only | A caller can be configured by `cert_san`, a URI or DNS name among the certificate's subject alternative names | `b12a2b7` |
 | 2. Postgres login without authentication | With a password to present, the server must ask for it | `dbe121c` |
-| 3. Reflected credential | Response headers that repeat an injected secret of eight bytes or more are dropped. A response body is not inspected, which the threat model says | `8b216cd` |
+| 3. Reflected credential | Response headers that repeat an injected secret of eight bytes or more are dropped, and a response whose body repeats one fails, with none of it passed on | `8b216cd`, `c1f576c` |
 | 4. Unaudited refusals | A refused keyset, shared value or administrative call is audited. Rate-limit refusals are not, on purpose: they bound the others | `1d255f0` |
 | 5. Metadata addresses | `100.100.100.200`, `fd00:ec2::254` and `fd20:ce::254` are metadata addresses, which no rule can allow | `c23a2d7` |
 | 6. `framed_length` overflow | Checked arithmetic, and the request is refused | `6a7b539` |
-| Presigned URL copied unwiped | The broker and `seal-client` return it in a string that wipes itself, and the service moves it into its reply. The transport's copy remains | `d25806d` |
+| Presigned URL copied unwiped | The broker and `seal-client` return it in a string that wipes itself, and the message that carries it between them wipes it when dropped | `d25806d`, `c8bd9ea` |
 | `;` in form bodies | Refused in requests seal reads and in responses it seals | `09470d5` |
 | Control characters in a literal | Refused. A certificate literal is PEM and keeps its line ends, which is why whitespace was allowed | `259f064` |
 | `path_prefix` and an injected path prefix | By design: the injected prefix goes in front of the path the rule constrains. The policy guide now says what that bounds | `1af19a9` |
@@ -65,7 +64,7 @@ its limit documented.
 | `public_keys` unverified | The list comes from the loaded keyset, where each key was unwrapped and compared | `2bbfcaa` |
 | Caller's `Content-Length` forwarded | A body that is longer or shorter than it declares fails the request. Testing this found that a longer one was cut short without an error | `8d74426` |
 | Audit file permissions | A file its group can write or others can reach is refused | `b22ce28` |
-| Metrics listener and `/readyz` | The key source is asked at most once in five seconds. The listener still has no authentication, which the operations guide says | `17fd940` |
+| Metrics listener and `/readyz` | The key source is asked at most once in five seconds. `metrics.token_file` names a bearer token every request must present, and seal does not start with the listener on anything but a loopback address without one | `17fd940`, `5374307` |
 | Claims of an unsigned token | A token with `alg` `none`, no `alg` or no signature exposes nothing | `c2b996d` |
 
 The row about `NegotiateProtocolVersion` in the first draft of this audit was wrong
