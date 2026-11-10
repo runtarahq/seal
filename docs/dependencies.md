@@ -25,7 +25,7 @@ dependencies are listed separately.
 
 | Crate | For | Used in |
 |---|---|---|
-| `serde`, `serde_json` | Envelopes, policies, configuration and JSON bodies; `arbitrary_precision` in the broker keeps numbers' exact digits | all |
+| `serde`, `serde_json` | Envelopes, policies, configuration and JSON bodies; `raw_value` in the broker keeps what seal does not change in a body as it was written. Not `arbitrary_precision`, which Cargo would turn on for every crate an application that embeds seal builds | all |
 | `base64` | Envelope fields, keys, basic auth, Shared Key | `seal-format`, `seal-keys`, `seal-broker` |
 | `url` | Parsing URLs, which seal refuses if parsing would rewrite them | `seal-format`, `seal-keys`, `seal-broker` |
 | `percent-encoding`, `form_urlencoded` | Query, form and SigV4 encoding | `seal-keys`, `seal-broker` |

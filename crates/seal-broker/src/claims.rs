@@ -5,8 +5,11 @@
 //! the token came from the provider, over the connection seal made. The signature is
 //! never returned, so the claims are no use as a credential.
 
+use std::collections::BTreeMap;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
@@ -29,20 +32,24 @@ pub fn exposed(token: &[u8], names: &[String]) -> Option<String> {
         return None;
     }
     let payload = Zeroizing::new(URL_SAFE_NO_PAD.decode(payload).ok()?);
-    // With `arbitrary_precision`, an object with this key parses as a number written
-    // however the token likes, which would let it write claims of its own choosing.
+    // To a reader built with `arbitrary_precision`, an object with this key is a number
+    // written however the token likes, which would let it write claims of its own
+    // choosing into what the application reads.
     if crate::inject::mentions_number_token(&payload) {
         return None;
     }
-    let claims: Map<String, Value> = serde_json::from_slice(&payload).ok()?;
-    let mut chosen = Map::new();
+    // Each claim is kept as the token wrote it, so a number keeps its digits.
+    let claims: BTreeMap<String, &RawValue> = serde_json::from_slice(&payload).ok()?;
+    let mut chosen: BTreeMap<&str, &RawValue> = BTreeMap::new();
     for name in names {
         let Some(value) = claims.get(name) else {
             continue;
         };
-        let fits = serde_json::to_vec(value).is_ok_and(|json| json.len() <= MAX_CLAIM_BYTES);
-        if fits {
-            chosen.insert(name.clone(), value.clone());
+        // A claim is passed on only if it reads as JSON in full, which checking the
+        // payload as a whole does not quite promise.
+        let readable = serde_json::from_str::<serde_json::Value>(value.get()).is_ok();
+        if readable && value.get().len() <= MAX_CLAIM_BYTES {
+            chosen.insert(name, value);
         }
     }
     if chosen.is_empty() {
@@ -68,7 +75,7 @@ fn is_signed(header: &[u8], signature: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -174,6 +181,27 @@ mod tests {
     fn a_token_cannot_write_claims_through_the_number_token() {
         let token = jwt(br#"{"exp":{"$serde_json::private::Number":"1,\"tenant\":\"other\""}}"#);
         assert_eq!(exposed(&token, &names(&["exp"])), None);
+    }
+
+    /// A claim that passes as JSON only loosely, here half of a surrogate pair, is left
+    /// out, and the others are still exposed.
+    #[test]
+    fn a_claim_that_does_not_read_as_json_in_full_is_left_out() {
+        let token = jwt(br#"{"tenant":"\ud800","exp":1,"other":"\ud800"}"#);
+        assert_eq!(
+            exposed(&token, &names(&["tenant", "exp"])).unwrap(),
+            r#"{"exp":1}"#
+        );
+    }
+
+    /// A claim is exposed as the token wrote it.
+    #[test]
+    fn a_claim_is_exposed_as_written() {
+        let token = jwt(br#"{"scope": [ "a" , "b" ], "amount":1.50}"#);
+        assert_eq!(
+            exposed(&token, &names(&["scope", "amount"])).unwrap(),
+            r#"{"amount":1.50,"scope":[ "a" , "b" ]}"#
+        );
     }
 
     #[test]

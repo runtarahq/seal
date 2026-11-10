@@ -30,6 +30,7 @@ fuzz_target!(|data: &[u8]| {
             password: Some(PASSWORD),
             allow_md5: flags & 1 != 0,
             allow_cleartext,
+            require_channel_binding: flags & 16 != 0,
             client_cert: flags & 4 != 0,
             end_point: (flags & 8 != 0).then(|| vec![7; 32]),
         };

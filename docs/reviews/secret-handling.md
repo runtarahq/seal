@@ -67,8 +67,8 @@ Recorded in the [threat model](../threat-model.md#copies-seal-cannot-erase):
 - `hyper`'s write buffers;
 - `ring`'s key pairs and HMAC keys;
 - `rustls`'s client-certificate keys in a TLS configuration;
-- `serde_json`'s parse of a response being sealed, or of a JWT's payload whose claims are
-  exposed;
+- `serde_json`'s reading of a field of a response being sealed, or of the claims a policy
+  names in a JWT's payload;
 - `postgres-protocol`'s SCRAM state.
 
 None can be wiped from outside. Reading any of them needs access to seal's memory,

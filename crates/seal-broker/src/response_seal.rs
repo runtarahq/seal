@@ -10,11 +10,11 @@ use http::HeaderMap;
 use http::header;
 use seal_format::policy::{ResponseFormat, SealResponse, SealedField};
 use seal_format::{Envelope, FieldName};
-use serde_json::Value;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::error::{BrokerError, ErrorCode};
 use crate::inject::{is_form, is_json, media_type_is};
+use crate::json::Node;
 
 /// A response with its fields sealed.
 #[derive(Debug, PartialEq, Eq)]
@@ -283,29 +283,36 @@ fn seal_json(
     seal_field: &mut impl FnMut(&SealedField, &[u8]) -> Result<Envelope, BrokerError>,
 ) -> Result<SealedResponse, BrokerError> {
     let refuse = |detail| BrokerError::new(ErrorCode::ResponseUnparseable, detail);
-    let mut document: Value =
-        serde_json::from_slice(body).map_err(|_| refuse("the response is not valid JSON"))?;
+    let mut document = Node::parse(body).ok_or_else(|| refuse("the response is not valid JSON"))?;
     if crate::inject::mentions_number_token(body) {
         return Err(refuse("the response has a key seal cannot pass on"));
     }
     let mut fields = BTreeMap::new();
     for field in &sealing.fields {
-        let Some(location) = document.pointer_mut(&field.at) else {
+        // A level that passed as JSON but cannot be read might hold the field, where
+        // another reader would find it, so the response is refused.
+        let location = document
+            .pointer_mut(&field.at)
+            .map_err(|_| refuse("the response is not valid JSON"))?;
+        let Some(location) = location else {
             continue;
         };
-        let Value::String(plaintext) = location else {
+        let Some(plaintext) = location.as_string() else {
             return Err(refuse("a sealed response field is not a string"));
         };
-        let mut plaintext = Zeroizing::new(std::mem::take(plaintext));
         let envelope = seal_field(field, plaintext.as_bytes())?;
-        plaintext.zeroize();
-        *location = serde_json::to_value(&envelope)
-            .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not write an envelope"))?;
+        *location =
+            Node::Json(envelope.to_json().map_err(|_| {
+                BrokerError::new(ErrorCode::Internal, "could not write an envelope")
+            })?);
         fields.insert(field.as_field.clone(), envelope);
     }
-    let body = serde_json::to_vec(&document)
+    // Everything but the sealed fields is written as the provider wrote it.
+    let mut out = Vec::with_capacity(body.len());
+    document
+        .write(&mut out)
         .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not write the response"))?;
-    Ok(SealedResponse { body, fields })
+    Ok(SealedResponse { body: out, fields })
 }
 
 fn seal_form(
@@ -365,7 +372,7 @@ mod tests {
     use seal_format::id::KeyId;
     use seal_format::policy::builder;
     use seal_format::{Binding, ItemId, KeysetId, PolicyName, PrivateKey, PublicKey, seal};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -571,6 +578,65 @@ mod tests {
                 .unwrap()
                 .contains("12345678901234567890123")
         );
+    }
+
+    /// Everything but the sealed field is the provider's, and is passed on as the
+    /// provider wrote it: spacing, escapes and digits.
+    #[test]
+    fn what_is_not_sealed_is_passed_on_as_written() {
+        let (_, public) = PrivateKey::generate();
+        let spec = sealing(ResponseFormat::Json, &[("/t", "t")]);
+        let other = r#"{"n" : 1.50, "e":1e999, "s":"é\/", "list":[ 1 ,2 ]}"#;
+        let body = format!(r#"{{ "t" : "x", "other": {other} }}"#);
+        let sealed = seal_response_fields(
+            &spec,
+            &headers("application/json"),
+            body.as_bytes(),
+            sealer(&public),
+        )
+        .unwrap();
+        let text = String::from_utf8(sealed.body).unwrap();
+        assert!(
+            text.starts_with(&format!(r#"{{"other":{other},"t":{{"#)),
+            "{text}"
+        );
+    }
+
+    /// A response can pass as JSON and still have an object seal cannot read: here, a
+    /// key with half of a surrogate pair. Passing it on would hand over the token to
+    /// any reader that does read it, so it is refused whole.
+    #[test]
+    fn a_response_with_a_level_that_cannot_be_read_is_refused_whole() {
+        let (_, public) = PrivateKey::generate();
+        for (pointer, body) in [
+            ("/t", r#"{"\ud800":1,"t":"TOKENCANARY"}"#),
+            ("/a/t", r#"{"a":{"\ud800":1,"t":"TOKENCANARY"}}"#),
+            ("/a/0/t", r#"{"a":[{"\ud800":1,"t":"TOKENCANARY"}]}"#),
+        ] {
+            let spec = sealing(ResponseFormat::Json, &[(pointer, "t")]);
+            let error = seal_response_fields(
+                &spec,
+                &headers("application/json"),
+                body.as_bytes(),
+                sealer(&public),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::ResponseUnparseable, "{pointer}");
+            assert!(!error.to_string().contains("TOKENCANARY"));
+        }
+    }
+
+    /// A token that repeats in its object is sealed once, and no copy is left.
+    #[test]
+    fn a_field_that_repeats_leaves_no_plaintext_behind() {
+        let (_, public) = PrivateKey::generate();
+        let spec = sealing(ResponseFormat::Json, &[("/a/t", "t")]);
+        let body = br#"{"a":{"t":"FIRSTCANARY","t":"LASTCANARY"},"a":{"t":"FIRSTCANARY","t":"LASTCANARY"}}"#;
+        let sealed =
+            seal_response_fields(&spec, &headers("application/json"), body, sealer(&public))
+                .unwrap();
+        let text = String::from_utf8(sealed.body).unwrap();
+        assert!(!text.contains("CANARY"), "{text}");
     }
 
     #[test]

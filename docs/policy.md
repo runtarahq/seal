@@ -149,7 +149,9 @@ presented with one that has this injection, since it changes where the request g
 
 ### `json_field`
 
-`pointer` is an RFC 6901 pointer, and nothing may already exist there.
+`pointer` is an RFC 6901 pointer, and nothing may already exist there. The body must be
+a JSON object. Everything else in it is sent as the caller wrote it, digit for digit;
+only the objects on the way to the pointer are written again, compactly and in key order.
 
 ```json
 { "rules": [{
@@ -356,6 +358,10 @@ credential some other way.
 | `json` | An RFC 6901 pointer, such as `/access_token` |
 | `form` | A key, such as `access_token` |
 | `xml` | An element path from the root, such as `AssumeRoleResponse/AssumeRoleResult/Credentials/SecretAccessKey` |
+
+In a JSON response, everything but the sealed fields comes back as the provider wrote it,
+digit for digit; only the objects and arrays on the way to a field are written again,
+compactly and in key order. A key that repeats in one of those keeps its last value.
 
 An XML path names elements by their local names: a namespace prefix, in the path or in
 the response, is ignored, so a provider cannot move a token out of reach by writing

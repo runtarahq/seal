@@ -29,6 +29,9 @@ The first release.
   reach the caller with it.
 - Response sealing: declared fields in JSON, form and XML responses come back sealed.
   A policy may name claims of a sealed JWT to return in plaintext, such as its expiry.
+- A JSON body or response keeps everything seal does not change as it was written, digit
+  for digit. seal does not turn on `serde_json`'s `arbitrary_precision` to do so, which
+  would change how an application that embeds seal reads and writes every number.
 - OAuth: authorization code with PKCE, refresh, client credentials, resource owner
   password, the JWT bearer grant, and revocation. Callbacks land on the application.
   See [`docs/oauth.md`](docs/oauth.md).
