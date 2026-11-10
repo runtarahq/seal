@@ -1,0 +1,6 @@
+# Build outputs and history are not part of the image's source.
+.git
+target
+fuzz/target
+fuzz/corpus
+fuzz/artifacts
