@@ -108,7 +108,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   returns, such as a presigned URL it generates itself.
 - **Exposed claims are what the sealer chose, unverified.** A policy may name claims of
   a sealed JWT to return in plaintext. seal reads them without checking the token's
-  signature, or that it has one, so they are as trustworthy as the provider's response, and the sealer
+  signature, so they are as trustworthy as the provider's response; a token whose
+  header says it is unsigned, or that has no signature, exposes nothing. The sealer
   should name only claims that are not secret. Rules presented together must agree on
   them exactly, as on the rest of response sealing, so another value cannot add any.
 - **A presigned URL is a copy, where a rule allows one.** A rule with `allow_presign`
