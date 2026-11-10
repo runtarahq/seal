@@ -327,6 +327,106 @@ fn caller_hashes_must_be_lowercase_hex() {
     assert!(!is_sha256_hex(&EMPTY_SHA256[1..]));
 }
 
+/// The example in the S3 documentation, "Authenticating Requests: Using Query
+/// Parameters".
+#[test]
+fn a_presigned_url_matches_the_s3_example() {
+    let query = s3_signer(Payload::Unsigned, None)
+        .presign(
+            "GET",
+            "examplebucket.s3.amazonaws.com",
+            "/test.txt",
+            "",
+            86_400,
+        )
+        .unwrap();
+    assert_eq!(
+        &*query,
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256\
+         &X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request\
+         &X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host\
+         &X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+    );
+}
+
+/// Each expected URL is what botocore 1.42's `S3SigV4QueryAuth` makes at the same
+/// time: temporary credentials, a caller's own parameter, and a port in the host.
+#[test]
+fn a_presigned_url_matches_botocores() {
+    let signer = || {
+        Signer::new(SignerParts {
+            secret: S3_SECRET,
+            access_key_id: S3_KEY_ID,
+            session_token: Some(Zeroizing::new(b"SESSION/token+value=".to_vec())),
+            region: "eu-west-1",
+            service: "s3",
+            // 2026-11-10T12:00:00Z.
+            now: UNIX_EPOCH + Duration::from_secs(1_794_312_000),
+            payload: Payload::Unsigned,
+        })
+        .unwrap()
+    };
+    let common = "X-Amz-Algorithm=AWS4-HMAC-SHA256\
+         &X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261110%2Feu-west-1%2Fs3%2Faws4_request\
+         &X-Amz-Date=20261110T120000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host\
+         &X-Amz-Security-Token=SESSION%2Ftoken%2Bvalue%3D";
+    let disposition = "response-content-disposition=attachment%3B%20filename%3D%22a.txt%22";
+    let put = signer()
+        .presign(
+            "PUT",
+            "s3.eu-west-1.amazonaws.com",
+            "/bucket/dir/a%20b.txt",
+            disposition,
+            900,
+        )
+        .unwrap();
+    assert_eq!(
+        *put,
+        format!(
+            "{disposition}&{common}&X-Amz-Signature=\
+             409a2767f79e27645952d479dcbf97781e646673479e5025088656b1a08e094d"
+        )
+    );
+    let get = signer()
+        .presign("GET", "provider.test:9000", "/bucket/key", "", 900)
+        .unwrap();
+    assert_eq!(
+        *get,
+        format!(
+            "{common}&X-Amz-Signature=\
+             68dd6dc4ac01753addf9e7c64a47c90a153ff665780928f659310467c407ff1d"
+        )
+    );
+}
+
+/// A caller chooses which version or part and how a download is described, and nothing
+/// that asks for more than the object or that signing sets.
+#[test]
+fn a_presigned_url_carries_only_the_query_parameters_it_may() {
+    let presign = |query: &str| {
+        s3_signer(Payload::Unsigned, None).presign("GET", "b.s3.amazonaws.com", "/k", query, 60)
+    };
+    for allowed in ["versionId=3", "partNumber=1&uploadId=abc", "x-id=GetObject"] {
+        let query = presign(allowed).unwrap();
+        assert!(query.starts_with(&format!("{allowed}&X-Amz-Algorithm=")));
+    }
+    for refused in [
+        "acl",
+        "uploads",
+        "tagging=",
+        "X-Amz-Expires=604800",
+        "x-amz-expires=1",
+        "X-Amz-Signature=00",
+        "X-Amz-Security-Token=mine",
+        "versionId=1&versionId=2",
+        "versionid=1",
+        "a=b",
+    ] {
+        let error = presign(refused).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BadRequest, "{refused}");
+    }
+}
+
 #[test]
 fn an_access_key_id_that_cannot_be_in_a_header_is_refused() {
     for id in [&b""[..], b"AKID/1", b"AKID 1", b"AK\xffID"] {

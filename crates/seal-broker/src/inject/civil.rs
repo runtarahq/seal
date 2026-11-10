@@ -70,6 +70,15 @@ impl Civil {
         )
     }
 
+    /// `2015-08-30T12:36:00Z`, as a shared access signature has its expiry.
+    #[must_use]
+    pub fn iso8601(&self) -> String {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
+
     /// `Sun, 30 Aug 2015 12:36:00 GMT`, as in RFC 9110.
     #[must_use]
     pub fn http_date(&self) -> String {
@@ -106,6 +115,7 @@ mod tests {
             at(1_440_938_160).http_date(),
             "Sun, 30 Aug 2015 12:36:00 GMT"
         );
+        assert_eq!(at(1_440_938_160).iso8601(), "2015-08-30T12:36:00Z");
         assert_eq!(at(0).http_date(), "Thu, 01 Jan 1970 00:00:00 GMT");
         assert_eq!(at(951_782_400).amz_date(), "20000229T000000Z");
         assert_eq!(

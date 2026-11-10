@@ -3,8 +3,10 @@
 //! seal signs the final request, after the caller's headers are fixed and the body is
 //! known, and controls which headers are signed: `host`, the `content-*` headers that
 //! describe the body, and every `x-amz-*` header, all of which are seal's own except
-//! a well-formed `X-Amz-Content-SHA256` in caller-hash mode. Query-string signing is
-//! not implemented: a presigned URL is a usable credential.
+//! a well-formed `X-Amz-Content-SHA256` in caller-hash mode.
+//!
+//! A presigned URL is a credential the caller can copy, so query-string signing is
+//! only for a rule that allows it, for S3, within the lifetime the rule gives.
 //!
 //! Signed with `ring`'s HMAC-SHA-256 and SHA-256, as JWTs are.
 
@@ -271,6 +273,22 @@ fn bad(detail: &'static str) -> BrokerError {
     BrokerError::new(ErrorCode::BadRequest, detail)
 }
 
+/// The query parameters a caller may put on a URL to be presigned: which version or
+/// part, and how a download's response is described. Anything else could ask for more
+/// than the object, such as its ACL.
+pub const PRESIGN_QUERY: &[&str] = &[
+    "partNumber",
+    "response-cache-control",
+    "response-content-disposition",
+    "response-content-encoding",
+    "response-content-language",
+    "response-content-type",
+    "response-expires",
+    "uploadId",
+    "versionId",
+    "x-id",
+];
+
 /// The headers SigV4 covers, apart from `x-amz-*`.
 const SIGNED: &[&str] = &[
     "host",
@@ -384,6 +402,66 @@ impl Signer {
         ));
         set(headers, "authorization", authorization.as_bytes(), true)?;
         Ok(signature)
+    }
+
+    /// The query of a presigned S3 URL for this request: the caller's own parameters
+    /// as sent, then the signing parameters and the signature. Only `host` is signed,
+    /// and the payload is not, as for every presigned URL.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::BadRequest`] for a query parameter a presigned URL may not carry,
+    /// or one that repeats.
+    pub fn presign(
+        &self,
+        method: &str,
+        authority: &str,
+        path: &str,
+        query: &str,
+        expires_s: u32,
+    ) -> Result<Zeroizing<String>, BrokerError> {
+        let mut seen = Vec::new();
+        for (name, _) in form_urlencoded::parse(query.as_bytes()) {
+            if !PRESIGN_QUERY.contains(&name.as_ref()) || seen.contains(&name) {
+                return Err(bad("a presigned URL cannot carry this query parameter"));
+            }
+            seen.push(name);
+        }
+        let encode = |part: &[u8]| percent_encode(part, AWS_ENCODE).to_string();
+        let credential = format!("{}/{}", self.access_key_id.as_str(), self.scope);
+        let token = self.session_token.as_ref();
+        // Sized up front: with temporary credentials it holds the session token.
+        let room = query.len() + 256 + 3 * (credential.len() + token.map_or(0, |t| t.len()));
+        let mut signed = Zeroizing::new(String::with_capacity(room));
+        if !query.is_empty() {
+            signed.push_str(query);
+            signed.push('&');
+        }
+        signed.push_str("X-Amz-Algorithm=");
+        signed.push_str(ALGORITHM);
+        signed.push_str("&X-Amz-Credential=");
+        signed.push_str(&encode(credential.as_bytes()));
+        signed.push_str("&X-Amz-Date=");
+        signed.push_str(&self.amz_date);
+        signed.push_str("&X-Amz-Expires=");
+        signed.push_str(&expires_s.to_string());
+        signed.push_str("&X-Amz-SignedHeaders=host");
+        if let Some(token) = token {
+            signed.push_str("&X-Amz-Security-Token=");
+            signed.extend(percent_encode(token, AWS_ENCODE));
+        }
+        let headers = [("host".to_owned(), authority.to_owned())];
+        let (request, _) = canonical_request(&CanonicalParts {
+            method,
+            uri: canonical_uri(path, true),
+            query: canonical_query(&signed),
+            headers: &headers,
+            payload_hash: UNSIGNED_PAYLOAD,
+        });
+        let to_sign = string_to_sign(&self.amz_date, &self.scope, &request);
+        signed.push_str("&X-Amz-Signature=");
+        signed.push_str(&signature(&self.key, &to_sign));
+        Ok(signed)
     }
 
     /// Signs chunks, each with the signature before it, from the seed signature.

@@ -2,8 +2,10 @@
 //!
 //! seal sets `x-ms-date` (and `Date` for Table), `x-ms-version` if the caller did
 //! not, and `Authorization`, over the final request. A caller cannot set
-//! `Authorization`, `x-ms-date` or `Date`. SAS generation is not implemented: a SAS
-//! is a usable credential.
+//! `Authorization`, `x-ms-date` or `Date`.
+//!
+//! A shared access signature is a credential the caller can copy, so one is made only
+//! for a rule that allows it, for one blob, within the lifetime the rule gives.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -279,6 +281,85 @@ impl Signer {
     }
 }
 
+/// The container and blob a URL names, decoded. With the account in the host name,
+/// they are the path. Otherwise the path must start with the account, as an emulator
+/// has it: a host that names no account, such as a custom domain, is refused, since
+/// seal could not tell which blob the service would take the path to mean.
+fn blob_of(account: &str, host: &str, path: &str) -> Result<String, BrokerError> {
+    let in_host = host
+        .strip_prefix(account)
+        .is_some_and(|rest| rest.starts_with('.'));
+    let resource = if in_host {
+        path.strip_prefix('/')
+    } else {
+        path.strip_prefix('/')
+            .and_then(|rest| rest.strip_prefix(account))
+            .and_then(|rest| rest.strip_prefix('/'))
+    }
+    .ok_or_else(|| bad("the URL does not name the storage account"))?;
+    let decoded = percent_decode_str(resource)
+        .decode_utf8()
+        .map_err(|_| bad("the path does not decode as UTF-8"))?;
+    let names_a_blob = decoded
+        .split_once('/')
+        .is_some_and(|(container, blob)| !container.is_empty() && !blob.is_empty());
+    if !names_a_blob {
+        return Err(bad("the URL does not name a blob"));
+    }
+    Ok(decoded.into_owned())
+}
+
+impl Signer {
+    /// The query of a shared access signature for the one blob a URL names: these
+    /// permissions, until `expiry`, with no start time. Over HTTPS only, unless the
+    /// rule itself is for plain HTTP.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::BadRequest`] if the URL does not name a blob of this account.
+    pub fn sas(
+        &self,
+        permissions: &str,
+        host: &str,
+        path: &str,
+        expiry: std::time::SystemTime,
+        https_only: bool,
+    ) -> Result<Zeroizing<String>, BrokerError> {
+        self.sas_as_of(DEFAULT_VERSION, permissions, host, path, expiry, https_only)
+    }
+
+    fn sas_as_of(
+        &self,
+        version: &str,
+        permissions: &str,
+        host: &str,
+        path: &str,
+        expiry: std::time::SystemTime,
+        https_only: bool,
+    ) -> Result<Zeroizing<String>, BrokerError> {
+        let blob = blob_of(&self.account, host, path)?;
+        let expiry = Civil::at(expiry).iso8601();
+        let protocol = if https_only { "https" } else { "https,http" };
+        // Permissions, start, expiry, resource, identifier, IP, protocol, version,
+        // resource type, snapshot, encryption scope, and five response headers.
+        let to_sign = format!(
+            "{permissions}\n\n{expiry}\n/blob/{}/{blob}\n\n\n{protocol}\n{version}\nb\n\n\n\n\n\n\n",
+            self.account
+        );
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.key);
+        let signature = Zeroizing::new(STANDARD.encode(hmac::sign(&key, to_sign.as_bytes())));
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("se", &expiry)
+            .append_pair("sp", permissions)
+            .append_pair("spr", protocol)
+            .append_pair("sv", version)
+            .append_pair("sr", "b")
+            .append_pair("sig", &signature);
+        Ok(Zeroizing::new(query.finish()))
+    }
+}
+
 /// The path goes into the string to sign as sent, but it must decode, so that seal
 /// and the service read the same resource.
 fn percent_decode_check(path: &str) -> Result<&str, BrokerError> {
@@ -419,6 +500,107 @@ mod tests {
             table_resource("a", "/mytable", "comp=acl&timeout=5"),
             "/a/mytable?comp=acl"
         );
+    }
+
+    fn sas_signer() -> Signer {
+        // base64 of "0123456789abcdef0123456789abcdef".
+        let key = b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+        Signer::new(key, b"account", AzureService::Blob, UNIX_EPOCH).unwrap()
+    }
+
+    /// 2026-11-10T12:00:00Z.
+    fn sas_expiry() -> std::time::SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_794_312_000)
+    }
+
+    fn pairs(query: &str) -> Vec<(String, String)> {
+        form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect()
+    }
+
+    /// Each expected query is what `generate_blob_sas` of `azure-storage-blob` 12.30.3
+    /// returns for the same key, blob and expiry, which signs as version 2026-06-06.
+    #[test]
+    fn a_shared_access_signature_matches_the_azure_sdks() {
+        let host = "account.blob.core.windows.net";
+        let path = "/exports/dir/report%201.csv";
+        for (permissions, expected) in [
+            (
+                "r",
+                "se=2026-11-10T12%3A00%3A00Z&sp=r&spr=https&sv=2026-06-06&sr=b&sig=9m5AH0wk0LU8q2tySS5V573/eHDAjwxNQH76WdPILSU%3D",
+            ),
+            (
+                "cw",
+                "se=2026-11-10T12%3A00%3A00Z&sp=cw&spr=https&sv=2026-06-06&sr=b&sig=RYLG8qp7vXKbjEFHhdvQ7TENdo/hlLIGJUh1RzX4pQA%3D",
+            ),
+            (
+                "d",
+                "se=2026-11-10T12%3A00%3A00Z&sp=d&spr=https&sv=2026-06-06&sr=b&sig=HVw3Jckdw/o47sAsQz/YFCE%2BCBYEW76l/13yvQA2Z90%3D",
+            ),
+        ] {
+            let query = sas_signer()
+                .sas_as_of("2026-06-06", permissions, host, path, sas_expiry(), true)
+                .unwrap();
+            assert_eq!(pairs(&query), pairs(expected), "{permissions}");
+            // An emulator has the account in the path, and names the same blob.
+            let emulated = sas_signer()
+                .sas_as_of(
+                    "2026-06-06",
+                    permissions,
+                    "127.0.0.1",
+                    &format!("/account{path}"),
+                    sas_expiry(),
+                    true,
+                )
+                .unwrap();
+            assert_eq!(pairs(&emulated), pairs(expected));
+        }
+    }
+
+    #[test]
+    fn a_signature_is_for_the_version_seal_sends_and_says_if_http_is_allowed() {
+        let query = sas_signer()
+            .sas(
+                "r",
+                "account.blob.core.windows.net",
+                "/c/b",
+                sas_expiry(),
+                false,
+            )
+            .unwrap();
+        let pairs = pairs(&query);
+        let value = |name: &str| {
+            let found = pairs.iter().find(|(key, _)| key == name);
+            found.map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("sv"), Some(DEFAULT_VERSION));
+        assert_eq!(value("spr"), Some("https,http"));
+        assert_eq!(value("sr"), Some("b"));
+        assert_eq!(value("st"), None);
+    }
+
+    /// seal signs for the blob it reads the URL to mean, so a URL it cannot read for
+    /// certain is refused: the signature could otherwise be for another blob.
+    #[test]
+    fn a_url_that_does_not_name_one_blob_of_the_account_is_refused() {
+        for (host, path) in [
+            ("account.blob.core.windows.net", "/"),
+            ("account.blob.core.windows.net", "/container"),
+            ("account.blob.core.windows.net", "/container/"),
+            ("account.blob.core.windows.net", "//blob"),
+            ("account.blob.core.windows.net", "/c/%ff"),
+            ("files.example.com", "/container/blob"),
+            ("accountx.blob.core.windows.net", "/container/blob"),
+            ("127.0.0.1", "/other/container/blob"),
+            ("127.0.0.1", "/account/container"),
+            ("127.0.0.1", "/accountx/container/blob"),
+        ] {
+            let error = sas_signer()
+                .sas("r", host, path, sas_expiry(), true)
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::BadRequest, "{host}{path}");
+        }
     }
 
     /// The signature is base64 HMAC-SHA-256 under the decoded key; the expected value
