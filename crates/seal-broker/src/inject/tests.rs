@@ -502,6 +502,18 @@ fn a_body_with_an_object_that_cannot_be_read_is_refused() {
     assert_eq!(text(&output), r#"{"a":"s","other":{"\ud800":1}}"#);
 }
 
+/// A number too large for a float is still JSON, and the caller's to send. Found by
+/// fuzzing, when the check of the output could not read what seal had rightly passed on.
+#[test]
+fn a_number_no_float_can_hold_is_sent_as_written() {
+    let body = br#"{"x":123e578901034567890123}"#;
+    let output = apply_to_body(&json_body(&[("/a/secret", b"s")]), &json_type(), body).unwrap();
+    assert_eq!(
+        text(&output),
+        r#"{"a":{"secret":"s"},"x":123e578901034567890123}"#
+    );
+}
+
 #[test]
 fn a_compressed_body_is_refused() {
     let mut caller = form_type();
