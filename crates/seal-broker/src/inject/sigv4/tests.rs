@@ -279,6 +279,29 @@ fn a_length_too_long_to_frame_is_refused() {
 }
 
 #[test]
+fn a_signed_header_with_a_tab_is_refused_and_spaces_fold() {
+    let signer = s3_signer(Payload::Unsigned, None);
+    for (name, value) in [
+        ("x-amz-meta-a", "one\ttwo"),
+        ("content-type", "text/plain\t"),
+    ] {
+        let mut map = headers(&[("host", "bucket.s3.amazonaws.com"), (name, value)]);
+        let error = signer.sign("PUT", "/k", "", &mut map, None).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BadRequest, "{name}");
+        assert!(!map.contains_key("authorization"));
+    }
+    // A header that is not signed is not seal's to judge.
+    let mut map = headers(&[("host", "bucket.s3.amazonaws.com"), ("x-other", "a\tb")]);
+    signer.sign("PUT", "/k", "", &mut map, None).unwrap();
+
+    let (canonical, _) = canonical_headers(&[
+        ("X-Amz-Meta-A".to_owned(), "  one   two  ".to_owned()),
+        ("x-amz-meta-b".to_owned(), "one\ttwo".to_owned()),
+    ]);
+    assert_eq!(&*canonical, "x-amz-meta-a:one two\nx-amz-meta-b:one\ttwo\n");
+}
+
+#[test]
 fn a_session_token_is_signed_and_marked_sensitive() {
     let signer = s3_signer(Payload::Unsigned, Some(b"token/with+chars=="));
     let mut map = headers(&[("host", "bucket.s3.amazonaws.com")]);

@@ -105,9 +105,14 @@ pub fn canonical_query(query: &str) -> String {
         .join("&")
 }
 
-/// A header value with its ends trimmed and each run of whitespace made one space.
+/// A header value with its ends trimmed and each run of spaces made one space, as the
+/// AWS SDKs do it. Other whitespace is not folded: `sign` refuses a value that has any.
 fn trim_all(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    value
+        .split(' ')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The canonical headers and the signed header list, from `(name, value)` pairs in the
@@ -379,6 +384,11 @@ impl Signer {
                 let value = value
                     .to_str()
                     .map_err(|_| bad("a signed header is not printable ASCII"))?;
+                // AWS and its SDKs fold spaces only. A tab would be signed one way
+                // here and read another way there, so it is refused, not guessed at.
+                if value.contains('\t') {
+                    return Err(bad("a signed header has a tab"));
+                }
                 signed_headers.push((name.to_owned(), value.to_owned()));
             }
         }
