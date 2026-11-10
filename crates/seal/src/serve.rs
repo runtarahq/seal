@@ -197,7 +197,13 @@ pub async fn run(
 
     if let Some(address) = config.metrics.listen {
         let handle = crate::health::install_recorder()?;
-        let local = crate::health::serve(address, handle, Arc::clone(&source))
+        let token = config
+            .metrics
+            .token_file
+            .as_deref()
+            .map(crate::health::read_token)
+            .transpose()?;
+        let local = crate::health::serve(address, handle, Arc::clone(&source), token)
             .await
             .map_err(|_| format!("cannot listen for metrics on {address}"))?;
         tracing::info!(address = %local, "serving metrics and health");

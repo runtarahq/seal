@@ -436,6 +436,9 @@ pub enum AuditFailure {
 pub struct MetricsConfig {
     /// Where `/metrics`, `/healthz` and `/readyz` are served, if anywhere.
     pub listen: Option<SocketAddr>,
+    /// A file holding the bearer token every request to that address must present.
+    /// Needed unless the address is a loopback one.
+    pub token_file: Option<PathBuf>,
 }
 
 mod defaults {
@@ -606,6 +609,17 @@ impl Config {
         self.keyring()
             .validate()
             .map_err(|error| invalid(error.to_string()))?;
+        match (self.metrics.listen, &self.metrics.token_file) {
+            (Some(address), None) if !address.ip().is_loopback() => {
+                return Err(invalid(
+                    "metrics.listen is not a loopback address, so it needs metrics.token_file",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(invalid("metrics.token_file needs metrics.listen"));
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -781,6 +795,23 @@ mod tests {
         assert!(Config::parse(&bad_keyset).is_err());
         let no_callers = MINIMAL.replace("[[callers]]\n        name = \"app\"\n        unix_uid = 990\n        keysets = [\"*\"]", "");
         assert!(Config::parse(&no_callers).is_err());
+    }
+
+    #[test]
+    fn metrics_beyond_loopback_need_a_token() {
+        let with = |metrics: &str| Config::parse(&format!("{MINIMAL}\n[metrics]\n{metrics}"));
+        with("listen = \"127.0.0.1:9464\"").unwrap();
+        with("listen = \"[::1]:9464\"").unwrap();
+        for open in ["0.0.0.0:9464", "10.0.0.5:9464", "[::]:9464"] {
+            let error = with(&format!("listen = \"{open}\"")).unwrap_err();
+            assert!(error.0.contains("token_file"), "{open}");
+            with(&format!(
+                "listen = \"{open}\"\ntoken_file = \"/etc/seal/metrics-token\""
+            ))
+            .unwrap();
+        }
+        with("listen = \"127.0.0.1:9464\"\ntoken_file = \"/etc/seal/metrics-token\"").unwrap();
+        assert!(with("token_file = \"/etc/seal/metrics-token\"").is_err());
     }
 
     #[test]

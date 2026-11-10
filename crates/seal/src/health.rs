@@ -70,7 +70,61 @@ impl Readiness {
     }
 }
 
-/// Serves the endpoints. `/readyz` is ready when the key source answers.
+/// The shortest bearer token the listener accepts as its own.
+pub const MIN_TOKEN_BYTES: usize = 16;
+
+/// The bearer token every request must present, read from a file that only seal's
+/// user can read. Surrounding whitespace is not part of it.
+///
+/// # Errors
+///
+/// Returns a message if the file cannot be read, is open to others, or holds a token
+/// that is too short or not printable ASCII.
+pub fn read_token(path: &std::path::Path) -> Result<Arc<str>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata =
+            std::fs::metadata(path).map_err(|_| format!("cannot read {}", path.display()))?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "{} is accessible to its group or others",
+                path.display()
+            ));
+        }
+    }
+    let text =
+        std::fs::read_to_string(path).map_err(|_| format!("cannot read {}", path.display()))?;
+    let token = text.trim();
+    if token.len() < MIN_TOKEN_BYTES || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(format!(
+            "{} must hold at least {MIN_TOKEN_BYTES} printable characters",
+            path.display()
+        ));
+    }
+    Ok(Arc::from(token))
+}
+
+/// Whether a request presents the token, compared without stopping at the first
+/// difference.
+fn presents(request: &Request<Incoming>, token: &str) -> bool {
+    let Some(presented) = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "))
+    else {
+        return false;
+    };
+    presented.len() == token.len()
+        && presented
+            .iter()
+            .zip(token.as_bytes())
+            .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+/// Serves the endpoints. `/readyz` is ready when the key source answers. With a
+/// token, every request must present it as `Authorization: Bearer`.
 ///
 /// # Errors
 ///
@@ -79,17 +133,25 @@ pub async fn serve(
     address: SocketAddr,
     metrics: PrometheusHandle,
     source: Arc<dyn KeySource>,
+    token: Option<Arc<str>>,
 ) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(address).await?;
     let local = listener.local_addr()?;
     let readiness = Arc::new(Readiness::new(source));
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (metrics, readiness) = (metrics.clone(), Arc::clone(&readiness));
+            let (metrics, readiness, token) =
+                (metrics.clone(), Arc::clone(&readiness), token.clone());
             tokio::spawn(async move {
                 let service = service_fn(move |request: Request<Incoming>| {
-                    let (metrics, readiness) = (metrics.clone(), Arc::clone(&readiness));
+                    let (metrics, readiness, token) =
+                        (metrics.clone(), Arc::clone(&readiness), token.clone());
                     async move {
+                        if token.is_some_and(|token| !presents(&request, &token)) {
+                            let mut refused = Response::new(Full::new(Bytes::new()));
+                            *refused.status_mut() = StatusCode::UNAUTHORIZED;
+                            return Ok(refused);
+                        }
                         Ok::<_, Infallible>(
                             respond(request.uri().path(), &metrics, &readiness).await,
                         )
@@ -178,5 +240,89 @@ mod tests {
             assert!(!readiness.is_ready().await);
         }
         assert_eq!(source.asked.load(Ordering::SeqCst), 2);
+    }
+
+    async fn status(address: SocketAddr, path: &str, authorization: Option<&str>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let header = authorization
+            .map(|value| format!("authorization: {value}\r\n"))
+            .unwrap_or_default();
+        let request =
+            format!("GET {path} HTTP/1.1\r\nhost: seal\r\n{header}connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response.lines().next().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn with_a_token_every_endpoint_needs_it() {
+        let handle = PrometheusBuilder::new().build_recorder().handle();
+        let source = Arc::new(Counting::default());
+        let token: Arc<str> = Arc::from("a-token-of-enough-length");
+        let address = serve(
+            "127.0.0.1:0".parse().unwrap(),
+            handle,
+            Arc::clone(&source) as Arc<dyn KeySource>,
+            Some(token),
+        )
+        .await
+        .unwrap();
+        for path in ["/metrics", "/healthz", "/readyz", "/other"] {
+            for wrong in [
+                None,
+                Some("Bearer a-token-of-enough-lengtx"),
+                Some("Bearer a-token-of-enough-length-and-more"),
+                Some("Bearer "),
+                Some("a-token-of-enough-length"),
+                Some("Basic a-token-of-enough-length"),
+            ] {
+                assert!(
+                    status(address, path, wrong).await.contains("401"),
+                    "{path} {wrong:?}"
+                );
+            }
+        }
+        assert_eq!(
+            source.asked.load(Ordering::SeqCst),
+            0,
+            "a refused probe reaches nothing"
+        );
+        let right = Some("Bearer a-token-of-enough-length");
+        assert!(status(address, "/healthz", right).await.contains("200"));
+        assert!(status(address, "/readyz", right).await.contains("200"));
+        assert!(status(address, "/metrics", right).await.contains("200"));
+    }
+
+    #[tokio::test]
+    async fn without_a_token_the_endpoints_are_open() {
+        let handle = PrometheusBuilder::new().build_recorder().handle();
+        let source = Arc::new(Counting::default()) as Arc<dyn KeySource>;
+        let address = serve("127.0.0.1:0".parse().unwrap(), handle, source, None)
+            .await
+            .unwrap();
+        assert!(status(address, "/healthz", None).await.contains("200"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_must_be_private_and_long_enough() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("token");
+        let write = |contents: &str, mode: u32| {
+            std::fs::write(&path, contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        write("a-token-of-enough-length\n", 0o600);
+        assert_eq!(&*read_token(&path).unwrap(), "a-token-of-enough-length");
+        write("a-token-of-enough-length\n", 0o640);
+        assert!(read_token(&path).is_err());
+        write("short\n", 0o600);
+        assert!(read_token(&path).is_err());
+        write("a token with spaces in it\n", 0o600);
+        assert!(read_token(&path).is_err());
+        assert!(read_token(&directory.path().join("missing")).is_err());
     }
 }

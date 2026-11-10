@@ -127,6 +127,7 @@ least twice `max_keys_per_keyset`.
 | `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |
 | `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz` |
+| `metrics.token_file` | none | A file only seal's user can read, holding a token of at least 16 printable characters. Every request must then send `Authorization: Bearer <token>`. Required unless `metrics.listen` is a loopback address |
 
 A rule in a sealed policy can only tighten a limit, never relax one.
 
@@ -288,8 +289,10 @@ request too malformed to name a keyset.
 ## Health and metrics
 
 `/healthz` answers when the process is up, and `/readyz` when the key source answers;
-the key source is asked at most once in five seconds, however often `/readyz` is. The
-listener has no authentication: bind it to an address only the monitoring can reach.
+the key source is asked at most once in five seconds, however often `/readyz` is.
+On a loopback address the listener answers anyone on the host. On any other address
+seal does not start without `metrics.token_file`, and every request must then present
+the token: give it to the scraper as a bearer token, and to probes as a header.
 `/metrics` is in Prometheus format, with no keyset or item labels.
 
 ## Hardening
