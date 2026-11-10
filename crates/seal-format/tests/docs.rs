@@ -94,6 +94,8 @@ const OPTIONS: &[&str] = &[
     "verify",
     "hmac",
     "hash",
+    "allow_presign",
+    "max_expiry_s",
 ];
 
 fn policy_doc() -> String {

@@ -84,6 +84,7 @@ fn rule(rule: &Rule, definitions: &BTreeMap<PolicyName, Definition>) -> Result<(
     destination(&rule.destination)?;
     inject(&rule.inject)?;
     injection_fits_destination(rule)?;
+    presign_names_its_methods(rule)?;
     plain_http(rule)?;
     if let Some(methods) = &rule.methods {
         require(!methods.is_empty(), "a method list is empty")?;
@@ -276,7 +277,12 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             payload,
             allow_unsigned_payload,
             allow_headers,
+            allow_presign,
         } => {
+            if let Some(terms) = allow_presign {
+                presign(terms)?;
+                require(service == "s3", "only S3 URLs can be presigned")?;
+            }
             for (index, header) in allow_headers.iter().enumerate() {
                 require(
                     super::OPT_IN_AMZ_HEADERS.contains(&header.as_str()),
@@ -300,7 +306,20 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             }
             Ok(())
         }
-        Inject::AzureSharedKey { account, .. } => part(account),
+        Inject::AzureSharedKey {
+            account,
+            service,
+            allow_presign,
+        } => {
+            if let Some(terms) = allow_presign {
+                presign(terms)?;
+                require(
+                    *service == super::AzureService::Blob,
+                    "only a blob can have a shared access signature",
+                )?;
+            }
+            part(account)
+        }
         Inject::JwtAssertion {
             aud,
             claims,
@@ -320,6 +339,32 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         }
         Inject::PgPassword { .. } | Inject::Companion {} => Ok(()),
     }
+}
+
+fn presign(terms: &super::Presign) -> Result<(), FormatError> {
+    require(
+        (1..=super::MAX_PRESIGN_EXPIRY_S).contains(&terms.max_expiry_s),
+        "a presigned URL lasts between a second and seven days",
+    )
+}
+
+/// A presigned URL is used without seal, so its rule says which methods it may be for
+/// rather than leaving every method open.
+fn presign_names_its_methods(rule: &Rule) -> Result<(), FormatError> {
+    let allows = matches!(
+        &rule.inject,
+        Inject::AwsSigv4 {
+            allow_presign: Some(_),
+            ..
+        } | Inject::AzureSharedKey {
+            allow_presign: Some(_),
+            ..
+        }
+    );
+    require(
+        !allows || rule.methods.is_some(),
+        "a rule that allows presigning names its methods",
+    )
 }
 
 fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {

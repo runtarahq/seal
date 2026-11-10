@@ -422,6 +422,93 @@ fn json_pointers_must_be_valid_and_not_the_whole_document() {
     with_inject(json!({ "json_field": { "pointer": "/a~0b/c~1d" } })).unwrap();
 }
 
+fn s3_presign(change: impl FnOnce(&mut Value)) -> Result<Policy, FormatError> {
+    let mut rule = json!({
+        "destination": { "scheme": "https", "host": "s3.eu-west-1.amazonaws.com", "path_prefix": "/bucket/" },
+        "methods": ["GET"],
+        "inject": { "aws_sigv4": {
+            "region": "eu-west-1", "service": "s3",
+            "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
+            "payload": ["computed"],
+            "allow_presign": { "max_expiry_s": 900 }
+        } }
+    });
+    change(&mut rule);
+    parse(&json!({ "rules": [rule] }))
+}
+
+#[test]
+fn presigning_is_off_unless_a_rule_allows_it_with_a_limit_and_its_methods() {
+    let policy = s3_presign(|_| {}).unwrap();
+    assert!(matches!(
+        &policy.rules[0].inject,
+        Inject::AwsSigv4 {
+            allow_presign: Some(Presign { max_expiry_s: 900 }),
+            ..
+        }
+    ));
+    // Left out, it is off, and the policy is written as it always was.
+    let off = s3_presign(|rule| {
+        rule["inject"]["aws_sigv4"]
+            .as_object_mut()
+            .unwrap()
+            .remove("allow_presign");
+    })
+    .unwrap();
+    assert!(matches!(
+        &off.rules[0].inject,
+        Inject::AwsSigv4 {
+            allow_presign: None,
+            ..
+        }
+    ));
+    assert!(
+        !String::from_utf8(off.canonical_json().unwrap())
+            .unwrap()
+            .contains("presign")
+    );
+
+    let limit = |seconds: Value| {
+        s3_presign(|rule| rule["inject"]["aws_sigv4"]["allow_presign"]["max_expiry_s"] = seconds)
+    };
+    limit(json!(1)).unwrap();
+    limit(json!(604_800)).unwrap();
+    limit(json!(0)).unwrap_err();
+    limit(json!(604_801)).unwrap_err();
+    limit(json!("900")).unwrap_err();
+    s3_presign(|rule| rule["inject"]["aws_sigv4"]["allow_presign"] = json!({})).unwrap_err();
+    s3_presign(|rule| rule["inject"]["aws_sigv4"]["allow_presign"] = json!(true)).unwrap_err();
+
+    // A presigned URL is used without seal, so the rule says what for.
+    assert_eq!(
+        s3_presign(|rule| {
+            rule.as_object_mut().unwrap().remove("methods");
+        })
+        .unwrap_err(),
+        FormatError::InvalidPolicy("a rule that allows presigning names its methods")
+    );
+    // A presigned STS call is an identity, not a download.
+    s3_presign(|rule| rule["inject"]["aws_sigv4"]["service"] = json!("sts")).unwrap_err();
+}
+
+#[test]
+fn only_a_blob_can_have_a_shared_access_signature() {
+    let azure = |service: &str| {
+        with_rule(|rule| {
+            rule["destination"] = https_host("account.blob.core.windows.net");
+            rule["methods"] = json!(["GET"]);
+            rule["inject"] = json!({ "azure_shared_key": {
+                "account": { "literal": "account" }, "service": service,
+                "allow_presign": { "max_expiry_s": 3600 }
+            } });
+        })
+    };
+    azure("blob").unwrap();
+    for service in ["queue", "file", "table"] {
+        azure(service).unwrap_err();
+    }
+}
+
 #[test]
 fn an_injected_path_is_whole_segments_with_one_place_for_the_secret() {
     for prefix in ["/bot{}", "/{}", "/v1/{}/api", "/a:b@c/key={}"] {

@@ -367,7 +367,9 @@ pub fn build_head(
                     allow_unsigned: *allow_unsigned_payload,
                 });
             }
-            Inject::AzureSharedKey { account, service } => {
+            Inject::AzureSharedKey {
+                account, service, ..
+            } => {
                 let account = sources.part(account)?;
                 let signer =
                     secret.expose(|key| azure::Signer::new(key, &account, *service, now))?;

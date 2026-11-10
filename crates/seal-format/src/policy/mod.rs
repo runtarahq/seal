@@ -515,6 +515,9 @@ pub enum Inject {
         /// `X-Amz-*` headers the caller may also set, from [`OPT_IN_AMZ_HEADERS`].
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         allow_headers: Vec<String>,
+        /// Also lets the caller have a presigned URL, which it can copy and pass on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_presign: Option<Presign>,
     },
     /// As the account key in Azure Shared Key.
     AzureSharedKey {
@@ -522,6 +525,10 @@ pub enum Inject {
         account: Part,
         /// The Azure service.
         service: AzureService,
+        /// Also lets the caller have a shared access signature for one blob, which it
+        /// can copy and pass on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_presign: Option<Presign>,
     },
     /// As the key that signs a short-lived JWT.
     JwtAssertion {
@@ -551,6 +558,21 @@ pub enum Inject {
     /// Not used directly: another field's rule uses this value at this
     /// destination, and it may go nowhere else.
     Companion {},
+}
+
+/// The longest a presigned URL may last: seven days, which is S3's own limit.
+pub const MAX_PRESIGN_EXPIRY_S: u32 = 7 * 24 * 3600;
+
+/// The methods a URL can be presigned for.
+pub const PRESIGN_METHODS: &[Method] = &[Method::Get, Method::Head, Method::Put, Method::Delete];
+
+/// The terms on which a caller may have a presigned URL: a credential for one object
+/// that works without seal until it expires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Presign {
+    /// The longest a URL may last, in seconds.
+    pub max_expiry_s: u32,
 }
 
 /// `X-Amz-*` headers a caller may set on any SigV4 request, by prefix. They change what

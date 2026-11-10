@@ -308,6 +308,7 @@ pub fn aws(
         payload,
         allow_unsigned_payload: false,
         allow_headers: Vec::new(),
+        allow_presign: None,
     })
 }
 
@@ -324,7 +325,11 @@ pub fn azure(
     let destination = endpoint(endpoint_url)?;
     let mut parts = Parts::new(&destination);
     let account = parts.add(account);
-    parts.finish(Inject::AzureSharedKey { account, service })
+    parts.finish(Inject::AzureSharedKey {
+        account,
+        service,
+        allow_presign: None,
+    })
 }
 
 /// A TLS client certificate's private key.

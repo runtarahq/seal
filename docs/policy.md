@@ -212,6 +212,26 @@ otherwise. A copy source must be within the path prefix, which such a rule needs
 }] }
 ```
 
+`allow_presign` also lets the caller have a presigned URL for an object the rule allows,
+lasting at most `max_expiry_s`. It is a [weakening option](#weakening-options): the URL
+works without seal until it expires. The rule must name its `methods`, from `GET`,
+`HEAD`, `PUT` and `DELETE`, and its service must be `s3`.
+[`signing.md`](signing.md#presigned-urls) has what a URL covers.
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "s3.eu-west-1.amazonaws.com", "path_prefix": "/tenant-a/" },
+  "methods": ["GET"],
+  "inject": { "aws_sigv4": {
+    "region": "eu-west-1",
+    "service": "s3",
+    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
+    "payload": ["computed"],
+    "allow_presign": { "max_expiry_s": 900 }
+  } }
+}] }
+```
+
 ### `azure_shared_key`
 
 The secret is the account key. `service` is `blob`, `queue`, `file` or `table`.
@@ -220,6 +240,20 @@ The secret is the account key. `service` is `blob`, `queue`, `file` or `table`.
 { "rules": [{
   "destination": { "scheme": "https", "host": "account.blob.core.windows.net" },
   "inject": { "azure_shared_key": { "account": { "literal": "account" }, "service": "blob" } }
+}] }
+```
+
+With `allow_presign`, the caller may have a shared access signature for one blob, as for
+`aws_sigv4`. The service must be `blob`.
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "account.blob.core.windows.net", "path_prefix": "/exports/" },
+  "methods": ["GET"],
+  "inject": { "azure_shared_key": {
+    "account": { "literal": "account" }, "service": "blob",
+    "allow_presign": { "max_expiry_s": 900 }
+  } }
 }] }
 ```
 
@@ -521,6 +555,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |
 | `allow_headers` | `aws_sigv4` | Lets the caller set ACL, grant or copy headers |
+| `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
 | `allow_replication` | A Postgres destination | Allows a replication session |
