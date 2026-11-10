@@ -28,6 +28,17 @@ pub struct MockPostgres {
     task: JoinHandle<()>,
 }
 
+/// What the server does with a login.
+#[derive(Clone)]
+enum Login {
+    /// Accepts it without asking for anything.
+    AtOnce,
+    /// Runs SCRAM-SHA-256 for this password.
+    Scram(Vec<u8>),
+    /// Never answers.
+    Never,
+}
+
 impl Drop for MockPostgres {
     fn drop(&mut self) {
         self.task.abort();
@@ -42,7 +53,7 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start(host: &str, tls: bool) -> Self {
-        Self::start_inner(host, tls, None).await
+        Self::start_inner(host, tls, Login::AtOnce).await
     }
 
     /// Starts a server with a certificate for `host` that logs a client in with
@@ -52,10 +63,20 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start_scram(host: &str, password: &[u8]) -> Self {
-        Self::start_inner(host, true, Some(password.to_vec())).await
+        Self::start_inner(host, true, Login::Scram(password.to_vec())).await
     }
 
-    async fn start_inner(host: &str, tls: bool, password: Option<Vec<u8>>) -> Self {
+    /// Starts a server with a certificate for `host` that completes TLS, reads the
+    /// startup, and then says nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it cannot listen or make certificates.
+    pub async fn start_silent(host: &str) -> Self {
+        Self::start_inner(host, true, Login::Never).await
+    }
+
+    async fn start_inner(host: &str, tls: bool, login: Login) -> Self {
         let pki = TestPki::new("db CA");
         let issued = pki.server(&[host]);
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -79,7 +100,7 @@ impl MockPostgres {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let (acceptor, recorded) = (acceptor.clone(), Arc::clone(&recorded));
-                tokio::spawn(serve(stream, acceptor, recorded, tls, password.clone()));
+                tokio::spawn(serve(stream, acceptor, recorded, tls, login.clone()));
             }
         });
         Self {
@@ -126,7 +147,7 @@ async fn serve(
     acceptor: TlsAcceptor,
     recorded: Arc<Mutex<Vec<Vec<u8>>>>,
     tls: bool,
-    password: Option<Vec<u8>>,
+    login: Login,
 ) {
     let mut request = [0; 8];
     if stream.read_exact(&mut request).await.is_err() || request != SSL_REQUEST {
@@ -157,10 +178,19 @@ async fn serve(
     if cancel {
         return;
     }
-    if let Some(password) = password
-        && scram(&mut stream, &password).await.is_none()
-    {
-        return;
+    match login {
+        Login::AtOnce => {}
+        Login::Scram(password) => {
+            if scram(&mut stream, &password).await.is_none() {
+                return;
+            }
+        }
+        Login::Never => {
+            // Holds the connection open until the client gives up.
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest).await;
+            return;
+        }
     }
     // AuthenticationOk, then ReadyForQuery.
     let hello = [b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'Z', 0, 0, 0, 5, b'I'];

@@ -291,6 +291,29 @@ async fn a_server_that_asks_for_no_password_is_not_logged_in_to() {
 }
 
 #[tokio::test]
+async fn a_server_that_goes_quiet_during_the_login_is_given_up_on() {
+    let server = MockPostgres::start_silent(HOST).await;
+    let mut options = Options::default();
+    options.network.honour_private_rules = true;
+    options.limits.connect_timeout = std::time::Duration::from_millis(300);
+    let harness = Harness::with(options);
+    let password = harness.seal("password", b"pw", &password_policy(&server));
+    let (mut caller, task) = session(
+        &harness,
+        connect_request(&server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    let refusal = read_message(&mut caller).await;
+    assert_eq!(refusal.tag, b'E');
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        ErrorCode::UpstreamTimeout
+    );
+    assert_eq!(server.packets().len(), 1, "the startup was sent");
+}
+
+#[tokio::test]
 async fn a_cancel_is_forwarded_as_sent() {
     let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();

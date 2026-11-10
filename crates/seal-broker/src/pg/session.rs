@@ -203,7 +203,22 @@ impl PgSession {
             client_cert: self.client_cert.is_some(),
             end_point,
         };
-        let outcome = login::login(&mut server, &credentials).await;
+        // The login has the deadline the connection had: a server that goes quiet
+        // after the handshake would otherwise hold this session for as long as it likes.
+        let outcome = tokio::time::timeout(
+            self.connect_timeout,
+            login::login(&mut server, &credentials),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(LoginFailed {
+                error: BrokerError::new(
+                    ErrorCode::UpstreamTimeout,
+                    "the server did not finish the login in time",
+                ),
+                sqlstate: "08006".to_owned(),
+            })
+        });
         drop(password);
         self.client_cert = None;
         let (method, before_ok) = outcome.map_err(|LoginFailed { error, sqlstate }| {
