@@ -225,6 +225,27 @@ pub struct ConnectRequest {
     pub port: u16,
 }
 
+/// A URL to presign, for a request the caller could have sent through seal. It holds
+/// no credentials; what comes back is one.
+pub struct PresignRequest {
+    /// Who is asking, for the audit record.
+    pub caller: String,
+    /// The keyset the values are sealed to.
+    pub keyset: KeysetId,
+    /// The record the values belong to.
+    pub item: ItemId,
+    /// The sealed values, by field name.
+    pub sealed: BTreeMap<FieldName, Presented>,
+    /// Plain parts of a credential, by field name.
+    pub plain: BTreeMap<FieldName, String>,
+    /// The method the URL is for: `GET`, `HEAD`, `PUT` or `DELETE`.
+    pub method: HttpMethod,
+    /// The URL of the object, which is refused if a parser would rewrite it.
+    pub url: String,
+    /// How long the URL is to last, in seconds, within what the rule allows.
+    pub expires_s: u32,
+}
+
 /// A message to check against a sealed secret: a webhook and its signature. It holds
 /// no credentials.
 pub struct VerifyRequest {
@@ -329,6 +350,7 @@ impl Broker {
             code: None,
             pg_auth: None,
             verified: None,
+            expires_s: None,
         };
         match self.prepare_session(request, &mut record).await {
             Ok(session) => Ok(session),
@@ -441,6 +463,91 @@ impl Broker {
             record: Some(record),
             started: tokio::time::Instant::now(),
         })
+    }
+
+    /// Presigns a URL: an S3 presigned URL or a Blob shared access signature for one
+    /// object, where the value's rule sets `allow_presign`. The caller can copy what
+    /// comes back and use it without seal until it expires, so this is refused unless
+    /// the rule allows it, for this long, for a request it would let seal send. Every
+    /// call leaves one audit record, with the lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BrokerError`] with the reason, which never includes a value or the
+    /// URL.
+    pub async fn presign(&self, request: PresignRequest) -> Result<String, BrokerError> {
+        let mut record = self.first_record(
+            "presign",
+            &request.caller,
+            &request.keyset,
+            &request.item,
+            &request.sealed,
+        );
+        request.method.as_str().clone_into(&mut record.method);
+        record.expires_s = Some(request.expires_s);
+        let mut audit = AuditGuard::new(Arc::clone(&self.audit), record, Arc::new(Progress::new()));
+        match self.presign_audited(request, &mut audit).await {
+            Ok(url) => {
+                audit.finish(Outcome::Ok, None).map_err(|_| {
+                    BrokerError::new(ErrorCode::Internal, "could not write the audit record")
+                })?;
+                Ok(url)
+            }
+            Err(error) => {
+                // The caller hears the refusal either way.
+                let _ = audit.finish(Outcome::Refused, Some(error.code()));
+                Err(error)
+            }
+        }
+    }
+
+    async fn presign_audited(
+        &self,
+        request: PresignRequest,
+        audit: &mut AuditGuard,
+    ) -> Result<String, BrokerError> {
+        let PresignRequest {
+            keyset,
+            item,
+            sealed,
+            plain,
+            method,
+            url,
+            expires_s,
+            ..
+        } = request;
+        let target = Target::parse(&url)?;
+        audit.update(|record| {
+            record.host = Some(target.host.clone());
+            record.path = Some(target.path.clone());
+        });
+        let method = policy_method(&method)?;
+        let (secrets, policies, _) = self.open_all(&keyset, &item, &sealed).await?;
+        let names: BTreeSet<FieldName> = plain.keys().cloned().collect();
+        let plan = decide(
+            &policies,
+            &RequestHead {
+                endpoint: Endpoint::Http(&target),
+                method,
+                header_names: &[],
+                plain: &names,
+                copy_source: None,
+            },
+        )?;
+        audit.update(|record| record.rules = plan.rules.values().copied().collect());
+        drop(policies);
+        let presigned = crate::presign::presigned_url(
+            &plan,
+            &target,
+            method,
+            expires_s,
+            &Sources {
+                secrets: &secrets,
+                plain: &plain,
+            },
+            self.clock.now(),
+        )?;
+        Ok(presigned.as_str().to_owned())
     }
 
     /// Says whether a message's authentication code was made with a sealed secret, whose
@@ -620,6 +727,7 @@ impl Broker {
             code: None,
             pg_auth: None,
             verified: None,
+            expires_s: None,
         }
     }
 

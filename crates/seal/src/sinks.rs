@@ -124,6 +124,7 @@ mod tests {
             code: None,
             pg_auth: None,
             verified: None,
+            expires_s: None,
         }
     }
 

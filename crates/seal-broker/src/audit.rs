@@ -53,6 +53,8 @@ pub struct AuditRecord {
     pub pg_auth: Option<&'static str>,
     /// For `verify`: whether the code matched.
     pub verified: Option<bool>,
+    /// For `presign`: how long the URL lasts, in seconds.
+    pub expires_s: Option<u32>,
 }
 
 /// How a request ended.
@@ -194,6 +196,7 @@ mod tests {
             code: None,
             pg_auth: None,
             verified: None,
+            expires_s: None,
         }
     }
 
@@ -213,6 +216,7 @@ mod tests {
                 "bytes_out",
                 "caller",
                 "code",
+                "expires_s",
                 "fields",
                 "host",
                 "item",

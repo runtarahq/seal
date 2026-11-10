@@ -14,13 +14,14 @@ pub mod inject;
 pub mod matcher;
 pub mod net;
 pub mod pg;
+mod presign;
 pub mod relay;
 pub mod response_seal;
 pub mod target;
 pub mod verify;
 
 pub use broker::{
-    Broker, BrokerConfig, ConnectRequest, Environment, Limits, Presented, SendRequest,
-    SendResponse, VerifyRequest,
+    Broker, BrokerConfig, ConnectRequest, Environment, Limits, Presented, PresignRequest,
+    SendRequest, SendResponse, VerifyRequest,
 };
 pub use error::{BrokerError, ErrorCode};
