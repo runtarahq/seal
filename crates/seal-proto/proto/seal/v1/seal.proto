@@ -1,0 +1,158 @@
+// The seal protocol. Stable from the first release; breaking changes go to seal.v2.
+// docs/protocol.md describes how the messages are used.
+syntax = "proto3";
+
+package seal.v1;
+
+service Seal {
+  // An HTTP request using sealed values. The first message is the head, then body
+  // chunks, then an end. The reply is a head, body chunks, and a trailer on failure.
+  rpc Send(stream SendIn) returns (stream SendOut);
+  // A Postgres session using sealed values.
+  rpc Connect(stream ConnectIn) returns (stream ConnectOut);
+  // Administrative: makes a keyset's first key.
+  rpc GenerateKeyset(KeysetRequest) returns (WrappedKeyReply);
+  // Administrative: adds a key, which becomes current.
+  rpc Rotate(KeysetRequest) returns (WrappedKeyReply);
+  // Administrative: a keyset's public keys.
+  rpc PublicKeys(KeysetRequest) returns (PublicKeysReply);
+  // The deployment mode, version and limits. Any caller.
+  rpc Info(Empty) returns (InfoReply);
+}
+
+message Empty {}
+
+message Header {
+  string name = 1;
+  bytes value = 2;
+}
+
+message SendIn {
+  oneof f {
+    SendHead head = 1;
+    bytes body = 2;
+    Empty end = 3;
+  }
+}
+
+message SendHead {
+  string keyset = 1;
+  string item = 2;
+  // Field name to envelope JSON.
+  map<string, string> sealed = 3;
+  // Field name to value.
+  map<string, string> plain = 4;
+  string method = 5;
+  string url = 6;
+  repeated Header headers = 7;
+  RequestOptions options = 8;
+  // Field name to item, for a sealed value bound to another record than the
+  // request's: a shared value. Its keyset is the envelope's.
+  map<string, string> items = 9;
+}
+
+// Reserved for options within the configured limits, such as a SigV4 payload mode.
+message RequestOptions {}
+
+message SendOut {
+  oneof f {
+    ResponseHead head = 1;
+    bytes body = 2;
+    Trailer trailer = 3;
+  }
+}
+
+message ResponseHead {
+  uint32 status = 1;
+  repeated Header headers = 2;
+  // Field name to envelope JSON, for values sealed from the response.
+  map<string, string> sealed_fields = 3;
+}
+
+// Ends a reply that failed after its head was sent.
+message Trailer {
+  ErrorCode code = 1;
+  // Identifiers and static text only.
+  string detail = 2;
+}
+
+message ConnectIn {
+  oneof f {
+    ConnectHead head = 1;
+    bytes data = 2;
+  }
+}
+
+message ConnectHead {
+  string keyset = 1;
+  string item = 2;
+  map<string, string> sealed = 3;
+  map<string, string> plain = 4;
+  string host = 5;
+  uint32 port = 6;
+  // Field name to item, for a shared value from another record, as in SendHead.
+  map<string, string> items = 7;
+}
+
+message ConnectOut {
+  oneof f {
+    bytes data = 1;
+    Trailer trailer = 2;
+  }
+}
+
+message KeysetRequest {
+  string keyset = 1;
+}
+
+// A wrapped private key, for the application to store if seal's key source cannot.
+message WrappedKeyReply {
+  string keyset = 1;
+  string kid = 2;
+  string public = 3;
+  uint64 created = 4;
+  string wrap_id = 5;
+  string wrapped = 6;
+}
+
+message PublicKeysReply {
+  repeated PublicKey keys = 1;
+}
+
+message PublicKey {
+  string kid = 1;
+  // base64url.
+  string public = 2;
+  uint64 created = 3;
+}
+
+message InfoReply {
+  // "in_process", "unix" or "mtls".
+  string mode = 1;
+  string version = 2;
+  uint64 buffer_cap = 3;
+  uint64 max_body_chunk = 4;
+}
+
+// Each name matches the code seal reports in the seal-error-code metadata.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  CALLER_DENIED = 1;
+  BAD_REQUEST = 2;
+  OPEN_FAILED = 3;
+  KEYSET_UNKNOWN = 4;
+  KEYS_UNAVAILABLE = 5;
+  POLICY_DENIED = 6;
+  DESTINATION_REFUSED = 7;
+  CONFLICT = 8;
+  BODY_TOO_LARGE = 9;
+  RESPONSE_TOO_LARGE = 10;
+  RESPONSE_UNPARSEABLE = 11;
+  UPSTREAM_CONNECT = 12;
+  UPSTREAM_TLS = 13;
+  UPSTREAM_TIMEOUT = 14;
+  UPSTREAM_RESET = 15;
+  PG_AUTH_FAILED = 16;
+  LIMIT_EXCEEDED = 17;
+  INTERNAL = 18;
+}

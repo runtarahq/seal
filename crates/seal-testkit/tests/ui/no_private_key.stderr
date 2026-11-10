@@ -1,0 +1,27 @@
+error[E0433]: cannot find `PrivateKey` in `seal_format`
+ --> tests/ui/no_private_key.rs:2:26
+  |
+2 |     let _ = seal_format::PrivateKey::generate();
+  |                          ^^^^^^^^^^ could not find `PrivateKey` in `seal_format`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/seal-format/src/lib.rs
+  |
+  | #[cfg(feature = "open")]
+  |       ---------------- the item is gated behind the `open` feature
+  | pub use seal::{PrivateKey, Sealed, open};
+  |                ^^^^^^^^^^
+
+error[E0433]: cannot find `PrivateKey` in `seal`
+ --> tests/ui/no_private_key.rs:3:32
+  |
+3 |     let _ = seal_format::seal::PrivateKey::generate();
+  |                                ^^^^^^^^^^ could not find `PrivateKey` in `seal`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/seal-format/src/seal.rs
+  |
+  | #[cfg(feature = "open")]
+  |       ---------------- the item is gated behind the `open` feature
+  | pub use opening::{PrivateKey, Sealed, open};
+  |                   ^^^^^^^^^^

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/runtarahq/seal"
+# Not on crates.io yet; names are settled first.
+publish = false
+
+[workspace.dependencies]
+seal-broker = { path = "crates/seal-broker", version = "0.1.0" }
+seal-client = { path = "crates/seal-client", version = "0.1.0" }
+seal-format = { path = "crates/seal-format", version = "0.1.0" }
+seal-keys = { path = "crates/seal-keys", version = "0.1.0" }
+seal-proto = { path = "crates/seal-proto", version = "0.1.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# The test exemptions for these lints are in clippy.toml.
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+unwrap_used = "deny"

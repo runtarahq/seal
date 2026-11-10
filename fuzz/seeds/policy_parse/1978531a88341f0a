@@ -1,0 +1,1 @@
+{"rules": [{"destination": {"host": "api.example.com", "scheme": "https"}, "inject": {"header": {"format": "Bearer {}", "name": "Authorization"}}, "seal_response": {"fields": [{"as": "a", "at": "/a", "policy": {"rules": []}}], "format": "json"}}]}

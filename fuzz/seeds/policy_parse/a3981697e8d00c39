@@ -1,0 +1,1 @@
+{"rules":[{"destination":{"scheme":"https","host":"api.example.com","path_prefix":"/v2/"},"inject":{"header":{"name":"Authorization","format":"Bearer {}"}}}]}

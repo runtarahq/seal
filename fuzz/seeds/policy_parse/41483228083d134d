@@ -1,0 +1,1 @@
+{"rules": [{"destination": {"host": "api.example.com", "scheme": "https"}, "inject": {"jwt_assertion": {"alg": "RS256", "aud": "token_endpoint", "claims": {"iss": "c"}, "form_field": "assertion", "max_lifetime_s": 300}}}]}

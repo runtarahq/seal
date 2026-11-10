@@ -1,0 +1,1 @@
+{"rules":[{"destination":{"scheme":"https","host":"api.example.com"},"inject":{"client_cert":{"cert":{"field":"cert"}}},"plain":["cert"]}]}

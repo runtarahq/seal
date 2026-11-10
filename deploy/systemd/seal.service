@@ -1,0 +1,66 @@
+# seal as a process on the same host as the application. See docs/operations.md.
+#
+# Install the binary as /usr/local/bin/seal, the configuration as
+# /etc/seal/seal.toml, and create the user: `useradd --system --no-create-home seal`.
+# Give the application's user access to the socket by adding it to group `seal-clients`.
+
+[Unit]
+Description=seal credential broker
+Documentation=https://github.com/runtarahq/seal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=seal
+Group=seal
+SupplementaryGroups=
+ExecStartPre=/usr/local/bin/seal check-config --config /etc/seal/seal.toml
+ExecStart=/usr/local/bin/seal serve --config /etc/seal/seal.toml
+Restart=on-failure
+RestartSec=2s
+
+# The socket, keys and audit log.
+RuntimeDirectory=seal
+RuntimeDirectoryMode=0750
+StateDirectory=seal
+StateDirectoryMode=0700
+LogsDirectory=seal
+LogsDirectoryMode=0700
+UMask=0077
+
+# Hardening. seal needs nothing beyond its own directories and the network.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=mlock mlockall
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitCORE=0
+
+# Match limits.memory_budget in /etc/seal/seal.toml. LimitMEMLOCK lets seal lock all
+# of its memory, so key pages never reach swap.
+MemoryMax=2G
+LimitMEMLOCK=2G
+
+[Install]
+WantedBy=multi-user.target

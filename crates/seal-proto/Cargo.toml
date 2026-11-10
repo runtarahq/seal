@@ -1,0 +1,21 @@
+[package]
+name = "seal-proto"
+description = "gRPC protocol definitions for seal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "transport"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+protox = "0.10"
+tonic-prost-build = "0.14"
+
+[lints]
+workspace = true

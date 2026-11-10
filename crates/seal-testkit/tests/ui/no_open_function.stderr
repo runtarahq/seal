@@ -1,0 +1,27 @@
+error[E0425]: cannot find value `open` in crate `seal_format`
+ --> tests/ui/no_open_function.rs:2:26
+  |
+2 |     let _ = seal_format::open;
+  |                          ^^^^ not found in `seal_format`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/seal-format/src/lib.rs
+  |
+  | #[cfg(feature = "open")]
+  |       ---------------- the item is gated behind the `open` feature
+  | pub use seal::{PrivateKey, Sealed, open};
+  |                                    ^^^^
+
+error[E0425]: cannot find value `open` in module `seal_format::seal`
+ --> tests/ui/no_open_function.rs:3:32
+  |
+3 |     let _ = seal_format::seal::open;
+  |                                ^^^^ not found in `seal_format::seal`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/seal-format/src/seal.rs
+  |
+  | #[cfg(feature = "open")]
+  |       ---------------- the item is gated behind the `open` feature
+  | pub use opening::{PrivateKey, Sealed, open};
+  |                                       ^^^^

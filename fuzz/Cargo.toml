@@ -1,0 +1,110 @@
+[package]
+name = "seal-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+form_urlencoded = "1"
+http = "1"
+libfuzzer-sys = "0.4"
+prost = "0.14"
+quick-xml = { version = "0.42", default-features = false }
+seal = { path = "../crates/seal" }
+seal-broker = { path = "../crates/seal-broker" }
+seal-format = { path = "../crates/seal-format" }
+seal-proto = { path = "../crates/seal-proto" }
+tokio = { version = "1", features = ["io-util", "rt"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+zeroize = "1"
+
+# Not part of the main workspace, because it needs a nightly toolchain.
+[workspace]
+
+[[bin]]
+name = "envelope_parse"
+path = "fuzz_targets/envelope_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_parse"
+path = "fuzz_targets/policy_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_match"
+path = "fuzz_targets/url_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "address_classify"
+path = "fuzz_targets/address_classify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "form_inject"
+path = "fuzz_targets/form_inject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_inject"
+path = "fuzz_targets/json_inject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_seal_json"
+path = "fuzz_targets/response_seal_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_seal_form"
+path = "fuzz_targets/response_seal_form.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_seal_xml"
+path = "fuzz_targets/response_seal_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pg_preamble"
+path = "fuzz_targets/pg_preamble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pg_auth_messages"
+path = "fuzz_targets/pg_auth_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_send_head"
+path = "fuzz_targets/proto_send_head.rs"
+test = false
+doc = false
+bench = false

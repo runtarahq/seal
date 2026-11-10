@@ -1,0 +1,1 @@
+{"rules": [{"destination": {"host": "auth.example.com", "path_prefix": "/token", "scheme": "https"}, "inject": {"jwt_assertion": {"alg": "RS256", "claims": {"iss": "c"}, "form_field": "assertion", "max_lifetime_s": 300}}}]}

@@ -1,0 +1,44 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+# Mozilla's root certificates, as data. The TLS roots seal verifies providers against.
+exceptions = [
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
+
+[bans]
+# One TLS stack: no OpenSSL or native-tls, and one major version each of
+# rustls and hyper. Duplicates of anything else are worth seeing but not fatal.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+  { crate = "openssl" },
+  { crate = "openssl-sys" },
+  { crate = "native-tls" },
+  { crate = "hyper", deny-multiple-versions = true },
+  { crate = "rustls", deny-multiple-versions = true },
+]
+
+[sources]
+# crates.io only: no git dependencies and no other registries.
+unknown-git = "deny"
+unknown-registry = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

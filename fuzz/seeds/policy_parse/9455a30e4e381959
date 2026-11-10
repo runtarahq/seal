@@ -1,0 +1,1 @@
+{"rules":[{"destination":{"scheme":"postgres","host":"db.example.com","port":5432,"databases":["app"],"user":{"literal":"app_user"}},"inject":{"pg_password":{}}}]}

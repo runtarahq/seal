@@ -1,0 +1,1 @@
+{"rules": [{"destination": {"host": "API.example.com", "scheme": "https"}, "inject": {"header": {"format": "Bearer {}", "name": "Authorization"}}}]}

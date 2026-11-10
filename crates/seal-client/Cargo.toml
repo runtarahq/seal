@@ -1,0 +1,38 @@
+[package]
+name = "seal-client"
+description = "Client for applications using seal: in-process, Unix socket or mTLS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Links the opening code. Without it, an application cannot open sealed values.
+in-process = ["dep:seal-broker", "dep:seal-keys"]
+# `cancel_pg`, for a tokio-postgres cancel token.
+postgres = ["dep:tokio-postgres"]
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+futures-util = "0.3"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+seal-broker = { workspace = true, optional = true }
+seal-format.workspace = true
+seal-keys = { workspace = true, optional = true }
+seal-proto.workspace = true
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
+tokio-postgres = { version = "0.7", default-features = false, optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "transport"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+
+[lints]
+workspace = true

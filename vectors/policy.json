@@ -1,0 +1,346 @@
+{
+  "description": "Policies a validator must accept, in canonical form, and refuse. See docs/policy.md.",
+  "invalid": [
+    {
+      "name": "no rules",
+      "policy": {
+        "rules": []
+      }
+    },
+    {
+      "name": "unknown field",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "extra": 1,
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "wildcard host",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "*.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "uppercase host",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "API.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dot segment in path prefix",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "path_prefix": "/v2/../admin",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "encoded separator in path prefix",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "path_prefix": "/v2%2fadmin",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "plain http without the flag",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "http"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "template without a placeholder",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "x",
+                "name": "A"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "header a rule may not inject into",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "{}",
+                "name": "Host"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "JWT with no audience",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "auth.example.com",
+              "path_prefix": "/token",
+              "scheme": "https"
+            },
+            "inject": {
+              "jwt_assertion": {
+                "alg": "RS256",
+                "claims": {
+                  "iss": "c"
+                },
+                "form_field": "assertion",
+                "max_lifetime_s": 300
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "JWT audience as an array",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "auth.example.com",
+              "path_prefix": "/token",
+              "scheme": "https"
+            },
+            "inject": {
+              "jwt_assertion": {
+                "alg": "RS256",
+                "aud": {
+                  "value": [
+                    "a",
+                    "b"
+                  ]
+                },
+                "claims": {
+                  "iss": "c"
+                },
+                "form_field": "assertion",
+                "max_lifetime_s": 300
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "JWT without an exact token path",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "jwt_assertion": {
+                "alg": "RS256",
+                "aud": "token_endpoint",
+                "claims": {
+                  "iss": "c"
+                },
+                "form_field": "assertion",
+                "max_lifetime_s": 300
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "response field naming an unknown definition",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            },
+            "seal_response": {
+              "fields": [
+                {
+                  "as": "a",
+                  "at": "/a",
+                  "policy": "missing"
+                }
+              ],
+              "format": "json"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested response policy",
+      "policy": {
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            },
+            "seal_response": {
+              "fields": [
+                {
+                  "as": "a",
+                  "at": "/a",
+                  "policy": {
+                    "rules": []
+                  }
+                }
+              ],
+              "format": "json"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "valid": [
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\",\"path_prefix\":\"/v2/\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}}]}",
+      "name": "bearer"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\",\"port\":8443},\"inject\":{\"header\":{\"name\":\"X-Api-Key\",\"format\":\"{}\"}}}]}",
+      "name": "api key header"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\"},\"inject\":{\"basic\":{\"username\":{\"field\":\"username\"}}},\"plain\":[\"username\"]}]}",
+      "name": "basic auth with a plain username"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/token\"},\"inject\":{\"form_field\":{\"name\":\"client_secret\"}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}},{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/revoke\"},\"inject\":{\"form_field\":{\"name\":\"client_secret\"}}}],\"definitions\":{\"api\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\",\"path_prefix\":\"/v2/\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}},{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/revoke\"},\"inject\":{\"form_field\":{\"name\":\"token\"}}}]},\"refresh\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/token\"},\"inject\":{\"form_field\":{\"name\":\"refresh_token\"}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}},{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/revoke\"},\"inject\":{\"form_field\":{\"name\":\"token\"}}}]}}}",
+      "name": "OAuth client with a rotating refresh token"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/token\"},\"inject\":{\"jwt_assertion\":{\"alg\":\"PS256\",\"aud\":\"token_endpoint\",\"claims\":{\"iss\":\"client\",\"sub\":\"client\"},\"header\":{\"kid\":\"k1\"},\"form_field\":\"client_assertion\",\"max_lifetime_s\":300}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}}],\"definitions\":{\"api\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}}]},\"refresh\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/token\"},\"inject\":{\"form_field\":{\"name\":\"refresh_token\"}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}}]}}}",
+      "name": "private key JWT, audience is the token endpoint"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/token\"},\"inject\":{\"jwt_assertion\":{\"alg\":\"PS256\",\"aud\":{\"value\":\"https://tenant.example.com/\"},\"claims\":{\"iss\":\"client\",\"sub\":\"client\"},\"header\":{\"kid\":\"k1\"},\"form_field\":\"client_assertion\",\"max_lifetime_s\":300}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}}],\"definitions\":{\"api\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}}]},\"refresh\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path_prefix\":\"/oauth/token\"},\"inject\":{\"form_field\":{\"name\":\"refresh_token\"}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}}]}}}",
+      "name": "private key JWT, exact audience with a trailing slash"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"s3.eu-west-1.amazonaws.com\"},\"inject\":{\"aws_sigv4\":{\"region\":\"eu-west-1\",\"service\":\"s3\",\"access_key_id\":{\"field\":\"access_key_id\"},\"session_token\":{\"field\":\"session_token\"},\"payload\":[\"computed\",\"caller_hash\"]}},\"plain\":[\"access_key_id\"]}]}",
+      "name": "AWS with a sealed session token"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"account.table.core.windows.net\"},\"inject\":{\"azure_shared_key\":{\"account\":{\"literal\":\"account\"},\"service\":\"table\"}}}]}",
+      "name": "Azure Table"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\"},\"inject\":{\"client_cert\":{\"cert\":{\"field\":\"cert\"}}},\"plain\":[\"cert\"]}]}",
+      "name": "client certificate"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"postgres\",\"host\":\"db.example.com\",\"port\":5432,\"databases\":[\"app\"],\"user\":{\"literal\":\"app_user\"}},\"inject\":{\"pg_password\":{}}}]}",
+      "name": "Postgres"
+    }
+  ]
+}

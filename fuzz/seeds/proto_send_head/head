@@ -1,0 +1,6 @@
+
+acmec_1D
+token;{"v":1,"keyset":"acme","kid":"k1","enc":"AAAA","ct":"AAAA"}"
+userapp*GET2 https://api.example.com/v2/x?a=1:
+accept*/*J
+token	oauth-app

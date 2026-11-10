@@ -1,0 +1,13 @@
+error[E0425]: cannot find value `seal_with_ephemeral_ikm` in module `seal_format::seal`
+ --> tests/ui/no_fixed_randomness.rs:2:32
+  |
+2 |     let _ = seal_format::seal::seal_with_ephemeral_ikm;
+  |                                ^^^^^^^^^^^^^^^^^^^^^^^ not found in `seal_format::seal`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/seal-format/src/seal.rs
+  |
+  | #[cfg(feature = "test-vectors")]
+  |       ------------------------ the item is gated behind the `test-vectors` feature
+  | pub use deterministic::seal_with_ephemeral_ikm;
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^

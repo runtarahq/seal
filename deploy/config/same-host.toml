@@ -1,0 +1,61 @@
+# seal as a process on the same host as the application, on a Unix socket.
+# Callers are identified by uid. See docs/operations.md.
+
+[listen]
+unix = "/run/seal/seal.sock"
+
+[[callers]]
+name = "runtara-server"
+unix_uid = 990                          # the application's uid
+keysets = ["*"]
+
+[[callers]]
+name = "operator"
+unix_uid = 0                            # root, for generate and rotate; seal itself never runs as root
+keysets = []
+admin = true
+
+[keys]
+source = { dir = "/var/lib/seal/keys" }
+wrap = { file = "/etc/seal/kek" }       # 32 bytes, readable only by seal's user
+idle_evict = "15m"
+refresh_interval = "60s"
+max_stale = "5m"
+max_unwrap_age = "1h"
+max_loaded_keysets = 1024
+max_keys_per_keyset = 16
+max_live_keys = 4096
+max_tracked_keysets = 4096
+lock_memory = "best_effort"             # off | best_effort | required
+
+[network]
+deny_cidrs = []
+allow_private_cidrs = []
+honour_private_rules = false
+
+[pools]
+max_upstream_connections = 1024
+max_idle_per_host = 8
+idle_timeout = "90s"
+
+[limits]
+max_concurrent_streams = 512
+per_stream_buffer = "256KiB"
+max_concurrent_buffered = 64
+buffer_cap = "1MiB"
+max_head = "256KiB"
+max_caller_connections = 256
+idle_timeout = "60s"
+connect_timeout = "10s"
+first_byte_timeout = "60s"
+buffered_total_timeout = "60s"
+rate_per_caller = "1000/s"
+rate_per_keyset = "200/s"
+memory_budget = "2GiB"                  # check-config prints how the ceiling adds up
+
+[audit]
+sink = { file = "/var/log/seal/audit.jsonl" }
+on_failure = "fail_closed"
+
+[metrics]
+listen = "127.0.0.1:9464"

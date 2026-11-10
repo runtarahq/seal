@@ -1,0 +1,1 @@
+{"rules":[{"destination":{"scheme":"https","host":"s3.eu-west-1.amazonaws.com"},"inject":{"aws_sigv4":{"region":"eu-west-1","service":"s3","access_key_id":{"field":"access_key_id"},"session_token":{"field":"session_token"},"payload":["computed","caller_hash"]}},"plain":["access_key_id"]}]}

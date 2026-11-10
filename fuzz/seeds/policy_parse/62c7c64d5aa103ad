@@ -1,0 +1,1 @@
+{"rules":[{"destination":{"scheme":"https","host":"account.table.core.windows.net"},"inject":{"azure_shared_key":{"account":{"literal":"account"},"service":"table"}}}]}

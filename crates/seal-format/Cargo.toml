@@ -1,0 +1,44 @@
+[package]
+name = "seal-format"
+description = "Envelope, HPKE and policy types for seal: sealing with a public key, opening behind a feature"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Off by default, so that a sealing-only build contains no opening code.
+open = []
+# Sealing with fixed randomness, which breaks the encryption if used for real.
+# Only tests enable it.
+test-vectors = []
+# The sealing half for browsers. Does not enable `open`.
+wasm = ["dep:getrandom", "dep:wasm-bindgen", "getrandom/wasm_js"]
+
+[dependencies]
+base64 = "0.23"
+getrandom = { version = "0.4", optional = true }
+hpke = { version = "=0.15.1", default-features = false, features = ["aes", "alloc", "getrandom", "x25519"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+wasm-bindgen = { version = "0.2", optional = true }
+zeroize = "1"
+
+[dev-dependencies]
+# The crate's own tests use every feature.
+seal-format = { workspace = true, features = ["open", "test-vectors"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true
