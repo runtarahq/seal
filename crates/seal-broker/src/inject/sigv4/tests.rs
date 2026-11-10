@@ -191,7 +191,7 @@ fn the_s3_get_object_example_signs_as_documented() {
 /// "Example: PUT Object" with chunked signing, in the Amazon S3 API reference.
 #[test]
 fn the_s3_chunked_upload_example_signs_as_documented() {
-    assert_eq!(framed_length(66_560), 66_824);
+    assert_eq!(framed_length(66_560), Some(66_824));
     let signer = s3_signer(
         Payload::Streaming {
             decoded_length: 66_560,
@@ -236,7 +236,7 @@ fn the_s3_chunked_upload_example_signs_as_documented() {
     );
     assert_eq!(
         (first.len() + second.len() + last.len()) as u64,
-        framed_length(66_560)
+        framed_length(66_560).unwrap()
     );
 }
 
@@ -260,7 +260,21 @@ fn framed_lengths_add_up_for_every_shape() {
             left -= chunk;
         }
         expected += 1 + 85;
-        assert_eq!(framed_length(decoded), expected, "{decoded}");
+        assert_eq!(framed_length(decoded), Some(expected), "{decoded}");
+    }
+}
+
+#[test]
+fn a_length_too_long_to_frame_is_refused() {
+    // The longest body whose framed length is still a `u64`.
+    const LONGEST: u64 = 18_421_446_067_330_466_090;
+    assert!(framed_length(LONGEST).is_some());
+    for decoded in [LONGEST + 1, u64::MAX - 65_536, u64::MAX] {
+        assert_eq!(framed_length(decoded), None, "{decoded}");
+        let mut headers = HeaderMap::new();
+        let error = prepare_streaming(&mut headers, decoded).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BodyTooLarge);
+        assert!(headers.is_empty());
     }
 }
 
