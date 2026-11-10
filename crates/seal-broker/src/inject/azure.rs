@@ -54,13 +54,25 @@ fn single<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, BrokerError
     })
 }
 
+/// Whether a value has the form of a storage API version: `YYYY-MM-DD`.
+fn is_api_version(value: &[u8]) -> bool {
+    value.len() == 10
+        && value.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
 /// A value with each run of whitespace made one space, and its ends trimmed. Azure
 /// keeps whitespace inside quoted strings, so those are copied as they are.
 fn collapse(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut quoted = false;
     let mut pending_space = false;
-    for character in value.trim().chars() {
+    for character in value
+        .trim_matches(|character: char| character.is_ascii_whitespace())
+        .chars()
+    {
         if character == '"' {
             quoted = !quoted;
         }
@@ -257,8 +269,15 @@ impl Signer {
     ) -> Result<(), BrokerError> {
         let date = HeaderValue::from_str(&self.date).map_err(|_| bad("the date is not valid"))?;
         headers.insert("x-ms-date", date.clone());
-        if !headers.contains_key("x-ms-version") {
-            headers.insert("x-ms-version", HeaderValue::from_static(DEFAULT_VERSION));
+        // The caller may choose the API version, which changes what a request means
+        // but not where it goes. It must be one version, written as a date.
+        let mut versions = headers.get_all("x-ms-version").iter();
+        match (versions.next(), versions.next()) {
+            (None, _) => {
+                headers.insert("x-ms-version", HeaderValue::from_static(DEFAULT_VERSION));
+            }
+            (Some(version), None) if is_api_version(version.as_bytes()) => {}
+            _ => return Err(bad("x-ms-version must be one date, as in 2021-12-02")),
         }
         let path = percent_decode_check(path)?;
         let to_sign = match self.service {
@@ -767,6 +786,36 @@ mod tests {
             .unwrap();
         assert_eq!(map["date"], "Sun, 30 Aug 2015 12:36:00 GMT");
         assert_eq!(map["x-ms-version"], DEFAULT_VERSION);
+    }
+
+    #[test]
+    fn a_callers_api_version_must_be_one_date() {
+        let key = b"Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+        let signer = Signer::new(key, b"devstoreaccount1", AzureService::Blob, UNIX_EPOCH).unwrap();
+        for version in [
+            "latest",
+            "2021-12-02 ",
+            "2021-12-2",
+            "2021/12/02",
+            "20211202",
+        ] {
+            let mut map = headers(&[("x-ms-version", version)]);
+            let error = signer.sign("GET", "/devstoreaccount1/c", "", &mut map);
+            assert_eq!(
+                error.unwrap_err().code(),
+                ErrorCode::BadRequest,
+                "{version}"
+            );
+            assert!(!map.contains_key("authorization"));
+        }
+        let mut map = headers(&[("x-ms-version", "2021-12-02")]);
+        map.append("x-ms-version", HeaderValue::from_static("2019-02-02"));
+        let error = signer.sign("GET", "/devstoreaccount1/c", "", &mut map);
+        assert_eq!(error.unwrap_err().code(), ErrorCode::BadRequest);
+        let mut map = headers(&[("x-ms-version", "2019-02-02")]);
+        signer
+            .sign("GET", "/devstoreaccount1/c", "", &mut map)
+            .unwrap();
     }
 
     #[test]
