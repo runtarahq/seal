@@ -500,6 +500,8 @@ impl Config {
             return Err(invalid("there are no callers"));
         }
         let mut names = std::collections::BTreeSet::new();
+        let mut uids = std::collections::BTreeSet::new();
+        let mut subjects = std::collections::BTreeSet::new();
         for caller in &self.callers {
             if !names.insert(&caller.name) {
                 return Err(invalid(format!("caller {} appears twice", caller.name)));
@@ -515,6 +517,32 @@ impl Config {
             if self.listen.unix.is_some() != caller.unix_uid.is_some() {
                 return Err(invalid(format!(
                     "caller {} is identified in a way this listener cannot see",
+                    caller.name
+                )));
+            }
+            // Two callers with one identity would be one caller with the later one's
+            // keysets, whatever the earlier one says.
+            let is_new = match (&caller.unix_uid, &caller.cert_subject) {
+                (Some(uid), _) => uids.insert(*uid),
+                (None, Some(subject)) => {
+                    let subject = crate::callers::normalise_subject(subject);
+                    let is_written_out = subject.split(',').all(|part| {
+                        part.split_once('=')
+                            .is_some_and(|(name, value)| !name.is_empty() && !value.is_empty())
+                    });
+                    if !is_written_out {
+                        return Err(invalid(format!(
+                            "caller {} has a cert_subject that is not attributes like CN=app,O=Example",
+                            caller.name
+                        )));
+                    }
+                    subjects.insert(subject)
+                }
+                (None, None) => true,
+            };
+            if !is_new {
+                return Err(invalid(format!(
+                    "caller {} has the identity of another caller",
                     caller.name
                 )));
             }
@@ -675,6 +703,37 @@ mod tests {
         let twice =
             format!("{MINIMAL}\n[[callers]]\nname = \"app\"\nunix_uid = 1\nkeysets = [\"*\"]");
         assert!(Config::parse(&twice).is_err());
+        let same_uid =
+            format!("{MINIMAL}\n[[callers]]\nname = \"other\"\nunix_uid = 990\nkeysets = [\"*\"]");
+        assert!(
+            Config::parse(&same_uid)
+                .unwrap_err()
+                .0
+                .contains("identity of another caller")
+        );
+        let mtls = MINIMAL
+            .replace(
+                "unix = \"/run/seal/seal.sock\"",
+                "tcp = \"127.0.0.1:1\"\ntls = { cert = \"c\", key = \"k\", client_ca = \"a\" }",
+            )
+            .replace("unix_uid = 990", "cert_subject = \"CN=app, O=Example\"");
+        Config::parse(&mtls).unwrap();
+        let same_subject = format!(
+            "{mtls}\n[[callers]]\nname = \"other\"\ncert_subject = \"cn=app,O=Example\"\nkeysets = [\"*\"]"
+        );
+        assert!(
+            Config::parse(&same_subject)
+                .unwrap_err()
+                .0
+                .contains("identity of another caller")
+        );
+        for subject in ["app", "CN=", "CN=app,", "=app"] {
+            let text = mtls.replace("CN=app, O=Example", subject);
+            assert!(
+                Config::parse(&text).unwrap_err().0.contains("cert_subject"),
+                "{subject}"
+            );
+        }
         let bad_keyset = MINIMAL.replace("keysets = [\"*\"]", "keysets = [\"..\"]");
         assert!(Config::parse(&bad_keyset).is_err());
         let no_callers = MINIMAL.replace("[[callers]]\n        name = \"app\"\n        unix_uid = 990\n        keysets = [\"*\"]", "");
