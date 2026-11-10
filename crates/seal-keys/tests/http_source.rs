@@ -148,6 +148,8 @@ fn only_plain_https_urls_are_accepted() {
     for url in [
         "http://localhost/",
         "https://user@localhost/",
+        "https://:password@localhost/",
+        "https://user:password@localhost/",
         "https://localhost/?a=1",
         "nonsense",
     ] {

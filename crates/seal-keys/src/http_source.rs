@@ -65,7 +65,8 @@ impl HttpKeySource {
     pub fn new(config: &HttpKeySourceConfig) -> Result<Self, KeyError> {
         let url =
             url::Url::parse(&config.url).map_err(|_| KeyError::Invalid("the key source URL"))?;
-        if url.scheme() != "https" || url.query().is_some() || !url.username().is_empty() {
+        let has_credentials = !url.username().is_empty() || url.password().is_some();
+        if url.scheme() != "https" || url.query().is_some() || has_credentials {
             return Err(KeyError::Invalid("the key source URL must be plain https"));
         }
         let host = url
