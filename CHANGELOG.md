@@ -5,9 +5,9 @@ All notable changes to seal are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Security fixes are also announced as
 GitHub Security Advisories.
 
-## [0.1.0] - Unreleased
+## [0.1.0]
 
-The first release. The crates are not published to crates.io yet.
+The first release.
 
 ### Sealed values
 

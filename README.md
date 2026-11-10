@@ -14,11 +14,10 @@ that guarantee are in the [threat model](docs/threat-model.md).
 
 ## Status
 
-**Not usable yet.** Sealed values, the HTTP broker, key management, the service
-(on a Unix socket or over mutual TLS), `seal-client`, every OAuth flow, SigV4, Azure
-Shared Key and client certificates toward providers exist, and pass the same tests in
-all three modes, as do Postgres sessions. There is no release, and nothing here should
-protect a real credential.
+Sealed values, the HTTP broker, key management, the service (on a Unix socket or
+over mutual TLS), `seal-client`, every OAuth flow, SigV4, Azure Shared Key and client
+certificates toward providers are implemented, and pass the same tests in all three
+modes, as do Postgres sessions.
 
 ## Deployment modes
 

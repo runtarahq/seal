@@ -9,7 +9,7 @@ edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
 repository = "https://github.com/runtarahq/seal"
-# Not on crates.io yet; names are settled first.
+# Not published to crates.io.
 publish = false
 
 [workspace.dependencies]
