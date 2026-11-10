@@ -305,6 +305,15 @@ async fn a_blob_rule_gives_a_shared_access_signature_for_the_method() {
     }
     assert_eq!(harness.audit.last().expires_s, Some(300));
 
+    // A download's content type is the caller's to choose, and is signed.
+    let typed = format!("{BLOB}?rsct=text/csv");
+    let url = harness
+        .broker
+        .presign(presign(&sealed, Method::GET, &typed, 300))
+        .await
+        .unwrap();
+    assert_eq!(query_of(&url)["rsct"], "text/csv");
+
     for (url, code) in [
         (
             "https://account.blob.core.windows.net/exports/q3.csv?comp=metadata",

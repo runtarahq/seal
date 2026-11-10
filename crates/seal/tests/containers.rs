@@ -76,7 +76,8 @@ async fn status_and_text(instance: &Instance, request: SendRequest) -> (StatusCo
 }
 
 /// Uses a presigned URL as its holder would: straight to the server, with no seal and
-/// no credentials but the URL. Returns the status and the body.
+/// no credentials but the URL. Returns the status, and the response as received: its
+/// head, then its body.
 async fn fetch_directly(
     method: &str,
     url: &str,
@@ -104,10 +105,7 @@ async fn fetch_directly(
     stream.read_to_end(&mut response).await.unwrap();
     let response = String::from_utf8_lossy(&response).into_owned();
     let status = response.split(' ').nth(1).unwrap().parse().unwrap();
-    let body = response
-        .split_once("\r\n\r\n")
-        .map_or(String::new(), |(_, body)| body.to_owned());
-    (status, body)
+    (status, response)
 }
 
 fn presign_request(
@@ -429,6 +427,18 @@ container_matrix! {
         assert_eq!(status, 403);
         let wider = url.replace("sp=r", "sp=rw");
         assert_eq!(fetch_directly("GET", &wider, &[], b"").await.0, 403);
+
+        // The response headers the caller asks for are signed with the rest.
+        let typed = format!("{blob}?rsct=text/csv%3B%20charset%3Dutf-8&rscd=attachment%3B%20filename%3D%22q3.csv%22");
+        let url = instance.client.presign(presign_request(Method::GET, &typed, &sealed, 60)).await.unwrap();
+        let (status, response) = fetch_directly("GET", &url, &[], b"").await;
+        assert_eq!(status, 200, "{response}");
+        let head = response.to_ascii_lowercase();
+        assert!(head.contains("content-type: text/csv; charset=utf-8"), "{response}");
+        assert!(head.contains("content-disposition: attachment; filename=\"q3.csv\""), "{response}");
+        let retyped = url.replace("rsct=text%2Fcsv", "rsct=text%2Fhtml");
+        assert_ne!(retyped, url);
+        assert_eq!(fetch_directly("GET", &retyped, &[], b"").await.0, 403);
 
         // An upload and a delete, each with a signature of its own.
         let upload = at("/uploads/new.txt");

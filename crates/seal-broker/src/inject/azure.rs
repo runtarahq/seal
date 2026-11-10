@@ -309,42 +309,88 @@ fn blob_of(account: &str, host: &str, path: &str) -> Result<String, BrokerError>
     Ok(decoded.into_owned())
 }
 
+/// The query parameters a caller may put on a URL that gets a shared access signature,
+/// in the order they are signed: how a download's response is described. They set
+/// `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language` and
+/// `Content-Type`.
+pub const SAS_QUERY: &[&str] = &["rscc", "rscd", "rsce", "rscl", "rsct"];
+
+/// What the URL of a shared access signature names.
+#[derive(Clone, Copy, Debug)]
+pub struct SasUrl<'a> {
+    /// The host, without a port.
+    pub host: &'a str,
+    /// The path, as sent.
+    pub path: &'a str,
+    /// The query, as sent: only [`SAS_QUERY`] parameters, each at most once.
+    pub query: &'a str,
+}
+
+/// The caller's response headers, decoded, in the order of [`SAS_QUERY`]. A `+` is a
+/// plus sign, never a space, so that seal and the service read the same value.
+fn response_headers(query: &str) -> Result<[Option<String>; 5], BrokerError> {
+    let mut values: [Option<String>; 5] = Default::default();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let slot = SAS_QUERY
+            .iter()
+            .position(|allowed| *allowed == name)
+            .and_then(|index| values.get_mut(index))
+            .filter(|slot| slot.is_none())
+            .ok_or_else(|| bad("a shared access signature cannot carry this query parameter"))?;
+        let decoded = percent_decode_str(value)
+            .decode_utf8()
+            .ok()
+            .filter(|decoded| !decoded.is_empty() && !decoded.chars().any(char::is_control))
+            .ok_or_else(|| bad("a response header in the query is not valid"))?;
+        *slot = Some(decoded.into_owned());
+    }
+    Ok(values)
+}
+
 impl Signer {
     /// The query of a shared access signature for the one blob a URL names: these
-    /// permissions, until `expiry`, with no start time. Over HTTPS only, unless the
-    /// rule itself is for plain HTTP.
+    /// permissions, until `expiry`, with no start time, and the response headers the
+    /// URL's own query asks for. Over HTTPS only, unless the rule itself is for plain
+    /// HTTP.
     ///
     /// # Errors
     ///
-    /// [`ErrorCode::BadRequest`] if the URL does not name a blob of this account.
+    /// [`ErrorCode::BadRequest`] if the URL does not name a blob of this account, or
+    /// its query has anything but response headers.
     pub fn sas(
         &self,
         permissions: &str,
-        host: &str,
-        path: &str,
+        url: SasUrl<'_>,
         expiry: std::time::SystemTime,
         https_only: bool,
     ) -> Result<Zeroizing<String>, BrokerError> {
-        self.sas_as_of(DEFAULT_VERSION, permissions, host, path, expiry, https_only)
+        self.sas_as_of(DEFAULT_VERSION, permissions, url, expiry, https_only)
     }
 
     fn sas_as_of(
         &self,
         version: &str,
         permissions: &str,
-        host: &str,
-        path: &str,
+        url: SasUrl<'_>,
         expiry: std::time::SystemTime,
         https_only: bool,
     ) -> Result<Zeroizing<String>, BrokerError> {
-        let blob = blob_of(&self.account, host, path)?;
+        let blob = blob_of(&self.account, url.host, url.path)?;
+        let response = response_headers(url.query)?;
+        let header = |index: usize| response[index].as_deref().unwrap_or("");
         let expiry = Civil::at(expiry).iso8601();
         let protocol = if https_only { "https" } else { "https,http" };
         // Permissions, start, expiry, resource, identifier, IP, protocol, version,
         // resource type, snapshot, encryption scope, and five response headers.
         let to_sign = format!(
-            "{permissions}\n\n{expiry}\n/blob/{}/{blob}\n\n\n{protocol}\n{version}\nb\n\n\n\n\n\n\n",
-            self.account
+            "{permissions}\n\n{expiry}\n/blob/{}/{blob}\n\n\n{protocol}\n{version}\nb\n\n\n{}\n{}\n{}\n{}\n{}",
+            self.account,
+            header(0),
+            header(1),
+            header(2),
+            header(3),
+            header(4),
         );
         let key = hmac::Key::new(hmac::HMAC_SHA256, &self.key);
         let signature = Zeroizing::new(STANDARD.encode(hmac::sign(&key, to_sign.as_bytes())));
@@ -356,7 +402,20 @@ impl Signer {
             .append_pair("sv", version)
             .append_pair("sr", "b")
             .append_pair("sig", &signature);
-        Ok(Zeroizing::new(query.finish()))
+        let mut query = Zeroizing::new(query.finish());
+        // Percent-encoded, so that a space or a plus sign cannot be read as the other.
+        for (name, value) in SAS_QUERY.iter().zip(&response) {
+            if let Some(value) = value {
+                query.push('&');
+                query.push_str(name);
+                query.push('=');
+                query.extend(percent_encoding::utf8_percent_encode(
+                    value,
+                    percent_encoding::NON_ALPHANUMERIC,
+                ));
+            }
+        }
+        Ok(query)
     }
 }
 
@@ -513,6 +572,80 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(1_794_312_000)
     }
 
+    fn url<'a>(host: &'a str, path: &'a str) -> SasUrl<'a> {
+        SasUrl {
+            host,
+            path,
+            query: "",
+        }
+    }
+
+    /// What `generate_blob_sas` returns with every response header set.
+    #[test]
+    fn a_signature_covers_the_response_headers_the_url_asks_for() {
+        let asked = "rsct=text/csv%3B%20charset%3Dutf-8\
+                     &rscd=attachment%3B%20filename%3D%22q3%2Ba.csv%22\
+                     &rscc=no-store&rsce=identity&rscl=en";
+        let query = sas_signer()
+            .sas_as_of(
+                "2026-06-06",
+                "r",
+                SasUrl {
+                    host: "account.blob.core.windows.net",
+                    path: "/exports/dir/report%201.csv",
+                    query: asked,
+                },
+                sas_expiry(),
+                true,
+            )
+            .unwrap();
+        let expected = "se=2026-11-10T12%3A00%3A00Z&sp=r&spr=https&sv=2026-06-06&sr=b\
+             &rscc=no-store&rscd=attachment%3B%20filename%3D%22q3%2Ba.csv%22&rsce=identity\
+             &rscl=en&rsct=text/csv%3B%20charset%3Dutf-8\
+             &sig=d6XgFWooyTj0bDtXQMcgZvu3PR2wZQEXXCEHiS6F2zM%3D";
+        // Compared as sent: a decoder that took `+` for a space would hide a difference.
+        let split = |query: &str| -> std::collections::BTreeMap<String, String> {
+            let pairs = query.split('&').map(|pair| pair.split_once('=').unwrap());
+            pairs
+                .map(|(name, value)| {
+                    let decoded = percent_decode_str(value).decode_utf8().unwrap();
+                    (name.to_owned(), decoded.into_owned())
+                })
+                .collect()
+        };
+        assert_eq!(split(&query), split(expected));
+        assert!(!query.contains('+') && !query.contains(' '));
+    }
+
+    #[test]
+    fn a_url_carries_only_response_headers_each_once() {
+        let sas = |query: &str| {
+            let url = SasUrl {
+                host: "account.blob.core.windows.net",
+                path: "/c/b",
+                query,
+            };
+            sas_signer().sas("r", url, sas_expiry(), true)
+        };
+        sas("rsct=text/plain").unwrap();
+        for refused in [
+            "sp=rwd",
+            "se=2099-01-01T00%3A00%3A00Z",
+            "sig=AAAA",
+            "comp=metadata",
+            "snapshot=2020",
+            "rsct=a&rsct=b",
+            "RSCT=text/plain",
+            "rsct=",
+            "rsct",
+            "rsct=a%0d%0aSet-Cookie:%20x",
+            "rsct=%ff",
+        ] {
+            let error = sas(refused).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::BadRequest, "{refused}");
+        }
+    }
+
     fn pairs(query: &str) -> Vec<(String, String)> {
         form_urlencoded::parse(query.as_bytes())
             .into_owned()
@@ -540,7 +673,13 @@ mod tests {
             ),
         ] {
             let query = sas_signer()
-                .sas_as_of("2026-06-06", permissions, host, path, sas_expiry(), true)
+                .sas_as_of(
+                    "2026-06-06",
+                    permissions,
+                    url(host, path),
+                    sas_expiry(),
+                    true,
+                )
                 .unwrap();
             assert_eq!(pairs(&query), pairs(expected), "{permissions}");
             // An emulator has the account in the path, and names the same blob.
@@ -548,8 +687,7 @@ mod tests {
                 .sas_as_of(
                     "2026-06-06",
                     permissions,
-                    "127.0.0.1",
-                    &format!("/account{path}"),
+                    url("127.0.0.1", &format!("/account{path}")),
                     sas_expiry(),
                     true,
                 )
@@ -563,8 +701,7 @@ mod tests {
         let query = sas_signer()
             .sas(
                 "r",
-                "account.blob.core.windows.net",
-                "/c/b",
+                url("account.blob.core.windows.net", "/c/b"),
                 sas_expiry(),
                 false,
             )
@@ -597,7 +734,7 @@ mod tests {
             ("127.0.0.1", "/accountx/container/blob"),
         ] {
             let error = sas_signer()
-                .sas("r", host, path, sas_expiry(), true)
+                .sas("r", url(host, path), sas_expiry(), true)
                 .unwrap_err();
             assert_eq!(error.code(), ErrorCode::BadRequest, "{host}{path}");
         }

@@ -131,7 +131,14 @@ for the one blob it names, on the same terms as [a presigned S3 URL](#presigned-
 permissions follow the method: read for `GET` and `HEAD`, create and write for `PUT`,
 delete for `DELETE`. The signature has an expiry and no start time, is for HTTPS only
 unless the rule itself is for plain HTTP, and covers no container, snapshot or stored
-access policy. The URL may have no query.
+access policy.
+
+The caller's URL may carry only the parameters that describe a download's response,
+which seal signs with the rest: `rsct` (content type), `rscd` (content disposition),
+`rscc` (cache control), `rsce` (content encoding) and `rscl` (content language).
+
+A signature is for permissions, not a method, so there is none for `POST`: ask for `PUT`
+to upload.
 
 seal signs for the blob it reads the URL to mean: with the account in the host name, as in
 `account.blob.core.windows.net`, the path is the container and blob. Otherwise the path

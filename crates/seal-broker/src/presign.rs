@@ -118,12 +118,6 @@ pub(crate) fn presigned_url(
             allow_presign,
         } => {
             within(allow_presign)?;
-            if target.query.is_some() {
-                return Err(BrokerError::new(
-                    ErrorCode::BadRequest,
-                    "a shared access signature is for a URL with no query",
-                ));
-            }
             // What each method needs, in the order the service lists permissions.
             let permissions = match method {
                 Method::Get | Method::Head => "r",
@@ -134,8 +128,11 @@ pub(crate) fn presigned_url(
             let signer = secret.expose(|key| azure::Signer::new(key, &account, *service, now))?;
             signer.sas(
                 permissions,
-                &target.host,
-                &target.path,
+                azure::SasUrl {
+                    host: &target.host,
+                    path: &target.path,
+                    query: target.query.as_deref().unwrap_or(""),
+                },
                 now + Duration::from_secs(u64::from(expires_s)),
                 target.scheme == Scheme::Https,
             )?
