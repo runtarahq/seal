@@ -102,7 +102,7 @@ impl KeyringConfig {
     }
 }
 
-/// A keyset's public key, which needs no unwrapping to list.
+/// A keyset's public key, checked against its private key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicKeyInfo {
     /// The key's id.
@@ -250,25 +250,27 @@ impl Keyring {
         Ok(created)
     }
 
-    /// A keyset's public keys, newest last. Needs no unwrapping.
+    /// A keyset's public keys, newest last, freshly read from the source.
+    ///
+    /// Each one has been checked against its private key, which means unwrapping it:
+    /// a key source that stored another public key beside a wrapped key would
+    /// otherwise have secrets sealed to a key of its own choosing.
     ///
     /// # Errors
     ///
-    /// Returns [`KeyError::UnknownKeyset`] if the keyset has no keys.
+    /// Returns [`KeyError::UnknownKeyset`] if the keyset has no keys, and what loading
+    /// the keyset returns if a key cannot be unwrapped or does not match.
     pub async fn public_keys(&self, keyset: &KeysetId) -> Result<Vec<PublicKeyInfo>, KeyError> {
-        let mut keys = self
-            .inner
-            .fetch(keyset)
-            .await?
+        let generation = self.inner.load(keyset, true).await?;
+        let mut keys: Vec<PublicKeyInfo> = generation
+            .keys
             .iter()
-            .map(|key| {
-                Ok(PublicKeyInfo {
-                    kid: key.kid.clone(),
-                    public: key.public_key()?,
-                    created: key.created,
-                })
+            .map(|(kid, key)| PublicKeyInfo {
+                kid: kid.clone(),
+                public: key.public,
+                created: key.created,
             })
-            .collect::<Result<Vec<_>, KeyError>>()?;
+            .collect();
         if keys.is_empty() {
             return Err(KeyError::UnknownKeyset);
         }

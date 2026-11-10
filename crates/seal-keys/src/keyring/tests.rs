@@ -498,7 +498,7 @@ async fn generate_and_rotate_check_what_exists() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn public_keys_are_listed_oldest_first_without_unwrapping() {
+async fn public_keys_are_listed_oldest_first() {
     let setup = Setup::new();
     let keyring = setup.keyring(config());
     assert_eq!(
@@ -508,7 +508,6 @@ async fn public_keys_are_listed_oldest_first_without_unwrapping() {
     let first = keyring.generate(&keyset("acme")).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
     let second = keyring.rotate(&keyset("acme")).await.unwrap();
-    setup.wrap.revoked.store(true, Ordering::SeqCst);
     let listed = keyring.public_keys(&keyset("acme")).await.unwrap();
     let kids: Vec<&KeyId> = listed.iter().map(|key| &key.kid).collect();
     assert!(kids.contains(&&first.kid) && kids.contains(&&second.kid));
@@ -530,6 +529,11 @@ async fn a_wrapped_key_that_does_not_match_its_public_key_is_refused() {
         .insert(keyset("acme"), vec![created]);
     assert!(matches!(
         keyring.current_public_key(&keyset("acme")).await,
+        Err(KeyError::Invalid(_))
+    ));
+    // Nor is the stored public key published, for someone to seal to.
+    assert!(matches!(
+        keyring.public_keys(&keyset("acme")).await,
         Err(KeyError::Invalid(_))
     ));
 }
