@@ -193,10 +193,15 @@ impl Watchdog {
     }
 }
 
-/// The request body, counted and watched for a caller that stalls.
+/// The request body, counted, watched for a caller that stalls, and held to the
+/// `Content-Length` the request declares.
 pub(crate) struct TrackedRequestBody {
     inner: RequestBody,
     watchdog: Watchdog,
+    /// The request's `Content-Length`, if it has one. A body of another length would
+    /// be cut short or leave the provider waiting, so it fails the request instead.
+    declared: Option<u64>,
+    seen: u64,
 }
 
 impl TrackedRequestBody {
@@ -205,6 +210,7 @@ impl TrackedRequestBody {
         progress: Arc<Progress>,
         idle: Duration,
         total_deadline: Option<Instant>,
+        declared: Option<u64>,
     ) -> Self {
         if inner.is_end_stream() {
             progress.mark_request_done();
@@ -212,7 +218,13 @@ impl TrackedRequestBody {
         Self {
             inner,
             watchdog: Watchdog::new(progress, idle, total_deadline),
+            declared,
+            seen: 0,
         }
+    }
+
+    fn wrong_length(detail: &'static str) -> BrokerError {
+        BrokerError::new(ErrorCode::BadRequest, detail)
     }
 }
 
@@ -229,6 +241,12 @@ impl Body for TrackedRequestBody {
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
+                    this.seen = this.seen.saturating_add(data.len() as u64);
+                    if this.declared.is_some_and(|declared| this.seen > declared) {
+                        return Poll::Ready(Some(Err(progress.fail(Self::wrong_length(
+                            "the body is longer than its Content-Length",
+                        )))));
+                    }
                     progress
                         .bytes_in
                         .fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -238,6 +256,11 @@ impl Body for TrackedRequestBody {
             }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(progress.fail(error)))),
             Poll::Ready(None) => {
+                if this.declared.is_some_and(|declared| this.seen < declared) {
+                    return Poll::Ready(Some(Err(progress.fail(Self::wrong_length(
+                        "the body is shorter than its Content-Length",
+                    )))));
+                }
                 progress.mark_request_done();
                 Poll::Ready(None)
             }
@@ -249,7 +272,8 @@ impl Body for TrackedRequestBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        // A body that ends short of its length still has an error to give.
+        self.inner.is_end_stream() && self.declared.is_none_or(|declared| declared == self.seen)
     }
 
     fn size_hint(&self) -> SizeHint {

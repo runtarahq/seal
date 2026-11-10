@@ -190,6 +190,56 @@ async fn a_secret_a_response_header_repeats_is_not_passed_on() {
     read_body(response).await.unwrap();
 }
 
+/// The caller's `Content-Length` is passed on, and cannot frame the request other than
+/// the body does: a body that is longer or shorter than it says fails the request, and
+/// nothing after the declared length reaches the provider as a request of its own.
+#[tokio::test]
+async fn a_content_length_that_disagrees_with_the_body_fails_the_request() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let token = harness.seal(
+        "token",
+        b"s3cret-token",
+        &plain_policy(&provider, &bearer()),
+    );
+    let smuggled: &'static [u8] =
+        b"abcdPOST /admin HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\n\r\n";
+    for declared in ["4", "100000"] {
+        let mut send = request(&url(&provider, "/echo"), &[("token", &token)]);
+        send.method = Method::POST;
+        send.headers
+            .insert(header::CONTENT_LENGTH, HeaderValue::from_static(declared));
+        send.body = request_body(smuggled);
+        let outcome = match harness.broker.send(send).await {
+            Ok(response) => read_body(response).await.map(|_| ()),
+            Err(error) => Err(error),
+        };
+        assert_eq!(
+            outcome.unwrap_err().code(),
+            ErrorCode::BadRequest,
+            "Content-Length: {declared}"
+        );
+    }
+    assert!(
+        provider
+            .received()
+            .iter()
+            .all(|request| request.uri == "/echo"),
+        "no second request was made of the body"
+    );
+
+    // A length that is right goes through, with or without a body.
+    let mut send = request(&url(&provider, "/echo"), &[("token", &token)]);
+    send.method = Method::POST;
+    send.headers
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(smuggled.len()));
+    send.body = request_body(smuggled);
+    read_body(harness.broker.send(send).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(provider.received().last().unwrap().body, smuggled);
+}
+
 /// The secret goes in the path, as Telegram's bot API has it. The audit record has the
 /// path the caller named, and a header that repeats the secret is not passed on.
 #[tokio::test]

@@ -890,11 +890,16 @@ impl Broker {
         .await
         .map_err(|_| BrokerError::new(ErrorCode::UpstreamTimeout, "resolving timed out"))??;
 
+        let declared_length = out_headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| text.parse::<u64>().ok());
         let body = TrackedRequestBody::new(
             body,
             Arc::clone(progress),
             limits.idle_timeout,
             total_deadline,
+            declared_length,
         );
         let mut outgoing_request = Request::builder()
             .method(method)
