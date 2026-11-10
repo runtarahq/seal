@@ -126,7 +126,8 @@ fn audit_sink(config: &Config) -> Result<Arc<dyn AuditSink>, String> {
             config.audit.on_failure,
         )),
         AuditSinkConfig::File(path) => Arc::new(sinks::Policy::new(
-            sinks::FileSink::open(path).map_err(|_| format!("cannot open {}", path.display()))?,
+            sinks::FileSink::open(path)
+                .map_err(|error| format!("cannot open {}: {error}", path.display()))?,
             config.audit.on_failure,
         )),
     })

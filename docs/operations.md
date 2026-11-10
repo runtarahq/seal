@@ -120,7 +120,7 @@ least twice `max_keys_per_keyset`.
 | `limits.rate_per_caller` | `1000/s` | |
 | `limits.rate_per_keyset` | `200/s` | |
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
-| `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user |
+| `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |
 | `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz` |
 
