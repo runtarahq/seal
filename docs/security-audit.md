@@ -32,6 +32,45 @@ Severity here is the damage to the guarantee the threat model claims, not the ef
 to reach it. Finding 1 needs a certificate from the CA seal already trusts; finding 2
 needs a server that already satisfies TLS verification. Both fail silently.
 
+## Resolution
+
+What has changed since, by commit. The findings below are left as they were written,
+against `087de1c`.
+
+| Finding | State | Commit |
+|---|---|---|
+| 1. mTLS subject | Fixed: the subject is compared attribute by attribute, and one with a comma in a value or a multi-valued name is refused. Identity is still the subject, not the subject alternative name | `6d52265` |
+| 2. Postgres login without authentication | Fixed: with a password to present, the server must ask for it | `dbe121c` |
+| 3. Reflected credential | Fixed for response headers, for a secret of eight bytes or more. A response body is still not inspected | `8b216cd` |
+| 4. Unaudited refusals | Fixed for a refused keyset, shared value or administrative call. Rate-limit refusals leave no record, by design: they bound the others | `1d255f0` |
+| 5. Metadata addresses | Fixed: `100.100.100.200`, `fd00:ec2::254` and `fd20:ce::254` are metadata addresses, which no rule can allow | `c23a2d7` |
+| 6. `framed_length` overflow | Fixed: checked arithmetic, and the request is refused | `6a7b539` |
+| Two callers with one identity | Fixed | `46c40d1` |
+| Key source URL with a password | Fixed | `e58807e` |
+| Wrapped key file read whole | Fixed | `c7dc0b6` |
+| Audit file permissions | Fixed: a file its group can write or others can reach is refused | `b22ce28` |
+| Control characters in a literal | Fixed. A certificate literal is PEM and keeps its line ends, which is why whitespace was allowed | `259f064` |
+| Postgres login deadline | Fixed | `398473d` |
+| Unix socket's directory | Fixed: a directory its group or others can write is refused | `c1842ff` |
+| `;` in form bodies | Fixed: refused in requests seal reads and in responses it seals | `09470d5` |
+| Wrapping key rotation, channel binding, unsigned tokens' claims | Not changed in code. The threat model and the operations guide no longer claim otherwise | `2d6ae4e` |
+
+Still open, each needing a decision rather than a patch:
+
+- Binding a caller to a certificate's subject alternative name, which changes the
+  configuration format.
+- Rotating or re-wrapping the wrapping key, and a policy option to require channel
+  binding.
+- XML namespaces in response locations, and `path_prefix` against an injected path
+  prefix.
+- Whitespace other than a space in a signed header, for SigV4 and Azure. Today such a
+  request is signed differently from the SDK and refused by the provider, which fails
+  safe; changing it needs a check against the real services.
+- The presigned URL's unwiped copy. The URL is handed to the caller as a plain string
+  in any case.
+- The caller's `Content-Length` and `x-ms-version`, the unauthenticated metrics
+  listener, and `public_keys` returning the stored public key.
+
 ## Findings
 
 ### 1. A certificate from the trusted CA can impersonate any configured mTLS caller
