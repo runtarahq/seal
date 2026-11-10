@@ -341,8 +341,9 @@ credential some other way.
 | `form` | A key, such as `access_token` |
 | `xml` | An element path from the root, such as `AssumeRoleResponse/AssumeRoleResult/Credentials/SecretAccessKey` |
 
-An XML path names elements as written, prefix and all, and only the content of a matched
-element changes. A document type declaration, a field that repeats or holds markup, or an
+An XML path names elements by their local names: a namespace prefix, in the path or in
+the response, is ignored, so a provider cannot move a token out of reach by writing
+`<x:Token>` for `<Token>`. Only the content of a matched element changes. A document type declaration, a field that repeats or holds markup, or an
 entity other than the predefined ones refuses the response, since seal could not be sure
 where the token is.
 

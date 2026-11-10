@@ -94,6 +94,21 @@ struct XmlTarget<'f> {
 /// names as written. Everything outside the sealed elements' content is copied byte
 /// for byte. A document type declaration, a field that repeats or holds markup, or a
 /// reference other than a character or predefined entity refuses the response.
+/// An element's name without its namespace prefix. The prefix is the document's
+/// choice, so a path that depended on it would miss a token whenever a provider wrote
+/// the same element with another prefix, or with none.
+fn xml_local_name(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+/// A declared path, with each element's prefix taken off.
+fn xml_local_path(at: &str) -> String {
+    at.split('/')
+        .map(xml_local_name)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn seal_xml(
     sealing: &SealResponse,
     body: &[u8],
@@ -140,10 +155,13 @@ fn seal_xml(
                 if target.is_some() {
                     return Err(refuse("a sealed response field holds markup"));
                 }
-                let name = start.name().as_ref().to_owned();
-                path.push(name);
+                path.push(xml_local_name(start.name().as_ref()).to_owned());
                 let joined = path.join("/");
-                if let Some(field) = sealing.fields.iter().find(|field| field.at == joined) {
+                if let Some(field) = sealing
+                    .fields
+                    .iter()
+                    .find(|field| xml_local_path(&field.at) == joined)
+                {
                     if seen.contains(&&field.as_field) {
                         return Err(refuse("a sealed response field repeats"));
                     }
@@ -166,13 +184,17 @@ fn seal_xml(
                 }
                 // An empty field holds nothing to seal, but it still counts once.
                 let qname = start.name();
-                let name: &str = qname.as_ref();
+                let name = xml_local_name(qname.as_ref());
                 let joined = format!(
                     "{}{}{name}",
                     path.join("/"),
                     if path.is_empty() { "" } else { "/" }
                 );
-                if let Some(field) = sealing.fields.iter().find(|field| field.at == joined) {
+                if let Some(field) = sealing
+                    .fields
+                    .iter()
+                    .find(|field| xml_local_path(&field.at) == joined)
+                {
                     if seen.contains(&&field.as_field) {
                         return Err(refuse("a sealed response field repeats"));
                     }
@@ -891,14 +913,24 @@ mod tests {
     }
 
     #[test]
-    fn xml_paths_name_elements_as_written() {
-        // A prefixed element is not the unprefixed path.
+    fn xml_paths_name_elements_whatever_their_prefix() {
+        // The prefix is the document's choice, so it cannot take a token out of reach.
+        for (at, body) in [
+            ("A/B", r#"<A xmlns:x="urn:x"><x:B>s</x:B></A>"#),
+            ("A/x:B", r#"<A xmlns:x="urn:x"><x:B>s</x:B></A>"#),
+            ("A/x:B", r#"<y:A xmlns:y="urn:x"><y:B>s</y:B></y:A>"#),
+            ("x:A/x:B", "<A><B>s</B></A>"),
+        ] {
+            let spec = sealing(ResponseFormat::Xml, &[(at, "t")]);
+            let sealed = seal_xml_text(&spec, body).unwrap();
+            assert_eq!(sealed.fields.len(), 1, "{at} in {body}");
+            assert!(!String::from_utf8(sealed.body).unwrap().contains(">s<"));
+        }
+        // The same element under two prefixes is the field twice.
         let spec = sealing(ResponseFormat::Xml, &[("A/B", "t")]);
-        let sealed = seal_xml_text(&spec, r#"<A xmlns:x="urn:x"><x:B>s</x:B></A>"#).unwrap();
-        assert!(sealed.fields.is_empty());
-        let spec = sealing(ResponseFormat::Xml, &[("A/x:B", "t")]);
-        let sealed = seal_xml_text(&spec, r#"<A xmlns:x="urn:x"><x:B>s</x:B></A>"#).unwrap();
-        assert_eq!(sealed.fields.len(), 1);
+        let error =
+            seal_xml_text(&spec, r#"<A xmlns:x="urn:x"><B>one</B><x:B>two</x:B></A>"#).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
         // A deeper element with the same name is not the field.
         let spec = sealing(ResponseFormat::Xml, &[("A/B", "t")]);
         let sealed = seal_xml_text(&spec, "<A><C><B>s</B></C></A>").unwrap();
