@@ -523,7 +523,7 @@ fn pg_startup() -> Vec<u8> {
 mode_matrix! {
     a_postgres_session_logs_in_and_relays => |mode: Mode| async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let server = seal_testkit::mock_postgres::MockPostgres::start(HOST, true).await;
+        let server = seal_testkit::mock_postgres::MockPostgres::start_scram(HOST, b"SEALCANARY-password").await;
         let instance = start(mode, Options::default(), &[]).await;
         let password = instance.setup.seal("password", b"SEALCANARY-password", &pg_policy(&server)).await;
         let mut stream = instance.client.connect_pg(pg_request(&server, &password)).await.unwrap();
@@ -541,7 +541,7 @@ mode_matrix! {
     };
 
     a_postgres_session_the_policy_refuses_fails_to_open => |mode: Mode| async move {
-        let server = seal_testkit::mock_postgres::MockPostgres::start(HOST, true).await;
+        let server = seal_testkit::mock_postgres::MockPostgres::start_scram(HOST, b"SEALCANARY-password").await;
         let instance = start(mode, Options::default(), &[]).await;
         let password = instance.setup.seal("password", b"SEALCANARY-password", &pg_policy(&server)).await;
         let mut request = pg_request(&server, &password);
@@ -553,7 +553,7 @@ mode_matrix! {
 
     a_postgres_cancel_goes_through_a_session_of_its_own => |mode: Mode| async move {
         use tokio::io::AsyncWriteExt;
-        let server = seal_testkit::mock_postgres::MockPostgres::start(HOST, true).await;
+        let server = seal_testkit::mock_postgres::MockPostgres::start_scram(HOST, b"SEALCANARY-password").await;
         let instance = start(mode, Options::default(), &[]).await;
         let password = instance.setup.seal("password", b"SEALCANARY-password", &pg_policy(&server)).await;
         let mut stream = instance.client.connect_pg(pg_request(&server, &password)).await.unwrap();

@@ -127,11 +127,20 @@ pub async fn login<S: AsyncRead + AsyncWrite + Unpin>(
                 let (kind, rest) = authentication(&message)?;
                 match kind {
                     0 => {
-                        let method = method.unwrap_or(if credentials.client_cert {
-                            PgAuth::Cert
-                        } else {
-                            PgAuth::Trust
-                        });
+                        let method = match method {
+                            Some(method) => method,
+                            // A server that asks for nothing has proved nothing. With
+                            // a password to present, that is not the login the policy
+                            // describes, and the caller must not be told it is.
+                            None if credentials.password.is_some() => {
+                                return Err(failed(
+                                    AUTH_SPEC,
+                                    "the server accepted the login without asking for the password",
+                                ));
+                            }
+                            None if credentials.client_cert => PgAuth::Cert,
+                            None => PgAuth::Trust,
+                        };
                         return Ok((method, before_ok));
                     }
                     3 => {

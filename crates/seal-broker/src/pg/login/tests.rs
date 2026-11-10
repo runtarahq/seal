@@ -307,6 +307,26 @@ async fn a_certificate_login_needs_no_password() {
 }
 
 #[tokio::test]
+async fn a_server_that_never_asks_for_the_password_is_refused() {
+    let (result, _) = scripted(vec![auth(0, &[])], credentials(None)).await;
+    let failed = result.unwrap_err();
+    assert_eq!(failed.error.code(), ErrorCode::PgAuthFailed);
+    assert_eq!(failed.sqlstate, "28000");
+    // Nor part way through SCRAM, before its signature has been checked.
+    let (result, _) = scripted(
+        vec![auth(10, b"SCRAM-SHA-256\0\0"), auth(0, &[])],
+        credentials(None),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().error.code(), ErrorCode::UpstreamReset);
+    // Without a password or a certificate, that is a `trust` login.
+    let mut nothing = credentials(None);
+    nothing.password = None;
+    let (result, _) = scripted(vec![auth(0, &[])], nothing).await;
+    assert_eq!(result.unwrap(), PgAuth::Trust);
+}
+
+#[tokio::test]
 async fn other_methods_and_messages_are_refused() {
     for request in [auth(7, &[]), auth(2, &[]), auth(9, &[])] {
         let (result, _) = scripted(vec![request], credentials(None)).await;
