@@ -308,14 +308,36 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        if std::env::var_os(SEAL_TEST_BIN).is_some() {
+            // A wrapper, such as `docker run`, passes on a signal it can catch, and
+            // would leave seal running if it were killed outright.
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .status();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if let Ok(Some(_)) = self.child.try_wait() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
+/// Names another seal for the service to be started from, in place of the binary built
+/// with the tests: a wrapper script that runs a container image, for example. It is
+/// given the same arguments, and must write the same lines to standard error.
+/// `scripts/seal-in-container.sh` is one.
+const SEAL_TEST_BIN: &str = "SEAL_TEST_BIN";
+
 /// Starts the binary and waits until it listens.
 pub fn spawn(config_path: &Path) -> Process {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_seal"))
+    let binary =
+        std::env::var_os(SEAL_TEST_BIN).unwrap_or_else(|| env!("CARGO_BIN_EXE_seal").into());
+    let mut child = Command::new(binary)
         .args(["serve", "--config"])
         .arg(config_path)
         .env("RUST_LOG", "info")

@@ -25,6 +25,13 @@ jobs:
         run: cargo test --release --package seal-broker --test memory --locked -- --ignored --test-threads=1
       - name: Measure the memory ceiling's cost constants
         run: cargo test --release --package seal --test memory --locked -- --ignored --test-threads=1
+      # The released binary links musl, whose allocator is not glibc's.
+      - run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: rustup target add x86_64-unknown-linux-musl
+      - name: Transfer 5 GB under a memory limit, on musl
+        run: cargo test --release --package seal-broker --test memory --locked --target x86_64-unknown-linux-musl -- --ignored --test-threads=1
+      - name: Measure the memory ceiling's cost constants, on musl
+        run: cargo test --release --package seal --test memory --locked --target x86_64-unknown-linux-musl -- --ignored --test-threads=1
 
   real-providers:
     # Secrets are never given to forks, and this never runs for one.

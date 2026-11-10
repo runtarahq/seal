@@ -36,6 +36,42 @@ jobs:
       - run: rustup toolchain install
       - run: cargo test --workspace --locked
 
+  # What is released: a static binary, linked against musl.
+  test-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: rustup toolchain install && rustup target add x86_64-unknown-linux-musl
+      - run: cargo test --workspace --locked --target x86_64-unknown-linux-musl
+      - name: The release binary is static
+        run: |
+          cargo build --release --locked --package seal --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/seal | tee /dev/stderr | grep -q "static-pie linked"
+
+  # The container image, started by the same tests in place of the binary they built.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: docker build -f deploy/container/Dockerfile -t seal .
+      - name: The image holds the binary and nothing else
+        run: |
+          container=$(docker create seal)
+          files=$(docker export "$container" | tar t | grep -v '/$' | grep -v -E '^(\.dockerenv|dev/|etc/(hostname|hosts|mtab|resolv\.conf)$)')
+          docker rm "$container" > /dev/null
+          echo "$files"
+          test "$files" = "usr/local/bin/seal"
+      - name: The service tests pass against the image
+        run: |
+          SEAL_TEST_BIN="$PWD/scripts/seal-in-container.sh" \
+            cargo test --package seal --test modes --test oauth --test service --locked
+
   # RustFS, Azurite and Postgres 14 to 18, with images pinned by digest in seal-testkit.
   containers:
     runs-on: ubuntu-latest

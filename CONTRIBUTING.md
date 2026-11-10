@@ -85,6 +85,14 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
   cargo test --package seal-format --features wasm --target wasm32-unknown-unknown --test wasm --locked
 scripts/wasm-roundtrip.sh
 
+# The musl target and a musl C compiler (musl-tools): the released binary is static
+cargo test --workspace --locked --target x86_64-unknown-linux-musl
+
+# Docker: the container image, started by the service tests in place of their binary
+docker build -f deploy/container/Dockerfile -t seal .
+SEAL_TEST_BIN="$PWD/scripts/seal-in-container.sh" \
+  cargo test --package seal --test modes --test oauth --test service --locked
+
 # Python, with `pip install cryptography`
 python3 vectors/verify.py
 
