@@ -71,7 +71,8 @@ async fn scram_server(stream: &mut DuplexStream, server: &Server) -> Option<Stri
         .to_owned();
     let gs2_end = client_first.match_indices(',').nth(1).unwrap().0 + 1;
     let (gs2, bare) = client_first.split_at(gs2_end);
-    let client_nonce = bare.split("r=").nth(1).unwrap().to_owned();
+    // Everything after the first `,r=`: the nonce is random, and may hold `r=` itself.
+    let client_nonce = bare.split_once(",r=").unwrap().1.to_owned();
     let salt = b"salt-of-sixteen!";
     let nonce = format!("{client_nonce}server-nonce");
     let server_first = format!("r={nonce},s={},i=4096", STANDARD.encode(salt));
@@ -153,6 +154,7 @@ fn credentials(end_point: Option<Vec<u8>>) -> Credentials<'static> {
         password: Some(PASSWORD),
         allow_md5: false,
         allow_cleartext: false,
+        require_channel_binding: false,
         client_cert: false,
         end_point,
     }
@@ -175,6 +177,8 @@ async fn run_scram(
         scram_server(&mut server_side, &server).await
     });
     let result = login(&mut client, &credentials).await;
+    // Closed, so that a server still waiting for the client ends instead of hanging.
+    drop(client);
     (result, task.await.unwrap())
 }
 
@@ -304,6 +308,58 @@ async fn a_certificate_login_needs_no_password() {
     certificate.client_cert = true;
     let (result, _) = scripted(vec![auth(10, b"SCRAM-SHA-256\0\0")], certificate).await;
     assert_eq!(result.unwrap_err().error.code(), ErrorCode::PgAuthFailed);
+}
+
+#[tokio::test]
+async fn a_server_that_never_asks_for_the_password_is_refused() {
+    let (result, _) = scripted(vec![auth(0, &[])], credentials(None)).await;
+    let failed = result.unwrap_err();
+    assert_eq!(failed.error.code(), ErrorCode::PgAuthFailed);
+    assert_eq!(failed.sqlstate, "28000");
+    // Nor part way through SCRAM, before its signature has been checked.
+    let (result, _) = scripted(
+        vec![auth(10, b"SCRAM-SHA-256\0\0"), auth(0, &[])],
+        credentials(None),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().error.code(), ErrorCode::UpstreamReset);
+    // Without a password or a certificate, that is a `trust` login.
+    let mut nothing = credentials(None);
+    nothing.password = None;
+    let (result, _) = scripted(vec![auth(0, &[])], nothing).await;
+    assert_eq!(result.unwrap(), PgAuth::Trust);
+}
+
+#[tokio::test]
+async fn a_rule_can_require_channel_binding() {
+    let required = |end_point: Option<Vec<u8>>| {
+        let mut credentials = credentials(end_point);
+        credentials.require_channel_binding = true;
+        credentials
+    };
+    let server = Server::new(&["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"]);
+    let end_point = server.end_point.clone();
+    let (result, _) = run_scram(server.clone(), required(Some(end_point.clone()))).await;
+    assert_eq!(result.unwrap().0, PgAuth::ScramPlus);
+
+    // A server that does not offer it, or a certificate that cannot be bound to: the
+    // login stops before the password is used.
+    for (mechanisms, end_point) in [
+        (b"SCRAM-SHA-256\0\0".to_vec(), Some(end_point)),
+        (b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0".to_vec(), None),
+    ] {
+        let (result, received) = scripted(vec![auth(10, &mechanisms)], required(end_point)).await;
+        assert_eq!(result.unwrap_err().error.code(), ErrorCode::PgAuthFailed);
+        assert!(received.is_empty(), "nothing was sent");
+    }
+    // Nor any method without binding, even one another flag would allow.
+    for request in [auth(5, &[1, 2, 3, 4]), auth(3, &[])] {
+        let mut credentials = required(None);
+        credentials.allow_md5 = true;
+        credentials.allow_cleartext = true;
+        let (result, _) = scripted(vec![request], credentials).await;
+        assert_eq!(result.unwrap_err().error.code(), ErrorCode::PgAuthFailed);
+    }
 }
 
 #[tokio::test]

@@ -89,7 +89,7 @@ async fn read_message(caller: &mut DuplexStream) -> wire::Message {
 
 #[tokio::test]
 async fn a_session_logs_in_and_relays() {
-    let server = MockPostgres::start(HOST, true).await;
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();
     let password = harness.seal("password", b"pw", &password_policy(&server));
     // libpq may ask for TLS first; seal declines.
@@ -125,14 +125,14 @@ async fn a_session_logs_in_and_relays() {
     let record = harness.audit.last();
     assert_eq!(
         (record.op, record.pg_auth, record.path.as_deref()),
-        ("connect", Some("trust"), Some("reports"))
+        ("connect", Some("scram-sha-256"), Some("reports"))
     );
     assert_eq!(record.bytes_in, 12);
 }
 
 #[tokio::test]
 async fn a_startup_the_policy_does_not_allow_is_refused_before_connecting() {
-    let server = MockPostgres::start(HOST, true).await;
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();
     let password = harness.seal("password", b"pw", &password_policy(&server));
     for (params, sqlstate) in [
@@ -177,7 +177,7 @@ async fn a_startup_the_policy_does_not_allow_is_refused_before_connecting() {
 
 #[tokio::test]
 async fn the_policy_is_checked_when_the_session_opens() {
-    let server = MockPostgres::start(HOST, true).await;
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();
     let password = harness.seal("password", b"pw", &password_policy(&server));
     let mut other_port = connect_request(&server, &password);
@@ -241,7 +241,7 @@ async fn the_server_must_offer_tls_and_prove_its_name() {
     );
 
     // A CA the policy does not name: verify-full trusts only the configured roots.
-    let server = MockPostgres::start(HOST, true).await;
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let policy = rule_policy(&json!({
         "destination": destination(&server, None),
         "allow_private_destination": true,
@@ -266,8 +266,80 @@ async fn the_server_must_offer_tls_and_prove_its_name() {
 }
 
 #[tokio::test]
-async fn a_cancel_is_forwarded_as_sent() {
+async fn a_server_that_asks_for_no_password_is_not_logged_in_to() {
+    // It passes TLS, and accepts the login without proving it knows the password.
     let server = MockPostgres::start(HOST, true).await;
+    let harness = harness();
+    let password = harness.seal("password", b"pw", &password_policy(&server));
+    let (mut caller, task) = session(
+        &harness,
+        connect_request(&server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    let refusal = read_message(&mut caller).await;
+    assert_eq!(refusal.tag, b'E');
+    assert_eq!(
+        wire::error_sqlstate(&refusal.body).as_deref(),
+        Some("28000")
+    );
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        ErrorCode::PgAuthFailed
+    );
+    assert_eq!(harness.audit.last().pg_auth, None);
+}
+
+#[tokio::test]
+async fn a_server_that_goes_quiet_during_the_login_is_given_up_on() {
+    let server = MockPostgres::start_silent(HOST).await;
+    let mut options = Options::default();
+    options.network.honour_private_rules = true;
+    options.limits.connect_timeout = std::time::Duration::from_millis(300);
+    let harness = Harness::with(options);
+    let password = harness.seal("password", b"pw", &password_policy(&server));
+    let (mut caller, task) = session(
+        &harness,
+        connect_request(&server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    let refusal = read_message(&mut caller).await;
+    assert_eq!(refusal.tag, b'E');
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        ErrorCode::UpstreamTimeout
+    );
+    assert_eq!(server.packets().len(), 1, "the startup was sent");
+}
+
+#[tokio::test]
+async fn a_rule_that_requires_channel_binding_refuses_a_server_without_it() {
+    // The server knows the password, but offers SCRAM without binding only.
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
+    let harness = harness();
+    let policy = rule_policy(&json!({
+        "destination": destination(&server, Some(&server.ca_pem)),
+        "allow_private_destination": true,
+        "inject": { "pg_password": { "require_channel_binding": true } },
+    }));
+    let password = harness.seal("password", b"pw", &policy);
+    let (mut caller, task) = session(
+        &harness,
+        connect_request(&server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    assert_eq!(read_message(&mut caller).await.tag, b'E');
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        ErrorCode::PgAuthFailed
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_is_forwarded_as_sent() {
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();
     let password = harness.seal("password", b"pw", &password_policy(&server));
     for key in [4_usize, 32] {
@@ -284,7 +356,7 @@ async fn a_cancel_is_forwarded_as_sent() {
 
 #[tokio::test]
 async fn a_session_never_run_is_still_audited() {
-    let server = MockPostgres::start(HOST, true).await;
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();
     let password = harness.seal("password", b"pw", &password_policy(&server));
     let session = harness
@@ -301,7 +373,7 @@ async fn a_session_never_run_is_still_audited() {
 
 #[tokio::test]
 async fn the_user_can_be_a_plain_field_the_rule_lists() {
-    let server = MockPostgres::start(HOST, true).await;
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();
     let mut destination = destination(&server, Some(&server.ca_pem));
     destination["user"] = json!({ "field": "user" });

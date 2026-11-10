@@ -2578,6 +2578,7 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2633,6 +2634,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "zeroize",
 ]
 
 [[package]]

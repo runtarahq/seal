@@ -293,7 +293,7 @@ async fn a_blob_rule_gives_a_shared_access_signature_for_the_method() {
             continue;
         }
         let url = result.unwrap();
-        assert!(url.starts_with(&format!("{BLOB}?se=")), "{url}");
+        assert!(url.starts_with(&format!("{BLOB}?se=")), "{}", *url);
         let query = query_of(&url);
         assert_eq!(query["sp"], permissions, "{method}");
         assert_eq!(

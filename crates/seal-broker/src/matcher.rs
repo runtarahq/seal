@@ -645,6 +645,8 @@ pub struct PgPassword {
     pub allow_md5: bool,
     /// A cleartext password, over TLS.
     pub allow_cleartext: bool,
+    /// Only a login bound to its TLS connection.
+    pub require_channel_binding: bool,
 }
 
 /// The terms of a Postgres session, from a plan made for a Postgres endpoint. Matched
@@ -699,6 +701,7 @@ pub fn postgres_terms(
             Inject::PgPassword {
                 allow_md5,
                 allow_cleartext_password,
+                require_channel_binding,
             } => {
                 if current.password.is_some() {
                     return Err(denied("two passwords were presented", field));
@@ -707,6 +710,7 @@ pub fn postgres_terms(
                     field: field.clone(),
                     allow_md5: *allow_md5,
                     allow_cleartext: *allow_cleartext_password,
+                    require_channel_binding: *require_channel_binding,
                 });
             }
             Inject::ClientCert { .. } => {

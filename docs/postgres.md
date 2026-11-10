@@ -82,12 +82,16 @@ on the user and on TLS, and a session may use only the databases both allow.
    | `SCRAM-SHA-256` | SCRAM, telling the server whether it could have bound | Always |
    | MD5 | The MD5 response | Only with `allow_md5` |
    | A cleartext password | The password, over TLS | Only with `allow_cleartext_password` |
-   | Nothing | — | With a client certificate (`cert` in `pg_hba.conf`), or `trust` |
+   | Nothing | — | Only when the rule presents no password: with a client certificate (`cert` in `pg_hba.conf`), or `trust` |
    | Anything else | Fails with `PG_AUTH_FAILED` | Never |
 
    SCRAM checks the server's signature as well, so a server that does not know the
    password cannot pass as the real one. Channel binding ties the login to this TLS
-   connection.
+   connection. With `require_channel_binding`, a login that would not be bound is
+   refused before anything derived from the password is sent: one to a server that
+   does not offer `SCRAM-SHA-256-PLUS`, or whose certificate has no hash to bind to.
+   A server that accepts the login without asking for the password the
+   rule presents has proved nothing, and the login fails with `PG_AUTH_FAILED`.
 5. On success seal sends the application `AuthenticationOk`. From then on it relays.
 
 The audit record names how each session logged in, in `pg_auth`: `scram-sha-256-plus`,

@@ -12,6 +12,8 @@ mod in_process;
 
 use std::collections::BTreeMap;
 use std::fmt;
+/// A value wiped from memory when dropped: what [`SealClient::presign`] returns.
+pub use zeroize::Zeroizing;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -398,8 +400,9 @@ pub trait SealClient: Send + Sync {
     /// It works only where the signing value's rule sets `allow_presign`, and for no
     /// longer than that allows. Unlike everything else seal returns, the URL is a
     /// credential: whoever holds it can use it without seal until it expires, so keep
-    /// it out of logs and give it the shortest life that will do.
-    async fn presign(&self, request: PresignRequest) -> Result<String, SealError>;
+    /// it out of logs and give it the shortest life that will do. It is wiped from
+    /// memory when dropped; a copy made of it is not.
+    async fn presign(&self, request: PresignRequest) -> Result<Zeroizing<String>, SealError>;
 
     /// Whether a message's authentication code was made with a sealed secret. seal
     /// compares the whole code and never returns one, so this can check a webhook's

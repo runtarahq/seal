@@ -91,7 +91,7 @@ mode_matrix! {
     a_bearer_token_reaches_the_provider => |mode: Mode| async move {
         let (instance, provider) = simple(mode).await;
         let token = instance.setup.seal("token", b"SEALCANARY-s3cret", &policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }))).await;
-        let mut send = get(&url(&provider, "/echo?a=1"), &[("token", &token)]);
+        let mut send = get(&url(&provider, "/quiet?a=1"), &[("token", &token)]);
         send.request.headers_mut().insert("x-request-id", HeaderValue::from_static("abc"));
         let response = instance.client.send(send).await.unwrap();
         assert_eq!(response.response.status(), 200);
@@ -100,13 +100,13 @@ mode_matrix! {
         let received = &provider.received()[0];
         assert_eq!(received.header("authorization"), Some("Bearer SEALCANARY-s3cret"));
         assert_eq!(received.header("x-request-id"), Some("abc"));
-        assert_eq!(received.uri, "/echo?a=1");
+        assert_eq!(received.uri, "/quiet?a=1");
     };
 
     acceptance_a_disallowed_destination_is_refused_and_nothing_is_sent => |mode: Mode| async move {
         let (instance, provider) = simple(mode).await;
         let token = instance.setup.seal("token", b"SEALCANARY-token", &policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }))).await;
-        let other = format!("http://127.0.0.1:{}/echo", provider.port());
+        let other = format!("http://127.0.0.1:{}/quiet", provider.port());
         let error = instance.client.send(get(&other, &[("token", &token)])).await.err().unwrap();
         assert_eq!(error.code, ErrorCode::PolicyDenied);
         assert!(!error.code.is_retryable());
@@ -133,7 +133,7 @@ mode_matrix! {
     the_caller_cannot_set_an_injected_header => |mode: Mode| async move {
         let (instance, provider) = simple(mode).await;
         let token = instance.setup.seal("token", b"SEALCANARY-token", &policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }))).await;
-        let mut send = get(&url(&provider, "/echo"), &[("token", &token)]);
+        let mut send = get(&url(&provider, "/quiet"), &[("token", &token)]);
         send.request.headers_mut().insert(header::AUTHORIZATION, HeaderValue::from_static("mine"));
         assert_eq!(instance.client.send(send).await.err().unwrap().code, ErrorCode::Conflict);
     };
@@ -150,7 +150,7 @@ mode_matrix! {
         assert_eq!(value["expires_in"], 3600);
 
         let access = &sealed[&field("access_token")];
-        let response = instance.client.send(get(&url(&provider, "/echo"), &[("access_token", access)])).await.unwrap();
+        let response = instance.client.send(get(&url(&provider, "/quiet"), &[("access_token", access)])).await.unwrap();
         text(response).await;
         assert_eq!(provider.received().last().unwrap().header("authorization"), Some("Bearer at-plaintext"));
     };
@@ -190,7 +190,7 @@ mode_matrix! {
         assert_eq!(instance.setup.audit_records().pop().unwrap()["verified"], json!(false));
 
         // The secret can be sent nowhere, and a value sealed for sending verifies nothing.
-        let error = instance.client.send(get(&url(&provider, "/echo"), &[("signing_secret", &secret)])).await.err().unwrap();
+        let error = instance.client.send(get(&url(&provider, "/quiet"), &[("signing_secret", &secret)])).await.err().unwrap();
         assert_eq!(error.code, ErrorCode::PolicyDenied);
         let token = instance.setup.seal("signing_secret", SIGNING_SECRET, &policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }))).await;
         let error = instance.client.verify(verify_request(&token, message, mac)).await.err().unwrap();
@@ -241,7 +241,7 @@ mode_matrix! {
         let object = "https://s3.eu-west-1.amazonaws.com/tenant-a/q3.csv";
         let allowed = instance.setup.seal("secret_key", b"SEALCANARY-secret-access-key", &rule(true)).await;
         let url = instance.client.presign(presign(&allowed, Method::GET, object, 600)).await.unwrap();
-        assert!(url.starts_with(&format!("{object}?X-Amz-Algorithm=AWS4-HMAC-SHA256&")), "{url}");
+        assert!(url.starts_with(&format!("{object}?X-Amz-Algorithm=AWS4-HMAC-SHA256&")), "{}", *url);
         assert!(url.contains("&X-Amz-Expires=600&") && url.contains("&X-Amz-Signature="));
         assert!(!url.contains("SEALCANARY"));
         let record = instance.setup.audit_records().pop().unwrap();
@@ -367,14 +367,14 @@ mode_matrix! {
     every_send_leaves_an_audit_record => |mode: Mode| async move {
         let (instance, provider) = simple(mode).await;
         let token = instance.setup.seal("token", b"SEALCANARY-token", &policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }))).await;
-        let response = instance.client.send(get(&url(&provider, "/echo?q=SECRETQUERY"), &[("token", &token)])).await.unwrap();
+        let response = instance.client.send(get(&url(&provider, "/quiet?q=SECRETQUERY"), &[("token", &token)])).await.unwrap();
         text(response).await;
         let _ = instance.client.send(get(&format!("http://127.0.0.1:{}/", provider.port()), &[("token", &token)])).await;
         let records = instance.setup.audit_records();
         let sends: Vec<&Value> = records.iter().filter(|record| record["op"] == "send").collect();
         assert_eq!(sends.len(), 2);
         assert_eq!(sends[0]["outcome"], "ok");
-        assert_eq!(sends[0]["path"], "/echo");
+        assert_eq!(sends[0]["path"], "/quiet");
         assert_eq!(sends[1]["outcome"], "refused");
         assert_eq!(sends[1]["code"], "POLICY_DENIED");
         let expected_caller = if mode == Mode::InProcess { "in-process" } else { "test-app" };
@@ -470,7 +470,7 @@ mode_matrix! {
             "inject": { "client_cert": { "cert": { "literal": issued.cert_pem } } },
         }] }));
         let key = instance.setup.seal("client_key", issued.key_pem.as_bytes(), &policy).await;
-        let target = format!("https://{HOST}:{}/echo", provider.port());
+        let target = format!("https://{HOST}:{}/quiet", provider.port());
         for _ in 0..2 {
             let response = instance.client.send(get(&target, &[("client_key", &key)])).await.unwrap();
             assert_eq!(response.response.status(), 200);
@@ -523,7 +523,7 @@ fn pg_startup() -> Vec<u8> {
 mode_matrix! {
     a_postgres_session_logs_in_and_relays => |mode: Mode| async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let server = seal_testkit::mock_postgres::MockPostgres::start(HOST, true).await;
+        let server = seal_testkit::mock_postgres::MockPostgres::start_scram(HOST, b"SEALCANARY-password").await;
         let instance = start(mode, Options::default(), &[]).await;
         let password = instance.setup.seal("password", b"SEALCANARY-password", &pg_policy(&server)).await;
         let mut stream = instance.client.connect_pg(pg_request(&server, &password)).await.unwrap();
@@ -541,7 +541,7 @@ mode_matrix! {
     };
 
     a_postgres_session_the_policy_refuses_fails_to_open => |mode: Mode| async move {
-        let server = seal_testkit::mock_postgres::MockPostgres::start(HOST, true).await;
+        let server = seal_testkit::mock_postgres::MockPostgres::start_scram(HOST, b"SEALCANARY-password").await;
         let instance = start(mode, Options::default(), &[]).await;
         let password = instance.setup.seal("password", b"SEALCANARY-password", &pg_policy(&server)).await;
         let mut request = pg_request(&server, &password);
@@ -553,7 +553,7 @@ mode_matrix! {
 
     a_postgres_cancel_goes_through_a_session_of_its_own => |mode: Mode| async move {
         use tokio::io::AsyncWriteExt;
-        let server = seal_testkit::mock_postgres::MockPostgres::start(HOST, true).await;
+        let server = seal_testkit::mock_postgres::MockPostgres::start_scram(HOST, b"SEALCANARY-password").await;
         let instance = start(mode, Options::default(), &[]).await;
         let password = instance.setup.seal("password", b"SEALCANARY-password", &pg_policy(&server)).await;
         let mut stream = instance.client.connect_pg(pg_request(&server, &password)).await.unwrap();

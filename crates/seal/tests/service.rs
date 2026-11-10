@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use seal_client::{ErrorCode, Mode, SealClient};
 use seal_format::KeysetId;
-use seal_testkit::pki::TestPki;
+use seal_testkit::pki::{Issued, TestPki};
 use serde_json::json;
 use support::*;
 
@@ -74,6 +74,44 @@ async fn a_certificate_from_another_ca_is_refused() {
 }
 
 #[tokio::test]
+async fn a_caller_is_known_by_the_name_its_certificate_was_issued_for() {
+    let callers = "[[callers]]\nname = \"app\"\ncert_san = \"spiffe://example.org/app\"\nkeysets = [\"acme\"]\n";
+    let options = Options {
+        callers: Some(callers.to_owned()),
+        ..Options::default()
+    };
+    let instance = start(Mode::Mtls, options, &[]).await;
+    let address = instance
+        .process
+        .as_ref()
+        .unwrap()
+        .address
+        .strip_prefix("tcp:")
+        .unwrap()
+        .to_owned();
+    let pki = &instance.setup.pki;
+    let connect = |issued: &Issued| {
+        seal_client::mtls(
+            std::slice::from_ref(&address),
+            &client_tls(&instance.setup, issued),
+        )
+        .unwrap()
+    };
+    let named = pki.client_with_names("whatever", &[], &["spiffe://example.org/app"]);
+    assert_eq!(connect(&named).info().await.unwrap().mode, "mtls");
+    // The same CA, a common name that spells the URI, and another URI.
+    for other in [
+        pki.client("spiffe://example.org/app"),
+        pki.client_with_names("app", &[], &["spiffe://example.org/other"]),
+    ] {
+        assert_eq!(
+            connect(&other).info().await.err().unwrap().code,
+            ErrorCode::Transport
+        );
+    }
+}
+
+#[tokio::test]
 async fn acceptance_a_certificate_with_an_unknown_subject_is_refused() {
     let instance = start(Mode::Mtls, Options::default(), &[]).await;
     let other = instance.setup.pki.client("not-listed");
@@ -113,7 +151,7 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
         .await;
     let error = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
         .await
         .err()
         .unwrap();
@@ -167,15 +205,29 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
             .code,
         ErrorCode::CallerDenied
     );
-    let refused: Vec<_> = instance
-        .setup
-        .audit_records()
-        .into_iter()
-        .filter(|record| record["op"] == "generate" || record["op"] == "public_keys")
+    // What it tried is in the audit log, each attempt refused.
+    let records = instance.setup.audit_records();
+    let refused: Vec<(&str, &str)> = records
+        .iter()
+        .map(|record| {
+            assert_eq!(record["outcome"], "refused");
+            assert_eq!(record["code"], "CALLER_DENIED");
+            assert_eq!(record["caller"], "app");
+            (
+                record["op"].as_str().unwrap(),
+                record["keyset"].as_str().unwrap(),
+            )
+        })
         .collect();
-    assert!(
-        refused.is_empty(),
-        "a refused caller never reaches the keys"
+    assert_eq!(
+        refused,
+        [
+            ("send", "acme"),
+            ("verify", "acme"),
+            ("presign", "acme"),
+            ("generate", "other"),
+            ("public_keys", "other"),
+        ]
     );
 }
 
@@ -268,7 +320,7 @@ async fn acceptance_a_restarted_instance_serves_the_same_values() {
     for _ in 0..2 {
         let (client, process) = connect(Mode::Unix, &Options::default(), &setup).await;
         let response = client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .unwrap();
         text(response).await;
@@ -322,7 +374,7 @@ async fn acceptance_a_rotation_and_a_deletion_on_one_instance_reach_another_with
         text(response).await;
         Ok(())
     }
-    let echo = url(&provider, "/echo");
+    let echo = url(&provider, "/quiet");
     send_with(&two, &echo, &old_token).await.unwrap();
 
     // Rotate on instance one.
@@ -334,7 +386,7 @@ async fn acceptance_a_rotation_and_a_deletion_on_one_instance_reach_another_with
     assert_eq!(new_token.kid().as_str(), rotated.kid);
     let response = two
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &new_token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &new_token)]))
         .await
         .unwrap();
     text(response).await;
@@ -412,7 +464,7 @@ async fn acceptance_reseal_round_trips_a_rotation() {
     );
     let response = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &envelope)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &envelope)]))
         .await
         .unwrap();
     text(response).await;
@@ -535,7 +587,7 @@ async fn reseal_gives_a_value_a_new_policy_only_when_told_to() {
         seal_format::Envelope::from_json(written[0]["envelope"].to_string().as_bytes()).unwrap();
     let response = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &envelope)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &envelope)]))
         .await
         .unwrap();
     text(response).await;
@@ -587,7 +639,7 @@ async fn the_rate_per_caller_is_enforced() {
         text(
             instance
                 .client
-                .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+                .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
                 .await
                 .unwrap(),
         )
@@ -595,7 +647,7 @@ async fn the_rate_per_caller_is_enforced() {
     }
     let error = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
         .await
         .err()
         .unwrap();
@@ -623,7 +675,7 @@ async fn concurrent_streams_are_limited() {
         .unwrap();
     let error = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
         .await
         .err()
         .unwrap();
@@ -632,7 +684,7 @@ async fn concurrent_streams_are_limited() {
     eventually(Duration::from_secs(5), || async {
         instance
             .client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .is_ok()
     })
@@ -656,7 +708,7 @@ async fn health_metrics_and_readiness_are_served() {
     text(
         instance
             .client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .unwrap(),
     )
@@ -764,6 +816,76 @@ fn a_configuration_others_can_write_is_refused() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("writable by its group or others"));
+}
+
+#[test]
+fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
+    use seal_keys::{DirKeySource, FileKeyWrap, Keyring, KeyringConfig, Keys};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let config = write_config(
+        &setup,
+        &setup.config_text(
+            Mode::Unix,
+            &Options::default(),
+            "[listen]\nunix = \"/tmp/x.sock\"\n",
+        ),
+    );
+    let run = |args: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let new_kek = setup.dir.path().join("kek-2");
+    let new_keys = setup.dir.path().join("keys-2");
+    assert!(
+        run(&[
+            "keygen".as_ref(),
+            "--wrapping-key".as_ref(),
+            new_kek.as_ref()
+        ])
+        .status
+        .success()
+    );
+    let rewrap = || {
+        run(&[
+            "rewrap".as_ref(),
+            "--config".as_ref(),
+            config.as_ref(),
+            "--new-wrapping-key".as_ref(),
+            new_kek.as_ref(),
+            "--out".as_ref(),
+            new_keys.as_ref(),
+        ])
+    };
+    let done = rewrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(String::from_utf8_lossy(&done.stdout).starts_with("re-wrapped "));
+    assert!(
+        !rewrap().status.success(),
+        "an existing directory is not written into"
+    );
+
+    // The new directory and wrapping key give the keys the old ones gave.
+    let current = |keys: &std::path::Path, kek: &std::path::Path| {
+        let _guard = runtime.enter();
+        let keyring = Keyring::new(
+            std::sync::Arc::new(DirKeySource::new(keys, 16)),
+            std::sync::Arc::new(FileKeyWrap::from_file(kek).unwrap()),
+            KeyringConfig::default(),
+        )
+        .unwrap();
+        runtime.block_on(keyring.current_public_key(&keyset()))
+    };
+    let before = current(&setup.keys_dir, &setup.kek).unwrap();
+    assert_eq!(current(&new_keys, &new_kek).unwrap(), before);
+    assert!(current(&new_keys, &setup.kek).is_err());
+    assert!(current(&setup.keys_dir, &new_kek).is_err());
 }
 
 #[test]

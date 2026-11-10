@@ -18,7 +18,8 @@ use tokio::time::{Instant, sleep_until};
 use crate::address::NetworkPolicy;
 use crate::audit::{AuditGuard, AuditRecord, AuditSink, Clock, Outcome, SystemClock};
 use crate::body::{
-    Finish, Progress, ResponseBody, ResponseStream, TrackedRequestBody, read_capped, wiped_body,
+    Finish, Progress, ReflectionScan, ResponseBody, ResponseStream, TrackedRequestBody,
+    read_capped, wiped_body,
 };
 use crate::client::{ClientConfig, ConnectLimits, HttpClient, RequestBody, body_error};
 use crate::error::{BrokerError, ErrorCode};
@@ -449,6 +450,10 @@ impl Broker {
                 .password
                 .as_ref()
                 .is_some_and(|password| password.allow_cleartext),
+            require_channel_binding: terms
+                .password
+                .as_ref()
+                .is_some_and(|password| password.require_channel_binding),
             password,
             client_cert,
             allow_private: plan.allow_private_destination,
@@ -475,7 +480,10 @@ impl Broker {
     ///
     /// Returns a [`BrokerError`] with the reason, which never includes a value or the
     /// URL.
-    pub async fn presign(&self, request: PresignRequest) -> Result<String, BrokerError> {
+    pub async fn presign(
+        &self,
+        request: PresignRequest,
+    ) -> Result<zeroize::Zeroizing<String>, BrokerError> {
         let mut record = self.first_record(
             "presign",
             &request.caller,
@@ -505,7 +513,7 @@ impl Broker {
         &self,
         request: PresignRequest,
         audit: &mut AuditGuard,
-    ) -> Result<String, BrokerError> {
+    ) -> Result<zeroize::Zeroizing<String>, BrokerError> {
         let PresignRequest {
             keyset,
             item,
@@ -547,7 +555,7 @@ impl Broker {
             },
             self.clock.now(),
         )?;
-        Ok(presigned.as_str().to_owned())
+        Ok(presigned)
     }
 
     /// Says whether a message's authentication code was made with a sealed secret, whose
@@ -890,11 +898,16 @@ impl Broker {
         .await
         .map_err(|_| BrokerError::new(ErrorCode::UpstreamTimeout, "resolving timed out"))??;
 
+        let declared_length = out_headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| text.parse::<u64>().ok());
         let body = TrackedRequestBody::new(
             body,
             Arc::clone(progress),
             limits.idle_timeout,
             total_deadline,
+            declared_length,
         );
         let mut outgoing_request = Request::builder()
             .method(method)
@@ -933,9 +946,11 @@ impl Broker {
             wait_for_head(sending, progress, &limits, total_deadline).await?;
         let (mut parts, incoming) = response.into_parts();
         remove_hop_by_hop(&mut parts.headers);
-        if let Some(secret) = outgoing.path_secret.take() {
-            remove_headers_repeating(&mut parts.headers, &secret);
+        let injected = std::mem::take(&mut outgoing.injected);
+        for secret in &injected {
+            remove_headers_repeating(&mut parts.headers, secret);
         }
+        let scan = ReflectionScan::new(injected);
         audit.update(|record| record.status = Some(parts.status.as_u16()));
 
         let Some(sealing) = plan.response else {
@@ -958,6 +973,7 @@ impl Broker {
                         progress,
                         idle,
                         stream_deadline,
+                        scan,
                     ))
                 }),
             ));
@@ -978,6 +994,14 @@ impl Broker {
         let sealed_response = self
             .seal_response(&sealing, &keyset, &item, &parts.headers, &body)
             .await?;
+        // Looked for once the declared fields are sealed: a provider may return a
+        // token it was sent, such as a refresh token, where the rule seals it.
+        if scan.is_some_and(|scan| scan.finds(&sealed_response.body)) {
+            return Err(BrokerError::new(
+                ErrorCode::ResponseUnparseable,
+                "the response repeats a credential",
+            ));
+        }
         drop(permit);
 
         let mut headers = parts.headers;
@@ -1190,6 +1214,9 @@ fn check_form_requirements(
     {
         return Err(refused());
     }
+    if crate::inject::has_semicolon_separator(body) {
+        return Err(refused());
+    }
     let pairs: Vec<(String, String)> = form_urlencoded::parse(body).into_owned().collect();
     for (name, allowed) in requirements {
         let mut values = pairs
@@ -1322,10 +1349,13 @@ fn remove_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// Drops every header that repeats a secret seal put in the path, as it was written
-/// there: a redirect's `Location` is the usual one. A header is dropped whole, whichever
-/// of its values has it.
+/// Drops every header that repeats a secret seal put in the request head, as it was
+/// written there: a redirect's `Location` is the usual one. A header is dropped whole,
+/// whichever of its values has it.
 fn remove_headers_repeating(headers: &mut HeaderMap, secret: &[u8]) {
+    if secret.is_empty() {
+        return;
+    }
     let repeats = |value: &HeaderValue| {
         value
             .as_bytes()

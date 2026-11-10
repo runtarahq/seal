@@ -274,6 +274,7 @@ async fn a_large_body_is_signed_in_chunks() {
         received.header("content-length"),
         Some(
             seal_broker::inject::sigv4::framed_length(all.len() as u64)
+                .unwrap()
                 .to_string()
                 .as_str()
         )

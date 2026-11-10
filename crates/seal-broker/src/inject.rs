@@ -74,9 +74,22 @@ pub struct Outgoing {
     pub signing: Option<Signing>,
     /// The client certificate to present, from the field holding its private key.
     pub client_cert: Option<crate::identity::ClientCertMaterial>,
-    /// A secret injected into the path, as it is written there. A response header
-    /// that repeats it, such as a redirect's `Location`, is not passed on.
-    pub path_secret: Option<Zeroizing<Vec<u8>>>,
+    /// The secrets injected into the request, as they are written in its path, query
+    /// and headers, and as they were sealed. A response header that repeats one, such
+    /// as a redirect's `Location` or an echo of the request, is not passed on, and a
+    /// response body that repeats one fails the response.
+    pub injected: Vec<Zeroizing<Vec<u8>>>,
+}
+
+/// The shortest secret in a header or the query that response headers are searched
+/// for. A shorter one would match by chance and take ordinary headers with it.
+pub const MIN_REFLECTED_SECRET: usize = 8;
+
+/// Keeps a secret written into a header or the query, to search response headers for.
+fn remember(injected: &mut Vec<Zeroizing<Vec<u8>>>, written: &[u8]) {
+    if written.len() >= MIN_REFLECTED_SECRET && !injected.iter().any(|seen| **seen == written) {
+        injected.push(Zeroizing::new(written.to_vec()));
+    }
 }
 
 /// A signature still to be made over the final request.
@@ -202,7 +215,7 @@ pub fn build_head(
     let mut json = Vec::new();
     let mut signing = None;
     let mut client_cert = None;
-    let mut path_secret = None;
+    let mut injected = Vec::new();
 
     for injection in &plan.injections {
         let secret = sources.secrets.get(&injection.field).ok_or_else(|| {
@@ -216,6 +229,7 @@ pub fn build_head(
             Inject::Header { name, format } => {
                 let value = secret.expose(|bytes| fill_template(format, bytes));
                 insert_sensitive(&mut headers, name, &value, &injection.field)?;
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::Basic { username } => {
                 let username = sources.part(username)?;
@@ -238,6 +252,8 @@ pub fn build_head(
                 value.extend_from_slice(b"Basic ");
                 value.extend_from_slice(encoded.as_bytes());
                 insert_sensitive(&mut headers, "authorization", &value, &injection.field)?;
+                remember(&mut injected, encoded.as_bytes());
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::Query { name } => {
                 // At most three bytes per byte encoded, reserved before the secret goes in.
@@ -248,7 +264,10 @@ pub fn build_head(
                 }
                 query.extend(percent_encode(name.as_bytes(), QUERY_VALUE));
                 query.push('=');
+                let start = query.len();
                 secret.expose(|bytes| query.extend(percent_encode(bytes, QUERY_VALUE)));
+                remember(&mut injected, &query.as_bytes()[start..]);
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::Path { prefix } => {
                 let (before, after) = prefix.split_once("{}").unwrap_or((prefix, ""));
@@ -283,16 +302,18 @@ pub fn build_head(
                 path.push_str(after);
                 path.push_str(&path_and_query);
                 path_and_query = path;
-                path_secret = Some(written);
+                injected.push(written);
             }
             Inject::FormField { name } => {
                 form.push((name.clone(), secret.expose(|b| Zeroizing::new(b.to_vec()))));
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::JsonField { pointer } => {
                 json.push((
                     pointer.clone(),
                     secret.expose(|b| Zeroizing::new(b.to_vec())),
                 ));
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::JwtAssertion {
                 alg,
@@ -431,7 +452,7 @@ pub fn build_head(
         body,
         signing,
         client_cert,
-        path_secret,
+        injected,
     })
 }
 
@@ -667,10 +688,24 @@ fn json_room(fields: &[(String, Zeroizing<Vec<u8>>)], body: &[u8]) -> usize {
             .sum::<usize>()
 }
 
+/// Whether a form body has a `;` that is not percent-encoded. Some servers split
+/// fields on it as well as on `&`, and seal's parser does not, so the two would
+/// disagree about which fields the body has. A serialiser always encodes it.
+#[must_use]
+pub fn has_semicolon_separator(form: &[u8]) -> bool {
+    form.contains(&b';')
+}
+
 fn apply_to_form(
     fields: &[(String, Zeroizing<Vec<u8>>)],
     body: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
+    if has_semicolon_separator(body) {
+        return Err(BrokerError::new(
+            ErrorCode::BadRequest,
+            "a form body with a semicolon cannot have fields injected",
+        ));
+    }
     for (key, _) in form_urlencoded::parse(body) {
         if fields.iter().any(|(name, _)| *name == key) {
             return Err(BrokerError::new(

@@ -126,7 +126,8 @@ fn audit_sink(config: &Config) -> Result<Arc<dyn AuditSink>, String> {
             config.audit.on_failure,
         )),
         AuditSinkConfig::File(path) => Arc::new(sinks::Policy::new(
-            sinks::FileSink::open(path).map_err(|_| format!("cannot open {}", path.display()))?,
+            sinks::FileSink::open(path)
+                .map_err(|error| format!("cannot open {}: {error}", path.display()))?,
             config.audit.on_failure,
         )),
     })
@@ -196,7 +197,13 @@ pub async fn run(
 
     if let Some(address) = config.metrics.listen {
         let handle = crate::health::install_recorder()?;
-        let local = crate::health::serve(address, handle, Arc::clone(&source))
+        let token = config
+            .metrics
+            .token_file
+            .as_deref()
+            .map(crate::health::read_token)
+            .transpose()?;
+        let local = crate::health::serve(address, handle, Arc::clone(&source), token)
             .await
             .map_err(|_| format!("cannot listen for metrics on {address}"))?;
         tracing::info!(address = %local, "serving metrics and health");
@@ -205,7 +212,7 @@ pub async fn run(
     match (&config.listen.unix, config.listen.tcp, &config.listen.tls) {
         (Some(path), _, _) => {
             let incoming = listen::unix(path, callers, limits.max_caller_connections)
-                .map_err(|_| format!("cannot listen on {}", path.display()))?;
+                .map_err(|error| format!("cannot listen on {}: {error}", path.display()))?;
             listening(&Listening::Unix(path.clone()));
             tracing::info!(mode, "seal is listening");
             builder

@@ -122,7 +122,9 @@ For an API that takes its credential in the URL's path, such as Telegram's
 `/bot<token>/sendMessage`. `prefix` goes before the caller's path, with exactly one `{}`
 for the secret: whole segments, starting with `/` and not ending with one. The caller
 names the URL without it, here `https://api.telegram.org/sendMessage`, and that is the
-path a `path_prefix` matches and the audit record holds.
+path a `path_prefix` matches and the audit record holds. A `path_prefix` therefore
+bounds what follows the injected prefix, not the whole path sent: with a prefix of
+`/bot{}` and a `path_prefix` of `/send`, requests go to `/bot<token>/send…`.
 
 ```json
 { "rules": [{
@@ -313,6 +315,20 @@ SCRAM-SHA-256 is always allowed. The others only run over TLS.
 }] }
 ```
 
+`require_channel_binding` goes the other way: the login must be SCRAM-SHA-256-PLUS,
+bound to the TLS connection, or it is refused. It cannot be combined with the two
+options above.
+
+```json
+{ "rules": [{
+  "destination": {
+    "scheme": "postgres", "host": "db.example.com", "port": 5432,
+    "databases": ["app"], "user": { "literal": "app_user" }
+  },
+  "inject": { "pg_password": { "require_channel_binding": true } }
+}] }
+```
+
 ### `companion`
 
 This value is not used directly. Another field's rule uses it at this destination, and
@@ -347,8 +363,9 @@ In a JSON response, everything but the sealed fields comes back as the provider 
 digit for digit; only the objects and arrays on the way to a field are written again,
 compactly and in key order. A key that repeats in one of those keeps its last value.
 
-An XML path names elements as written, prefix and all, and only the content of a matched
-element changes. A document type declaration, a field that repeats or holds markup, or an
+An XML path names elements by their local names: a namespace prefix, in the path or in
+the response, is ignored, so a provider cannot move a token out of reach by writing
+`<x:Token>` for `<Token>`. Only the content of a matched element changes. A document type declaration, a field that repeats or holds markup, or an
 entity other than the predefined ones refuses the response, since seal could not be sure
 where the token is.
 
@@ -564,6 +581,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
+| `require_channel_binding` | `pg_password` | Not a weakening: refuses any login but SCRAM-SHA-256-PLUS. Cannot go with the two above |
 | `allow_replication` | A Postgres destination | Allows a replication session |
 
 ```json

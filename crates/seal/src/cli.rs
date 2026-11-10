@@ -1,13 +1,13 @@
-//! The offline commands: `check-config`, `keygen` and `reseal`.
+//! The offline commands: `check-config`, `keygen`, `reseal` and `rewrap`.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
 
 use seal_format::{Binding, Envelope, FieldName, ItemId, KeysetId, Policy, seal};
-use seal_keys::{FileKeyWrap, Keyring, Keys};
+use seal_keys::{DirKeySource, FileKeyWrap, Keyring, Keys};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, SourceConfig, WrapConfig};
 use crate::limits;
 use crate::serve::key_parts;
 
@@ -73,6 +73,38 @@ pub async fn keygen(config: &Config, keyset: &KeysetId) -> Result<String, String
         .await
         .map_err(|error| error.to_string())?;
     Ok(key.kid.to_string())
+}
+
+/// Wraps every key in the configured key directory again, under a new wrapping key,
+/// into a new directory. The configured directory and wrapping key are left as they
+/// are; seal uses the new ones once its configuration names them and it is restarted.
+/// Returns how many keys were written.
+///
+/// # Errors
+///
+/// Returns a message if the key source is not a directory, the new directory exists,
+/// or a key cannot be re-wrapped. Nothing is said of any key's contents.
+pub async fn rewrap(config: &Config, new_wrapping_key: &Path, out: &Path) -> Result<usize, String> {
+    let SourceConfig::Dir(keys) = &config.keys.source else {
+        return Err(
+            "rewrap needs a directory key source; re-wrap the keys where the key service keeps them"
+                .to_owned(),
+        );
+    };
+    let WrapConfig::File(old) = &config.keys.wrap;
+    if out.exists() {
+        return Err(format!("{} must not exist", out.display()));
+    }
+    let old = FileKeyWrap::from_file(old).map_err(|error| error.to_string())?;
+    let new = FileKeyWrap::from_file(new_wrapping_key).map_err(|error| error.to_string())?;
+    seal_keys::rewrap(
+        &DirKeySource::new(keys, usize::MAX),
+        &DirKeySource::new(out, usize::MAX),
+        &old,
+        &new,
+    )
+    .await
+    .map_err(|error| format!("cannot re-wrap the keys: {error}"))
 }
 
 /// One line of `reseal`'s input and output.

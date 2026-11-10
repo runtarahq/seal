@@ -36,7 +36,9 @@ impl FileSink {
     ///
     /// # Errors
     ///
-    /// Returns an error if it cannot be opened.
+    /// Returns an error if it cannot be opened, or if a file that was already there
+    /// can be written by its group or reached by others: the mode above applies only
+    /// to a file this creates.
     pub fn open(path: &Path) -> std::io::Result<Self> {
         let mut options = OpenOptions::new();
         options.append(true).create(true);
@@ -45,8 +47,19 @@ impl FileSink {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
+        let file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if file.metadata()?.permissions().mode() & 0o027 != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the audit file is writable by its group or accessible to others",
+                ));
+            }
+        }
         Ok(Self {
-            file: Mutex::new(options.open(path)?),
+            file: Mutex::new(file),
         })
     }
 }
@@ -163,6 +176,25 @@ mod tests {
                 std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_others_can_reach_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        for (mode, is_allowed) in [
+            (0o600, true),
+            (0o640, true),
+            (0o644, false),
+            (0o660, false),
+            (0o602, false),
+        ] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(FileSink::open(&path).is_ok(), is_allowed, "{mode:o}");
         }
     }
 

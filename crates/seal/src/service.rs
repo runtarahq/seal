@@ -98,15 +98,41 @@ impl Service {
             .ok_or_else(|| refusal(ErrorCode::CallerDenied, "the caller is not known"))
     }
 
-    fn admin<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
+    /// The caller, if it may make administrative calls. One that may not is refused
+    /// with an audit record, within its rate, so that it cannot fill the log.
+    fn admin(&self, op: &'static str, request: &Request<KeysetRequest>) -> Result<Caller, Status> {
         let caller = self.caller(request)?;
         if caller.admin {
-            Ok(caller)
-        } else {
-            Err(refusal(
-                ErrorCode::CallerDenied,
-                "administrative calls need an admin caller",
-            ))
+            return Ok(caller);
+        }
+        if !self.per_caller.allow(&caller.name) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
+        }
+        // Only a keyset that is an identifier goes in the record.
+        let keyset = KeysetId::new(request.get_ref().keyset.clone())
+            .map(|keyset| keyset.to_string())
+            .unwrap_or_default();
+        Err(self.denied(
+            op,
+            &caller,
+            &keyset,
+            "administrative calls need an admin caller",
+        ))
+    }
+
+    /// Refuses a caller something it is not allowed, and leaves an audit record: what
+    /// a compromised application tried is what an operator looks for afterwards.
+    /// Rate limits are not recorded, and they bound how many of these there can be.
+    fn denied(
+        &self,
+        op: &'static str,
+        caller: &Caller,
+        keyset: &str,
+        detail: &'static str,
+    ) -> Status {
+        match self.audit_admin(op, caller, keyset, Some(ErrorCode::CallerDenied)) {
+            Ok(()) => refusal(ErrorCode::CallerDenied, detail),
+            Err(status) => status,
         }
     }
 
@@ -156,7 +182,7 @@ impl Service {
         op: &'static str,
         request: Request<KeysetRequest>,
     ) -> Result<Response<WrappedKeyReply>, Status> {
-        let caller = self.admin(&request)?;
+        let caller = self.admin(op, &request)?;
         let name = request.into_inner().keyset;
         let keyset = KeysetId::new(name.clone())
             .map_err(|_| refusal(ErrorCode::BadRequest, "the keyset is not valid"))?;
@@ -535,8 +561,10 @@ impl Seal for Service {
             headers,
         } = parse_send_head(head)?;
         if !caller.may_use(&keyset) {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "send",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use this keyset",
             ));
         }
@@ -548,8 +576,10 @@ impl Seal for Service {
             .values()
             .any(|value| !caller.may_use(value.envelope.keyset()))
         {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "send",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use a value's keyset",
             ));
         }
@@ -592,8 +622,10 @@ impl Seal for Service {
         };
         let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
         if !caller.may_use(&keyset) {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "connect",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use this keyset",
             ));
         }
@@ -605,8 +637,10 @@ impl Seal for Service {
             .values()
             .any(|value| !caller.may_use(value.envelope.keyset()))
         {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "connect",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use a value's keyset",
             ));
         }
@@ -649,8 +683,10 @@ impl Seal for Service {
         };
         let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
         if !caller.may_use(&keyset) {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "verify",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use this keyset",
             ));
         }
@@ -661,8 +697,10 @@ impl Seal for Service {
             .map_err(|_| bad("an envelope is not valid"))?;
         // A shared value comes from another keyset, which the caller must be allowed too.
         if !caller.may_use(envelope.keyset()) {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "verify",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use a value's keyset",
             ));
         }
@@ -699,8 +737,10 @@ impl Seal for Service {
         let request = request.into_inner();
         let keyset = KeysetId::new(request.keyset).map_err(|_| bad("the keyset is not valid"))?;
         if !caller.may_use(&keyset) {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "presign",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use this keyset",
             ));
         }
@@ -713,12 +753,14 @@ impl Seal for Service {
             .values()
             .any(|value| !caller.may_use(value.envelope.keyset()))
         {
-            return Err(refusal(
-                ErrorCode::CallerDenied,
+            return Err(self.denied(
+                "presign",
+                &caller,
+                keyset.as_str(),
                 "the caller may not use a value's keyset",
             ));
         }
-        let url = self
+        let mut url = self
             .broker
             .presign(seal_broker::PresignRequest {
                 caller: caller.name,
@@ -733,7 +775,10 @@ impl Seal for Service {
             })
             .await
             .map_err(|error| broker_status(&error))?;
-        Ok(Response::new(PresignReply { url }))
+        // Moved into the reply, not copied: the transport's own copy is the only other.
+        Ok(Response::new(PresignReply {
+            url: std::mem::take(&mut *url),
+        }))
     }
 
     async fn generate_keyset(
@@ -754,7 +799,7 @@ impl Seal for Service {
         &self,
         request: Request<KeysetRequest>,
     ) -> Result<Response<PublicKeysReply>, Status> {
-        let caller = self.admin(&request)?;
+        let caller = self.admin("public_keys", &request)?;
         let name = request.into_inner().keyset;
         let keyset = KeysetId::new(name.clone()).map_err(|_| bad("the keyset is not valid"))?;
         let result = self.keyring.public_keys(&keyset).await;

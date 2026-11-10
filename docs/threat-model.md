@@ -2,8 +2,7 @@
 
 Status: reviewed against what was built, in the hardening pass before the first release.
 It describes seal as built: the HTTP broker with every injection and signing scheme,
-response sealing, Postgres sessions, the service and its callers, and the keyring. An
-external security review has not happened yet.
+response sealing, Postgres sessions, the service and its callers, and the keyring.
 
 ## What seal is for
 
@@ -56,7 +55,9 @@ working afterwards.
 5. **seal to a Postgres server.** As for a provider, then: TLS is required and verified
    before anything is sent, and seal reads exactly the one-byte answer to its
    `SSLRequest`, so nothing unprotected can be slipped in. SCRAM checks the server's
-   signature, and channel binding ties the login to this TLS connection. The caller's
+   signature, and channel binding ties the login to this TLS connection when the
+   server offers it. A server that accepts the login without asking for the password
+   the rule presents is refused. The caller's
    startup must name the policy's user and a database it allows.
 6. **Provider's response to the caller.** Response sealing replaces declared fields
    before the response reaches the caller. Everything else passes through.
@@ -67,11 +68,11 @@ working afterwards.
 
 | Boundary | Enforced by | Checked by |
 |---|---|---|
-| Caller to seal | Peer credentials or the client certificate's subject; configured keysets, including a shared value's | `crates/seal/tests/service.rs`; `a_caller_needs_the_platform_keyset_to_use_a_shared_value` |
+| Caller to seal | Peer credentials, or the client certificate's subject, compared attribute by attribute, or one of its subject alternative names; configured keysets, including a shared value's; an audit record of each refusal | `crates/seal/tests/service.rs`; `a_certificate_subject_is_compared_by_attribute`; `a_caller_needs_the_platform_keyset_to_use_a_shared_value` |
 | Sealed value to seal | HPKE with associated data; the policy inside the ciphertext; the `shared` flag | `crates/seal-format/tests/acceptance.rs`, the published vectors, `a_value_from_another_record_is_refused_unless_shared` |
 | Caller's request to the policy | The matcher, a pure function over untrusted policies; strict URL parsing; refused headers | `crates/seal-broker/src/matcher/tests.rs` (with property tests), `url_match` and other fuzz targets, `caller_set_amz_headers_are_refused_before_dns` |
 | seal to provider | Address checks after DNS on every address; TLS; no redirects | `acceptance_a_private_address_is_refused_after_dns_with_no_connection`, `acceptance_redirects_are_returned_not_followed` |
-| seal to a Postgres server | TLS before sending; SCRAM with the server's signature and channel binding | `the_server_must_offer_tls_and_prove_its_name`, `a_server_that_cannot_prove_it_knows_the_password_is_refused`, Postgres 14–18 in containers |
+| seal to a Postgres server | TLS before sending; SCRAM with the server's signature, and channel binding when the server offers it; no login without the password being asked for | `the_server_must_offer_tls_and_prove_its_name`, `a_server_that_cannot_prove_it_knows_the_password_is_refused`, `a_server_that_never_asks_for_the_password_is_refused`, Postgres 14–18 in containers |
 | Provider's response to the caller | Response sealing of declared fields, refusing what it cannot parse for certain | `response_seal_*` fuzz targets, `xml_that_could_hide_a_token_is_refused` |
 | Everything seal writes or returns | No secret in logs, audit, metrics, errors or response heads | The canary scan after every test |
 
@@ -96,15 +97,20 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   who runs it unread lets a compromised application choose where secrets go.
 - **Library mode** gives a compromised application every credential. The application
   logs this at startup and reports the mode.
-- **A provider that returns a credential.** One at an allowed destination that echoes
-  a credential gives it to the caller, and seal does not inspect responses for this.
-  Policies should name API hosts, not services that reflect requests.
+- **A provider that returns a credential in another form.** seal drops a response
+  header that repeats a secret it put in the request, and fails a response whose body
+  repeats one, passing on none of it. It looks for the secret as it was sealed and as
+  it was written in the request, if that is at least eight bytes. A provider that
+  returns it encoded some other way, compressed, or escaped inside JSON, still gives it
+  to the caller, and one that means to can always do so. Policies should name API
+  hosts, not services that reflect requests.
 - **Response sealing covers declared fields at declared locations only.** The same
   value elsewhere in a response passes through, as does anything else a provider
   returns, such as a presigned URL it generates itself.
 - **Exposed claims are what the sealer chose, unverified.** A policy may name claims of
   a sealed JWT to return in plaintext. seal reads them without checking the token's
-  signature, so they are as trustworthy as the provider's response, and the sealer
+  signature, so they are as trustworthy as the provider's response; a token whose
+  header says it is unsigned, or that has no signature, exposes nothing. The sealer
   should name only claims that are not secret. Rules presented together must agree on
   them exactly, as on the rest of response sealing, so another value cannot add any.
 - **A presigned URL is a copy, where a rule allows one.** A rule with `allow_presign`
@@ -157,6 +163,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **Channel binding needs a hash.** For a server certificate signed with an algorithm
   that has none, such as Ed25519, seal logs in with SCRAM without binding and tells
   the server so. The login still needs TLS and checks the server's signature.
+- **Channel binding is the server's choice unless the rule requires it.** A server
+  that offers only `SCRAM-SHA-256` gets a login without binding, unless the rule sets
+  `require_channel_binding`. The audit record's `pg_auth` says which it was.
 - **OAuth callbacks reach the application.** seal is never a public endpoint, so the
   authorization code passes through the application. It is not enough alone:
   redeeming it needs the sealed client secret and the flow's PKCE verifier.
@@ -189,6 +198,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   login ends, not just for one request; the caller's preamble comes in between, under
   the idle timeout. `postgres-protocol`'s SCRAM also keeps copies derived from the
   password, which seal cannot wipe.
+- **A presigned URL** is wiped when seal, the message that carries it and
+  `seal-client` drop it. What remains is the transport's write and read buffers, as
+  for every header above, and whatever copies the application makes.
 - **SigV4 signing keys** are derived from the secret access key for one day, region and
   service. A chunked upload holds one for as long as the upload streams; it is wiped
   when the upload ends.
@@ -203,7 +215,14 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 ### Timing limits
 
 - **A deleted key keeps working for a bounded time.** Other instances see a deletion
-  within `max_stale`, and a revoked wrapping key takes effect within `max_unwrap_age`.
+  within `max_stale`, and an unwrapped key is dropped after `max_unwrap_age`.
+- **The wrapping key file is read once.** seal holds it for the life of the process,
+  so deleting or replacing the file takes effect only at a restart, and
+  `max_unwrap_age` does not revoke it. A different wrapping key has a different
+  `wrap_id`, and no key wrapped with the old one can then be read, so the wrapping
+  key is rotated by re-wrapping every key with `seal rewrap` and restarting. Copies of
+  the keys wrapped with the old wrapping key stay readable to whoever has it, until
+  they are deleted.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups
@@ -214,10 +233,6 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 
 ## Open
 
-- **An external security review** of the sealed-value format, the matcher, injection
-  and signing, and the Postgres login. Recommended before the first release, and not
-  yet done; [`reviews/external-review-scope.md`](reviews/external-review-scope.md) is
-  the brief for a reviewer.
 - **The fuzzing campaign** of at least 24 hours per target
   ([`reviews/fuzzing.md`](reviews/fuzzing.md)).
 - **Run-bound capabilities**, so a compromised caller cannot use credentials outside a

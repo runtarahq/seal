@@ -19,7 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::server::Connected;
 
-use crate::callers::{CallerMap, Identity, normalise_subject};
+use crate::callers::{CallerMap, Identity, certificate_identities};
 
 /// A caller's connection, which tells the service who is calling.
 pub struct CallerStream<S> {
@@ -92,16 +92,39 @@ impl<S> Stream for Incoming<S> {
     }
 }
 
+/// Refuses a socket in a directory its group or others can write: any of them could
+/// replace the socket with their own, and callers would then talk to an impostor.
+fn check_socket_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        if std::fs::metadata(directory)?.permissions().mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the socket's directory is writable by its group or others",
+            ));
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+
 /// Listens on a Unix socket, accepting only known uids.
 ///
 /// # Errors
 ///
-/// Returns an error if the socket cannot be bound.
+/// Returns an error if the socket cannot be bound, or if its directory is writable
+/// by its group or others.
 pub fn unix(
     path: &Path,
     callers: Arc<CallerMap>,
     max_connections: usize,
 ) -> io::Result<Incoming<tokio::net::UnixStream>> {
+    check_socket_directory(path)?;
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -264,11 +287,17 @@ pub fn spawn_reloader(tls: &Arc<ReloadingTls>, interval: Duration) {
     });
 }
 
-/// The subject of a verified client certificate, normalised.
-fn subject_of(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Option<String> {
-    let certificate = stream.get_ref().1.peer_certificates()?.first()?;
-    let (_, parsed) = x509_parser::parse_x509_certificate(certificate.as_ref()).ok()?;
-    Some(normalise_subject(&parsed.subject().to_string()))
+/// The identities of a verified client certificate: its subject and its subject
+/// alternative names, in the forms callers are configured in.
+fn identities_of(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Vec<Identity> {
+    stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .and_then(|certificate| x509_parser::parse_x509_certificate(certificate.as_ref()).ok())
+        .map(|(_, parsed)| certificate_identities(&parsed))
+        .unwrap_or_default()
 }
 
 /// Listens on TCP with TLS 1.3, accepting only known certificate subjects.
@@ -308,11 +337,7 @@ pub async fn tcp(
                         .increment(1);
                     return;
                 };
-                let identity = match subject_of(&stream) {
-                    Some(subject) => Identity::Subject(subject),
-                    None => return,
-                };
-                if callers.get(&identity).is_none() {
+                let Some(identity) = callers.identify(identities_of(&stream)) else {
                     metrics::counter!("seal_connections_refused_total", "reason" => "unknown")
                         .increment(1);
                     tracing::warn!(
@@ -320,7 +345,7 @@ pub async fn tcp(
                         "refused a connection from an unknown caller"
                     );
                     return;
-                }
+                };
                 let _ = sender
                     .send(CallerStream {
                         inner: stream,
@@ -332,4 +357,38 @@ pub async fn tcp(
         }
     });
     Ok((Incoming { receiver }, local))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_socket_is_refused_in_a_directory_others_can_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("seal.sock");
+        let callers = Arc::new(CallerMap::default());
+        let set = |mode| {
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        };
+        for mode in [0o770, 0o757, 0o777] {
+            set(mode);
+            let error = unix(&path, Arc::clone(&callers), 1).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{mode:o}");
+            assert!(!path.exists());
+        }
+        // As the systemd unit has it, and a socket left by an earlier run is replaced.
+        set(0o750);
+        drop(unix(&path, Arc::clone(&callers), 1).unwrap());
+        unix(&path, callers, 1).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o660
+        );
+    }
 }

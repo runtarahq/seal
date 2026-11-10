@@ -99,6 +99,8 @@ fn classify_v4(address: Ipv4Addr) -> AddressClass {
         (0, ..) => AddressClass::Unspecified,
         (127, ..) => AddressClass::Loopback,
         (10, ..) | (172, 16..=31, ..) | (192, 168, ..) => AddressClass::Private,
+        // Alibaba Cloud's metadata service, inside the shared address space.
+        (100, 100, 100, 200) => AddressClass::Metadata,
         (100, 64..=127, ..) => AddressClass::SharedAddressSpace,
         (169, 254, ..) => AddressClass::LinkLocal,
         // Azure's wireserver.
@@ -118,6 +120,11 @@ fn classify_v6(address: Ipv6Addr) -> AddressClass {
     match segments {
         [0, 0, 0, 0, 0, 0, 0, 0] => AddressClass::Unspecified,
         [0, 0, 0, 0, 0, 0, 0, 1] => AddressClass::Loopback,
+        // The instance metadata services of AWS and Google Cloud over IPv6, inside the
+        // unique local range.
+        [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254] | [0xfd20, 0x00ce, 0, 0, 0, 0, 0, 0x254] => {
+            AddressClass::Metadata
+        }
         [first, ..] if first & 0xfe00 == 0xfc00 => AddressClass::UniqueLocal,
         [first, ..] if first & 0xffc0 == 0xfe80 => AddressClass::LinkLocal,
         [first, ..] if first & 0xff00 == 0xff00 => AddressClass::Multicast,
@@ -229,7 +236,7 @@ mod tests {
         ("11.0.0.0", Public),
         ("100.63.255.255", Public),
         ("100.64.0.0", SharedAddressSpace),
-        ("100.100.100.200", SharedAddressSpace),
+        ("100.100.100.100", SharedAddressSpace),
         ("100.127.255.255", SharedAddressSpace),
         ("100.128.0.0", Public),
         ("126.255.255.255", Public),
@@ -239,6 +246,11 @@ mod tests {
         ("128.0.0.0", Public),
         ("168.63.129.15", Public),
         ("168.63.129.16", Metadata),
+        ("100.100.100.200", Metadata),
+        ("100.100.100.201", SharedAddressSpace),
+        ("fd00:ec2::254", Metadata),
+        ("fd20:ce::254", Metadata),
+        ("fd00:ec2::253", UniqueLocal),
         ("168.63.129.17", Public),
         ("169.253.255.255", Public),
         ("169.254.0.0", LinkLocal),
@@ -301,7 +313,7 @@ mod tests {
         ("4000::", Reserved),
         ("fbff::", Reserved),
         ("fc00::", UniqueLocal),
-        ("fd00:ec2::254", UniqueLocal),
+        ("fd00:ec2::1", UniqueLocal),
         ("fdff:ffff::", UniqueLocal),
         ("fe00::", Reserved),
         ("fe7f::", Reserved),
@@ -396,6 +408,10 @@ mod tests {
         };
         for address in [
             "169.254.169.254",
+            "100.100.100.200",
+            "::ffff:100.100.100.200",
+            "fd00:ec2::254",
+            "fd20:ce::254",
             "::ffff:169.254.169.254",
             "64:ff9b::a9fe:a9fe",
             "2002:a9fe:a9fe::",

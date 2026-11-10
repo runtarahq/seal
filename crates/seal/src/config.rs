@@ -196,6 +196,9 @@ pub struct CallerConfig {
     pub unix_uid: Option<u32>,
     /// The certificate subject, for TLS, such as `CN=app,O=Example`.
     pub cert_subject: Option<String>,
+    /// A subject alternative name of the certificate, for TLS: a URI such as
+    /// `spiffe://example.org/app`, or a DNS name.
+    pub cert_san: Option<String>,
     /// The keysets it may use. `*` means all.
     pub keysets: Vec<String>,
     /// Whether it may make and rotate keys.
@@ -433,6 +436,9 @@ pub enum AuditFailure {
 pub struct MetricsConfig {
     /// Where `/metrics`, `/healthz` and `/readyz` are served, if anywhere.
     pub listen: Option<SocketAddr>,
+    /// A file holding the bearer token every request to that address must present.
+    /// Needed unless the address is a loopback one.
+    pub token_file: Option<PathBuf>,
 }
 
 mod defaults {
@@ -500,21 +506,64 @@ impl Config {
             return Err(invalid("there are no callers"));
         }
         let mut names = std::collections::BTreeSet::new();
+        let mut uids = std::collections::BTreeSet::new();
+        let mut subjects = std::collections::BTreeSet::new();
+        let mut sans = std::collections::BTreeSet::new();
         for caller in &self.callers {
             if !names.insert(&caller.name) {
                 return Err(invalid(format!("caller {} appears twice", caller.name)));
             }
-            let identities =
-                usize::from(caller.unix_uid.is_some()) + usize::from(caller.cert_subject.is_some());
+            let identities = usize::from(caller.unix_uid.is_some())
+                + usize::from(caller.cert_subject.is_some())
+                + usize::from(caller.cert_san.is_some());
             if identities != 1 {
                 return Err(invalid(format!(
-                    "caller {} needs exactly one of unix_uid and cert_subject",
+                    "caller {} needs exactly one of unix_uid, cert_subject and cert_san",
                     caller.name
                 )));
             }
             if self.listen.unix.is_some() != caller.unix_uid.is_some() {
                 return Err(invalid(format!(
                     "caller {} is identified in a way this listener cannot see",
+                    caller.name
+                )));
+            }
+            // Two callers with one identity would be one caller with the later one's
+            // keysets, whatever the earlier one says.
+            let is_new = match (&caller.unix_uid, &caller.cert_subject) {
+                (Some(uid), _) => uids.insert(*uid),
+                (None, Some(subject)) => {
+                    let subject = crate::callers::normalise_subject(subject);
+                    let is_written_out = subject.split(',').all(|part| {
+                        part.split_once('=')
+                            .is_some_and(|(name, value)| !name.is_empty() && !value.is_empty())
+                    });
+                    if !is_written_out {
+                        return Err(invalid(format!(
+                            "caller {} has a cert_subject that is not attributes like CN=app,O=Example",
+                            caller.name
+                        )));
+                    }
+                    subjects.insert(subject)
+                }
+                (None, None) => match &caller.cert_san {
+                    Some(name) => {
+                        let is_a_name =
+                            !name.is_empty() && name.chars().all(|c| c.is_ascii_graphic());
+                        if !is_a_name {
+                            return Err(invalid(format!(
+                                "caller {} has a cert_san that is not a URI or a DNS name",
+                                caller.name
+                            )));
+                        }
+                        sans.insert(crate::callers::Identity::san(name))
+                    }
+                    None => true,
+                },
+            };
+            if !is_new {
+                return Err(invalid(format!(
+                    "caller {} has the identity of another caller",
                     caller.name
                 )));
             }
@@ -560,6 +609,17 @@ impl Config {
         self.keyring()
             .validate()
             .map_err(|error| invalid(error.to_string()))?;
+        match (self.metrics.listen, &self.metrics.token_file) {
+            (Some(address), None) if !address.ip().is_loopback() => {
+                return Err(invalid(
+                    "metrics.listen is not a loopback address, so it needs metrics.token_file",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(invalid("metrics.token_file needs metrics.listen"));
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -675,10 +735,83 @@ mod tests {
         let twice =
             format!("{MINIMAL}\n[[callers]]\nname = \"app\"\nunix_uid = 1\nkeysets = [\"*\"]");
         assert!(Config::parse(&twice).is_err());
+        let same_uid =
+            format!("{MINIMAL}\n[[callers]]\nname = \"other\"\nunix_uid = 990\nkeysets = [\"*\"]");
+        assert!(
+            Config::parse(&same_uid)
+                .unwrap_err()
+                .0
+                .contains("identity of another caller")
+        );
+        let mtls = MINIMAL
+            .replace(
+                "unix = \"/run/seal/seal.sock\"",
+                "tcp = \"127.0.0.1:1\"\ntls = { cert = \"c\", key = \"k\", client_ca = \"a\" }",
+            )
+            .replace("unix_uid = 990", "cert_subject = \"CN=app, O=Example\"");
+        Config::parse(&mtls).unwrap();
+        let same_subject = format!(
+            "{mtls}\n[[callers]]\nname = \"other\"\ncert_subject = \"cn=app,O=Example\"\nkeysets = [\"*\"]"
+        );
+        assert!(
+            Config::parse(&same_subject)
+                .unwrap_err()
+                .0
+                .contains("identity of another caller")
+        );
+        let by_name = mtls.replace(
+            "cert_subject = \"CN=app, O=Example\"",
+            "cert_san = \"spiffe://example.org/app\"",
+        );
+        Config::parse(&by_name).unwrap();
+        let same_name = format!(
+            "{by_name}\n[[callers]]\nname = \"other\"\ncert_san = \"spiffe://example.org/app\"\nkeysets = [\"*\"]"
+        );
+        assert!(
+            Config::parse(&same_name)
+                .unwrap_err()
+                .0
+                .contains("identity of another caller")
+        );
+        let two_ways = by_name.replace("cert_san", "cert_subject = \"CN=app\"\ncert_san");
+        assert!(Config::parse(&two_ways).is_err());
+        for name in ["", "a b", "caf\u{e9}.example"] {
+            let text = by_name.replace("spiffe://example.org/app", name);
+            assert!(
+                Config::parse(&text).unwrap_err().0.contains("cert_san"),
+                "{name}"
+            );
+        }
+        let name_on_unix = MINIMAL.replace("unix_uid = 990", "cert_san = \"app.example\"");
+        assert!(Config::parse(&name_on_unix).is_err());
+        for subject in ["app", "CN=", "CN=app,", "=app"] {
+            let text = mtls.replace("CN=app, O=Example", subject);
+            assert!(
+                Config::parse(&text).unwrap_err().0.contains("cert_subject"),
+                "{subject}"
+            );
+        }
         let bad_keyset = MINIMAL.replace("keysets = [\"*\"]", "keysets = [\"..\"]");
         assert!(Config::parse(&bad_keyset).is_err());
         let no_callers = MINIMAL.replace("[[callers]]\n        name = \"app\"\n        unix_uid = 990\n        keysets = [\"*\"]", "");
         assert!(Config::parse(&no_callers).is_err());
+    }
+
+    #[test]
+    fn metrics_beyond_loopback_need_a_token() {
+        let with = |metrics: &str| Config::parse(&format!("{MINIMAL}\n[metrics]\n{metrics}"));
+        with("listen = \"127.0.0.1:9464\"").unwrap();
+        with("listen = \"[::1]:9464\"").unwrap();
+        for open in ["0.0.0.0:9464", "10.0.0.5:9464", "[::]:9464"] {
+            let error = with(&format!("listen = \"{open}\"")).unwrap_err();
+            assert!(error.0.contains("token_file"), "{open}");
+            with(&format!(
+                "listen = \"{open}\"\ntoken_file = \"/etc/seal/metrics-token\""
+            ))
+            .unwrap();
+        }
+        with("listen = \"127.0.0.1:9464\"\ntoken_file = \"/etc/seal/metrics-token\"").unwrap();
+        assert!(with("token_file = \"/etc/seal/metrics-token\"").is_err());
     }
 
     #[test]

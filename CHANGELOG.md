@@ -25,6 +25,8 @@ The first release.
   [`docs/policy.md`](docs/policy.md).
 - Injection into a header, basic auth, the query, the path, a form field or a JSON
   field; companion values; shared values, such as a platform-wide OAuth app's client secret.
+- A response that repeats a credential seal sent, in a header or in its body, does not
+  reach the caller with it.
 - Response sealing: declared fields in JSON, form and XML responses come back sealed.
   A policy may name claims of a sealed JWT to return in plaintext, such as its expiry.
 - A JSON body or response keeps everything seal does not change as it was written, digit
@@ -50,13 +52,15 @@ The first release.
 
 - Sessions through seal: seal logs in with a sealed password, using SCRAM-SHA-256-PLUS
   with channel binding over TLS, then relays the session, including `COPY` and
-  replication. MD5 and cleartext only where the policy allows them. Tested against
-  Postgres 14 to 18. See [`docs/postgres.md`](docs/postgres.md).
+  replication. MD5 and cleartext only where the policy allows them, and a policy may
+  require channel binding. A server that never asks for the password is not logged in
+  to. Tested against Postgres 14 to 18. See [`docs/postgres.md`](docs/postgres.md).
 
 ### The service and the client
 
 - Three modes behind one client interface: in-process, a Unix socket on the same host,
-  and mutual TLS from another machine. See [`docs/operations.md`](docs/operations.md).
+  and mutual TLS from another machine, where a caller is a certificate's subject or one
+  of its subject alternative names. See [`docs/operations.md`](docs/operations.md).
 - `seal-client` for applications, with `connect_pg` and `cancel_pg` behind its
   `postgres` feature.
 - Key management: keysets, rotation, wrapped keys, key sources, and administrative
@@ -64,7 +68,9 @@ The first release.
 - `seal reseal` moves stored values to a keyset's current key, and with
   `--rewrite-policies` gives them new policies, so that a change of destination does not
   mean entering every secret again. Only whoever runs seal can do this.
-- Audit records for every use, Prometheus metrics, and process hardening (no core dumps,
+- `seal rewrap` rotates the wrapping key, by wrapping every key again into a new
+  directory.
+- Audit records for every use and for every caller refused, Prometheus metrics, and process hardening (no core dumps,
   not dumpable, memory locked as configured, never as root).
 - A systemd unit, a container image and example configurations in [`deploy/`](deploy).
   The binary is static, linked against musl, and the image holds nothing else.
@@ -81,5 +87,7 @@ The first release.
   [`docs/dependencies.md`](docs/dependencies.md).
 - The [threat model](docs/threat-model.md) states what seal does and does not protect
   against.
+- A [security audit](docs/security-audit.md) of the source, with what became of each
+  finding.
 
 [0.1.0]: https://github.com/runtarahq/seal/releases/tag/v0.1.0

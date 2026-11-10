@@ -46,6 +46,7 @@ pub struct PgSession {
     pub(crate) password: Option<Zeroizing<Vec<u8>>>,
     pub(crate) allow_md5: bool,
     pub(crate) allow_cleartext: bool,
+    pub(crate) require_channel_binding: bool,
     pub(crate) client_cert: Option<ClientCertMaterial>,
     pub(crate) allow_private: bool,
     pub(crate) connect_timeout: Duration,
@@ -200,10 +201,26 @@ impl PgSession {
             password: password.as_deref().map(Vec::as_slice),
             allow_md5: self.allow_md5,
             allow_cleartext: self.allow_cleartext,
+            require_channel_binding: self.require_channel_binding,
             client_cert: self.client_cert.is_some(),
             end_point,
         };
-        let outcome = login::login(&mut server, &credentials).await;
+        // The login has the deadline the connection had: a server that goes quiet
+        // after the handshake would otherwise hold this session for as long as it likes.
+        let outcome = tokio::time::timeout(
+            self.connect_timeout,
+            login::login(&mut server, &credentials),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(LoginFailed {
+                error: BrokerError::new(
+                    ErrorCode::UpstreamTimeout,
+                    "the server did not finish the login in time",
+                ),
+                sqlstate: "08006".to_owned(),
+            })
+        });
         drop(password);
         self.client_cert = None;
         let (method, before_ok) = outcome.map_err(|LoginFailed { error, sqlstate }| {

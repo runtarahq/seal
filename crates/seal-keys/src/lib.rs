@@ -23,7 +23,7 @@ use tokio::sync::OwnedSemaphorePermit;
 
 pub use http_source::{HttpKeySource, HttpKeySourceConfig};
 pub use keyring::{Keyring, KeyringConfig, PublicKeyInfo};
-pub use source::{DirKeySource, KeySource, WrappedKey};
+pub use source::{DirKeySource, KeySource, WrappedKey, rewrap};
 pub use wrap::{FileKeyWrap, KeyWrap};
 
 /// Why keys could not be found or changed.

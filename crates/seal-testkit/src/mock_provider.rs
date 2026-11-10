@@ -6,6 +6,7 @@
 //! | Path | Behaviour |
 //! |---|---|
 //! | `/echo…` | Returns what it received, as JSON |
+//! | `/quiet…` | Records what it received, and returns nothing of it |
 //! | `/redirect` | 302 to `/echo` |
 //! | `/zeros/<n>` | Streams `n` zero bytes |
 //! | `/sink` | Reads the body, and returns its length as `{"bytes":n}` |
@@ -423,6 +424,7 @@ async fn handle(request: Request<Incoming>, state: Arc<State>) -> Response<MockB
         "/trickle" => with_body(StatusCode::OK, Streamed::trickle(Arc::clone(&state))),
         "/reset" => with_body(StatusCode::OK, Streamed::reset(Arc::clone(&state))),
         _ if path.starts_with("/echo") => echo(&received),
+        _ if path.starts_with("/quiet") => empty(StatusCode::OK),
         _ => empty(StatusCode::NOT_FOUND),
     }
 }

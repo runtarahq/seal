@@ -12,6 +12,7 @@ publish.workspace = true
 prost = "0.14"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "transport"] }
 tonic-prost = "0.14"
+zeroize = "1"
 
 [build-dependencies]
 protox = "0.10"

@@ -554,6 +554,10 @@ pub enum Inject {
         /// Also allows cleartext passwords, over TLS.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_cleartext_password: bool,
+        /// Refuses a login that is not bound to its TLS connection: only
+        /// SCRAM-SHA-256-PLUS will do.
+        #[serde(default, skip_serializing_if = "is_false")]
+        require_channel_binding: bool,
     },
     /// Not used directly: another field's rule uses this value at this
     /// destination, and it may go nowhere else.

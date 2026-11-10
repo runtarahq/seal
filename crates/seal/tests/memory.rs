@@ -113,7 +113,7 @@ async fn the_cost_of_a_stream_and_the_fixed_overhead_are_within_the_constants() 
     text(
         instance
             .client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .unwrap(),
     )
@@ -233,7 +233,7 @@ async fn the_cost_of_a_provider_connection_is_within_the_constant() {
     text(
         instance
             .client
-            .send(get(&url(&providers[0], "/echo"), &[("token", &tokens[0])]))
+            .send(get(&url(&providers[0], "/quiet"), &[("token", &tokens[0])]))
             .await
             .unwrap(),
     )
@@ -244,7 +244,7 @@ async fn the_cost_of_a_provider_connection_is_within_the_constant() {
         text(
             instance
                 .client
-                .send(get(&url(provider, "/echo"), &[("token", token)]))
+                .send(get(&url(provider, "/quiet"), &[("token", token)]))
                 .await
                 .unwrap(),
         )
@@ -288,7 +288,7 @@ async fn identity(
 }
 
 fn tls_url(provider: &MockProvider) -> String {
-    format!("https://{HOST}:{}/echo", provider.port())
+    format!("https://{HOST}:{}/quiet", provider.port())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -386,7 +386,7 @@ async fn a_capped_buffer_costs_within_its_term() {
     text(
         instance
             .client
-            .send(post_form(&url(&provider, "/echo"), &secret))
+            .send(post_form(&url(&provider, "/quiet"), &secret))
             .await
             .unwrap(),
     )
@@ -509,7 +509,7 @@ async fn acceptance_with_every_bound_filled_memory_stays_under_the_ceiling() {
             field: &field,
         };
         let token = seal_format::seal(&public, &kid, binding, b"x", &bearer_policy).unwrap();
-        let mut send = get(&url(&provider, "/echo"), &[("token", &token)]);
+        let mut send = get(&url(&provider, "/quiet"), &[("token", &token)]);
         send.keyset = name.clone();
         text(client.send(send).await.unwrap()).await;
     }
@@ -518,7 +518,7 @@ async fn acceptance_with_every_bound_filled_memory_stays_under_the_ceiling() {
         .seal("token", b"SEALCANARY-token", &bearer_policy)
         .await;
     for index in 0..UNKNOWN {
-        let mut send = get(&url(&provider, "/echo"), &[("token", &acme_token)]);
+        let mut send = get(&url(&provider, "/quiet"), &[("token", &acme_token)]);
         send.keyset = KeysetId::new(format!("nobody-{index}")).unwrap();
         let _ = client.send(send).await;
     }

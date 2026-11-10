@@ -663,6 +663,23 @@ fn client_certificates_need_valid_pem_and_https() {
     .unwrap_err();
 }
 
+#[test]
+fn a_literal_has_no_control_characters_but_the_line_ends_of_pem() {
+    for username in ["us\ner", "user\r\n", "us\ter", "us\u{c}er", "us\u{0}er"] {
+        with_inject(json!({ "basic": { "username": { "literal": username } } })).unwrap_err();
+    }
+    with_inject(json!({ "basic": { "username": { "literal": "a user" } } })).unwrap();
+
+    let certificate = |literal: &str| {
+        with_inject(json!({ "client_cert": {
+            "cert": { "literal": literal }, "chain": { "literal": literal },
+        } }))
+    };
+    certificate("-----BEGIN CERTIFICATE-----\r\nMIIB\n-----END CERTIFICATE-----\n").unwrap();
+    certificate("-----BEGIN CERTIFICATE-----\n\u{0}").unwrap_err();
+    certificate("-----BEGIN CERTIFICATE-----\t").unwrap_err();
+}
+
 // JWT assertions.
 
 #[test]
@@ -817,11 +834,35 @@ fn weakening_flags_default_to_off() {
     let Inject::PgPassword {
         allow_md5,
         allow_cleartext_password,
+        require_channel_binding,
     } = postgres(|_| {}).unwrap().rules[0].inject
     else {
         panic!("not a Postgres rule");
     };
-    assert!(!allow_md5 && !allow_cleartext_password);
+    assert!(!allow_md5 && !allow_cleartext_password && !require_channel_binding);
+}
+
+#[test]
+fn requiring_channel_binding_rules_out_the_methods_that_have_none() {
+    let with = |options: Value| {
+        parse(&json!({ "rules": [{
+            "destination": {
+                "scheme": "postgres", "host": "db.example.com", "port": 5432,
+                "databases": ["app"], "user": { "literal": "app_user" }
+            },
+            "inject": { "pg_password": options },
+        }] }))
+    };
+    with(json!({ "require_channel_binding": true })).unwrap();
+    with(json!({ "require_channel_binding": true, "allow_md5": true })).unwrap_err();
+    with(json!({ "require_channel_binding": true, "allow_cleartext_password": true })).unwrap_err();
+    // Left out when it is off, so existing policies keep their canonical form.
+    let policy = with(json!({ "require_channel_binding": false })).unwrap();
+    assert!(
+        !String::from_utf8(policy.canonical_json().unwrap())
+            .unwrap()
+            .contains("binding")
+    );
 }
 
 #[test]

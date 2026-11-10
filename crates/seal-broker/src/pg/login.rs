@@ -65,6 +65,8 @@ pub struct Credentials<'a> {
     pub allow_md5: bool,
     /// Whether a cleartext password is allowed.
     pub allow_cleartext: bool,
+    /// Whether only SCRAM-SHA-256-PLUS will do.
+    pub require_channel_binding: bool,
     /// Whether a client certificate was presented.
     pub client_cert: bool,
     /// The `tls-server-end-point` channel binding data, if the server's certificate
@@ -127,17 +129,26 @@ pub async fn login<S: AsyncRead + AsyncWrite + Unpin>(
                 let (kind, rest) = authentication(&message)?;
                 match kind {
                     0 => {
-                        let method = method.unwrap_or(if credentials.client_cert {
-                            PgAuth::Cert
-                        } else {
-                            PgAuth::Trust
-                        });
+                        let method = match method {
+                            Some(method) => method,
+                            // A server that asks for nothing has proved nothing. With
+                            // a password to present, that is not the login the policy
+                            // describes, and the caller must not be told it is.
+                            None if credentials.password.is_some() => {
+                                return Err(failed(
+                                    AUTH_SPEC,
+                                    "the server accepted the login without asking for the password",
+                                ));
+                            }
+                            None if credentials.client_cert => PgAuth::Cert,
+                            None => PgAuth::Trust,
+                        };
                         return Ok((method, before_ok));
                     }
                     3 => {
                         let password = credentials
                             .password
-                            .filter(|_| credentials.allow_cleartext)
+                            .filter(|_| credentials.allow_cleartext && !credentials.require_channel_binding)
                             .ok_or_else(|| failed(AUTH_SPEC, "the server asks for a cleartext password, which the rule does not allow"))?;
                         send(server, &wire::password_message(password)).await?;
                         method = Some(PgAuth::Cleartext);
@@ -145,7 +156,9 @@ pub async fn login<S: AsyncRead + AsyncWrite + Unpin>(
                     5 => {
                         let password = credentials
                             .password
-                            .filter(|_| credentials.allow_md5)
+                            .filter(|_| {
+                                credentials.allow_md5 && !credentials.require_channel_binding
+                            })
                             .ok_or_else(|| {
                                 failed(
                                     AUTH_SPEC,
@@ -172,7 +185,14 @@ pub async fn login<S: AsyncRead + AsyncWrite + Unpin>(
                             )
                         })?;
                         method = Some(
-                            scram(server, password, rest, credentials.end_point.clone()).await?,
+                            scram(
+                                server,
+                                password,
+                                rest,
+                                credentials.end_point.clone(),
+                                credentials.require_channel_binding,
+                            )
+                            .await?,
                         );
                     }
                     _ => {
@@ -240,6 +260,7 @@ async fn scram<S: AsyncRead + AsyncWrite + Unpin>(
     password: &[u8],
     offered: &[u8],
     end_point: Option<Vec<u8>>,
+    require_channel_binding: bool,
 ) -> Result<PgAuth, LoginFailed> {
     let mechanisms: Vec<&[u8]> = offered
         .split(|byte| *byte == 0)
@@ -263,6 +284,13 @@ async fn scram<S: AsyncRead + AsyncWrite + Unpin>(
             ));
         }
     };
+    // Decided before anything derived from the password is sent.
+    if require_channel_binding && method != PgAuth::ScramPlus {
+        return Err(failed(
+            AUTH_SPEC,
+            "the rule requires channel binding, which this login would not have",
+        ));
+    }
     let mut exchange = ScramSha256::new(password, binding);
     send(
         server,

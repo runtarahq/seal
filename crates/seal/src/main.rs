@@ -61,6 +61,20 @@ enum Command {
         #[arg(long)]
         rewrite_policies: bool,
     },
+    /// Rotates the wrapping key: wraps every key in the configured key directory
+    /// again, under a new wrapping key, into a new directory. Nothing configured is
+    /// changed; point the configuration at the new directory and wrapping key, and
+    /// restart seal.
+    Rewrap {
+        #[arg(long)]
+        config: PathBuf,
+        /// The new wrapping key, made with `keygen --wrapping-key`.
+        #[arg(long)]
+        new_wrapping_key: PathBuf,
+        /// Where the re-wrapped keys go. It must not exist.
+        #[arg(long = "out")]
+        output: PathBuf,
+    },
     /// Prints the version.
     Version,
 }
@@ -165,6 +179,17 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 println!("resealed {} values", done.values);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Rewrap {
+            config,
+            new_wrapping_key,
+            output,
+        } => {
+            let config = Config::load(&config).map_err(|error| error.to_string())?;
+            let keys =
+                runtime()?.block_on(seal::cli::rewrap(&config, &new_wrapping_key, &output))?;
+            println!("re-wrapped {keys} keys into {}", output.display());
             Ok(ExitCode::SUCCESS)
         }
         Command::Serve { config } => {

@@ -76,6 +76,7 @@ const OPTIONS: &[&str] = &[
     "pg_password",
     "allow_md5",
     "allow_cleartext_password",
+    "require_channel_binding",
     "companion",
     "fields",
     "at",

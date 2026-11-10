@@ -452,7 +452,10 @@ impl SealClient for ScanningClient {
         result
     }
 
-    async fn presign(&self, request: seal_client::PresignRequest) -> Result<String, SealError> {
+    async fn presign(
+        &self,
+        request: seal_client::PresignRequest,
+    ) -> Result<seal_client::Zeroizing<String>, SealError> {
         // The URL is a credential by design, so it is not kept for the scan.
         let result = self.inner.presign(request).await;
         self.keep(&result);

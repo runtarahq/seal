@@ -377,6 +377,7 @@ pub fn postgres(
         Inject::PgPassword {
             allow_md5: false,
             allow_cleartext_password: false,
+            require_channel_binding: false,
         },
     )))
 }
@@ -766,7 +767,8 @@ mod tests {
             policy.rules[0].inject,
             Inject::PgPassword {
                 allow_md5: false,
-                allow_cleartext_password: false
+                allow_cleartext_password: false,
+                require_channel_binding: false,
             }
         );
         assert!(matches!(

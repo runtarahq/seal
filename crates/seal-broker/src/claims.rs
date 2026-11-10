@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::value::RawValue;
+use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 /// The largest claim that is exposed, as JSON. A larger one is left out.
@@ -26,8 +27,8 @@ pub fn exposed(token: &[u8], names: &[String]) -> Option<String> {
         return None;
     }
     let mut parts = token.split(|byte| *byte == b'.');
-    let (_header, payload, _signature) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() {
+    let (header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || !is_signed(header, signature) {
         return None;
     }
     let payload = Zeroizing::new(URL_SAFE_NO_PAD.decode(payload).ok()?);
@@ -55,6 +56,21 @@ pub fn exposed(token: &[u8], names: &[String]) -> Option<String> {
         return None;
     }
     serde_json::to_string(&chosen).ok()
+}
+
+/// Whether a token's header says it is signed, and it has a signature. The signature
+/// itself is not checked, since seal has no key to check it with: this only keeps a
+/// token that says it is unsigned from being read as if it were not.
+fn is_signed(header: &[u8], signature: &[u8]) -> bool {
+    let Ok(header) = URL_SAFE_NO_PAD.decode(header) else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<Map<String, Value>>(&header) else {
+        return false;
+    };
+    let algorithm = header.get("alg").and_then(Value::as_str);
+    !signature.is_empty()
+        && algorithm.is_some_and(|alg| !alg.is_empty() && !alg.eq_ignore_ascii_case("none"))
 }
 
 #[cfg(test)]
@@ -122,6 +138,31 @@ mod tests {
         ] {
             assert_eq!(exposed_json(token.as_bytes(), &["exp"]), None, "{token}");
         }
+    }
+
+    #[test]
+    fn a_token_that_is_not_signed_exposes_nothing() {
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1}"#);
+        let header = |json: &[u8]| URL_SAFE_NO_PAD.encode(json);
+        for token in [
+            format!("{}.{payload}.sig", header(br#"{"alg":"none"}"#)),
+            format!("{}.{payload}.sig", header(br#"{"alg":"NoNe"}"#)),
+            format!("{}.{payload}.sig", header(br#"{"alg":""}"#)),
+            format!("{}.{payload}.sig", header(br#"{"typ":"JWT"}"#)),
+            format!("{}.{payload}.sig", header(br#"{"alg":1}"#)),
+            format!("{}.{payload}.sig", header(b"[]")),
+            format!("{}.{payload}.", header(br#"{"alg":"RS256"}"#)),
+        ] {
+            assert_eq!(exposed_json(token.as_bytes(), &["exp"]), None, "{token}");
+        }
+        let signed = format!(
+            "{}.{payload}.sig",
+            header(br#"{"alg":"ES256","typ":"JWT"}"#)
+        );
+        assert_eq!(
+            exposed_json(signed.as_bytes(), &["exp"]),
+            Some(json!({ "exp": 1 }))
+        );
     }
 
     #[test]

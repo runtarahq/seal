@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -440,7 +441,7 @@ impl SealClient for GrpcClient {
         })
     }
 
-    async fn presign(&self, request: PresignRequest) -> Result<String, SealError> {
+    async fn presign(&self, request: PresignRequest) -> Result<Zeroizing<String>, SealError> {
         let message = seal_proto::v1::PresignRequest {
             keyset: request.keyset.to_string(),
             item: request.item.to_string(),
@@ -472,10 +473,11 @@ impl SealClient for GrpcClient {
             url: request.url,
             expires_s: request.expires_s,
         };
-        let reply = self
+        let mut reply = self
             .call(|mut client| async move { client.presign(message).await })
             .await?;
-        Ok(reply.url)
+        // Moved out, and the reply wipes what is left of itself.
+        Ok(Zeroizing::new(std::mem::take(&mut reply.url)))
     }
 
     async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {

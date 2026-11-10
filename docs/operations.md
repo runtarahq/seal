@@ -50,8 +50,8 @@ configuration file that its group or others can write.
 
 | Setting | Default | |
 |---|---|---|
-| `unix` | | A socket path. Callers then need `unix_uid` |
-| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` |
+| `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
+| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san` |
 | `reload_interval` | `10s` | How often certificate files are checked |
 
 ### `[[callers]]`
@@ -59,9 +59,21 @@ configuration file that its group or others can write.
 | Setting | |
 |---|---|
 | `name` | The name in audit records |
-| `unix_uid` or `cert_subject` | Exactly one, matching the listener |
+| `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
 | `admin` | Whether it may generate keysets, rotate and list public keys. Default `false` |
+
+A `cert_subject` is the certificate's whole subject, attribute by attribute and in the
+certificate's order, such as `CN=app,O=Example`. Attribute names and the spaces around
+separators do not matter; values are compared exactly. A certificate whose subject has
+a comma in a value, or more than one attribute in a relative distinguished name, is
+refused, because it could not be told from another subject once written down.
+
+A `cert_san` is one of the certificate's subject alternative names instead: a URI,
+compared as written, such as `spiffe://example.org/app`, or a DNS name. That is the
+name a certificate is issued for, and the better choice where the client CA also
+issues certificates for other services, since a subject is only what the requester
+asked for. A certificate that matches two configured callers is refused.
 
 ### `[keys]`
 
@@ -112,9 +124,10 @@ least twice `max_keys_per_keyset`.
 | `limits.rate_per_caller` | `1000/s` | |
 | `limits.rate_per_keyset` | `200/s` | |
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
-| `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user |
+| `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |
 | `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz` |
+| `metrics.token_file` | none | A file only seal's user can read, holding a token of at least 16 printable characters. Every request must then send `Authorization: Bearer <token>`. Required unless `metrics.listen` is a loopback address |
 
 A rule in a sealed policy can only tighten a limit, never relax one.
 
@@ -175,12 +188,15 @@ it has not seen. So:
 - A key added to the source reaches every instance within `max_stale`, normally within
   `refresh_interval`.
 - A key deleted from the source stops opening on every instance within `max_stale`.
-- Revoking or destroying the wrapping key takes effect within `max_unwrap_age`.
+- An unwrapped key is dropped after `max_unwrap_age` and unwrapped again when needed.
+- The wrapping key file is read once, at start-up. Deleting or replacing it takes
+  effect at the next restart, and a restart with a different wrapping key cannot read
+  any key wrapped with the old one. To change it, see
+  [rotating the wrapping key](#rotating-the-wrapping-key).
 - None of these interrupts a request already running.
 
 If the key source is unreachable, loaded keysets keep working for `max_stale`, then return
-`KEYS_UNAVAILABLE`. If the wrapping key is unavailable, they keep working until each key's
-`max_unwrap_age`.
+`KEYS_UNAVAILABLE`.
 
 ### Rotation
 
@@ -197,6 +213,27 @@ If the key source is unreachable, loaded keysets keep working for `max_stale`, t
    key pass through unchanged, so running it again is safe, and it never overwrites its
    output. Store the results.
 5. Delete the old wrapped key from the key source.
+
+### Rotating the wrapping key
+
+For a directory key source. A key service re-wraps the keys it holds itself.
+
+1. Make the new wrapping key, and wrap every key again into a new directory:
+
+   ```sh
+   seal keygen --wrapping-key /etc/seal/kek-2 && chown seal: /etc/seal/kek-2
+   seal rewrap --config /etc/seal/seal.toml --new-wrapping-key /etc/seal/kek-2 --out /var/lib/seal/keys-2
+   ```
+
+   Each key is unwrapped, checked against its public key and wrapped again. The
+   configured directory and wrapping key are not touched, the new directory must not
+   exist, and a run that fails part way leaves nothing in use: delete the new directory
+   and run it again.
+2. Point `keys.source` and `keys.wrap` at the new directory and the new wrapping key on
+   every instance, and restart. Keys made between step 1 and the restart are in the old
+   directory only, so do not generate or rotate keys in between.
+3. Delete the old directory and the old wrapping key, and any backups that hold them:
+   until then the old wrapping key still opens the old copies.
 
 ### Changing policies
 
@@ -243,9 +280,19 @@ is someone guessing. A `presign` record has `expires_s`, how long the URL lasts:
 done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
+A caller refused a keyset, a value's keyset or an administrative call leaves a record
+too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an
+application trying what it was not given. Two refusals leave none: a request over a
+rate or concurrency limit, which bounds how many records a caller can cause, and a
+request too malformed to name a keyset.
+
 ## Health and metrics
 
-`/healthz` answers when the process is up, and `/readyz` when the key source answers.
+`/healthz` answers when the process is up, and `/readyz` when the key source answers;
+the key source is asked at most once in five seconds, however often `/readyz` is.
+On a loopback address the listener answers anyone on the host. On any other address
+seal does not start without `metrics.token_file`, and every request must then present
+the token: give it to the scraper as a bearer token, and to probes as a header.
 `/metrics` is in Prometheus format, with no keyset or item labels.
 
 ## Hardening

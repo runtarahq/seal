@@ -105,9 +105,14 @@ pub fn canonical_query(query: &str) -> String {
         .join("&")
 }
 
-/// A header value with its ends trimmed and each run of whitespace made one space.
+/// A header value with its ends trimmed and each run of spaces made one space, as the
+/// AWS SDKs do it. Other whitespace is not folded: `sign` refuses a value that has any.
 fn trim_all(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    value
+        .split(' ')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The canonical headers and the signed header list, from `(name, value)` pairs in the
@@ -379,6 +384,11 @@ impl Signer {
                 let value = value
                     .to_str()
                     .map_err(|_| bad("a signed header is not printable ASCII"))?;
+                // AWS and its SDKs fold spaces only. A tab would be signed one way
+                // here and read another way there, so it is refused, not guessed at.
+                if value.contains('\t') {
+                    return Err(bad("a signed header has a tab"));
+                }
                 signed_headers.push((name.to_owned(), value.to_owned()));
             }
         }
@@ -504,14 +514,17 @@ pub const CHUNK_SIZE: usize = 64 * 1024;
 const CHUNK_OVERHEAD: u64 = 17 + 64 + 2 + 2;
 
 /// The length of a body of `decoded` bytes once framed in chunks of [`CHUNK_SIZE`],
-/// ending with an empty chunk.
+/// ending with an empty chunk. `None` if that is more than a `u64` holds: the length
+/// is the caller's `Content-Length`, which may claim anything.
 #[must_use]
-pub fn framed_length(decoded: u64) -> u64 {
+pub fn framed_length(decoded: u64) -> Option<u64> {
     let size = CHUNK_SIZE as u64;
     let full = decoded / size;
     let rest = decoded % size;
     let frame = |length: u64| format!("{length:x}").len() as u64 + CHUNK_OVERHEAD + length;
-    full * frame(size) + if rest > 0 { frame(rest) } else { 0 } + frame(0)
+    full.checked_mul(frame(size))?
+        .checked_add(if rest > 0 { frame(rest) } else { 0 })?
+        .checked_add(frame(0))
 }
 
 impl ChunkSigner {
@@ -628,12 +641,16 @@ fn content_length(headers: &HeaderMap) -> Result<Option<u64>, BrokerError> {
 ///
 /// # Errors
 ///
-/// [`ErrorCode::BadRequest`] if the caller's content coding cannot be a header.
+/// [`ErrorCode::BadRequest`] if the caller's content coding cannot be a header, and
+/// [`ErrorCode::BodyTooLarge`] if the framed length cannot be a `Content-Length`.
 pub fn prepare_streaming(headers: &mut HeaderMap, decoded_length: u64) -> Result<(), BrokerError> {
-    headers.insert(
-        http::header::CONTENT_LENGTH,
-        HeaderValue::from(framed_length(decoded_length)),
-    );
+    let framed = framed_length(decoded_length).ok_or_else(|| {
+        BrokerError::new(
+            ErrorCode::BodyTooLarge,
+            "the body is too long to sign in chunks",
+        )
+    })?;
+    headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from(framed));
     let coding = match headers.get(http::header::CONTENT_ENCODING) {
         Some(existing) => {
             let existing = existing

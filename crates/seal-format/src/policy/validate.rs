@@ -265,8 +265,8 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         Inject::ClientCert {
             cert, chain, ca, ..
         } => {
-            part(cert)?;
-            chain.as_ref().map_or(Ok(()), part)?;
+            pem_part(cert)?;
+            chain.as_ref().map_or(Ok(()), pem_part)?;
             ca.as_deref().map_or(Ok(()), pem)
         }
         Inject::AwsSigv4 {
@@ -337,7 +337,15 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             jwt_header(header)?;
             parameter_name(form_field)
         }
-        Inject::PgPassword { .. } | Inject::Companion {} => Ok(()),
+        Inject::PgPassword {
+            allow_md5,
+            allow_cleartext_password,
+            require_channel_binding,
+        } => require(
+            !(*require_channel_binding && (*allow_md5 || *allow_cleartext_password)),
+            "require_channel_binding cannot go with allow_md5 or allow_cleartext_password",
+        ),
+        Inject::Companion {} => Ok(()),
     }
 }
 
@@ -491,8 +499,23 @@ fn part(part: &Part) -> Result<(), FormatError> {
     match part {
         Part::Field(_) => Ok(()),
         Part::Literal(value) => require(
-            !value.is_empty() && !value.chars().any(|c| c.is_control() && !c.is_whitespace()),
+            !value.is_empty() && !has_control_character(value),
             "a literal value is empty or has control characters",
+        ),
+    }
+}
+
+/// A part that holds PEM, whose literal has lines: the only control characters it may
+/// have are the ones that end them.
+fn pem_part(part: &Part) -> Result<(), FormatError> {
+    match part {
+        Part::Field(_) => Ok(()),
+        Part::Literal(value) => require(
+            !value.is_empty()
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\r' | '\n')),
+            "a certificate literal is empty or has control characters",
         ),
     }
 }

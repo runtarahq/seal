@@ -109,10 +109,8 @@ fn a_path_injection_goes_before_the_callers_path() {
         &*head.path_and_query,
         "/bot123:AA-b_c/sendMessage?chat_id=1"
     );
-    assert_eq!(
-        head.path_secret.as_deref().map(Vec::as_slice),
-        Some(&b"123:AA-b_c"[..])
-    );
+    assert_eq!(head.injected.len(), 1);
+    assert_eq!(head.injected[0].as_slice(), b"123:AA-b_c");
 
     let head = head_for(&path("/v1/{}/api"), b"key", URL, &HeaderMap::new()).unwrap();
     assert_eq!(&*head.path_and_query, "/v1/key/api/v2/orders");
@@ -366,6 +364,13 @@ fn the_caller_cannot_set_an_injected_form_field_even_encoded() {
             apply_to_body(&form_body(&[("password", b"s")]), &form_type(), body).unwrap_err();
         assert_eq!(error.code(), ErrorCode::Conflict, "{}", text(body));
     }
+    // Nor behind a separator some servers read and seal's parser does not.
+    for body in [&b"a=1;password=x"[..], b"a=1;", b";"] {
+        let error =
+            apply_to_body(&form_body(&[("password", b"s")]), &form_type(), body).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BadRequest, "{}", text(body));
+    }
+    apply_to_body(&form_body(&[("password", b"s")]), &form_type(), b"a=1%3B2").unwrap();
 }
 
 #[test]
