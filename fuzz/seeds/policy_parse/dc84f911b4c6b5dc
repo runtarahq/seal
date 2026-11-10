@@ -1,0 +1,1 @@
+{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org"},"inject":{"path":{"prefix":"/bot{}"}}}]}

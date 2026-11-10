@@ -20,6 +20,7 @@ fuzz_target!(|data: &[u8]| {
             at: "A/B".to_owned(),
             as_field: FieldName::new("token").expect("valid"),
             policy: PolicyName::new("api").expect("valid"),
+            expose_claims: Vec::new(),
         }],
     };
     let public = PublicKey::from_bytes(&[9; 32]).expect("valid");

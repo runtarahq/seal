@@ -108,3 +108,10 @@ path = "fuzz_targets/proto_send_head.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jwt_claims"
+path = "fuzz_targets/jwt_claims.rs"
+test = false
+doc = false
+bench = false

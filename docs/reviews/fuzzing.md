@@ -28,6 +28,7 @@ with 24 hours per target and 10 lanes.
 | `pg_preamble` | A caller's first Postgres packet |
 | `pg_auth_messages` | Any server messages during a login: no panic, and no cleartext password unless allowed |
 | `proto_send_head` | Any bytes as a `SendHead`, checked as the service does |
+| `jwt_claims` | Any bytes as a token whose claims a policy exposes: only the named claims come out, as a JSON object |
 
 ## Findings
 
