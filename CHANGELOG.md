@@ -34,6 +34,12 @@ The first release.
   PS256, ES256), and client certificates toward providers. See
   [`docs/signing.md`](docs/signing.md).
 
+### Checking webhooks
+
+- `verify`: a signing secret sealed with a `verify` policy checks a message's HMAC
+  (SHA-1, SHA-256 or SHA-512) and can be sent nowhere. seal answers yes or no and never
+  returns a code. See [`docs/policy.md`](docs/policy.md#verification).
+
 ### Postgres
 
 - Sessions through seal: seal logs in with a sealed password, using SCRAM-SHA-256-PLUS

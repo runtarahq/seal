@@ -430,6 +430,12 @@ impl SealClient for ScanningClient {
         result
     }
 
+    async fn verify(&self, request: seal_client::VerifyRequest) -> Result<bool, SealError> {
+        let result = self.inner.verify(request).await;
+        self.keep(&result);
+        result
+    }
+
     async fn connect_pg(
         &self,
         request: seal_client::ConnectRequest,

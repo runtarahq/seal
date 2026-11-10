@@ -206,6 +206,23 @@ pub struct SendRequest {
     pub request: http::Request<Body>,
 }
 
+/// A message to check against a sealed secret, such as a webhook and its signature. It
+/// holds no credentials.
+pub struct VerifyRequest {
+    /// The keyset the request is for.
+    pub keyset: KeysetId,
+    /// The record the request is for.
+    pub item: ItemId,
+    /// The field the secret is sealed as.
+    pub field: FieldName,
+    /// The sealed secret, whose policy must have `verify`.
+    pub value: SealedValue,
+    /// The message, as the provider signed it: for Slack, `v0:<timestamp>:<body>`.
+    pub message: Bytes,
+    /// The code that came with the message, decoded to bytes.
+    pub mac: Vec<u8>,
+}
+
 /// A Postgres session to open through seal. It holds no credentials.
 pub struct ConnectRequest {
     /// The keyset the values are sealed to.
@@ -357,6 +374,11 @@ pub trait SealClient: Send + Sync {
 
     /// Sends a request using sealed values.
     async fn send(&self, request: SendRequest) -> Result<SendResponse, SealError>;
+
+    /// Whether a message's authentication code was made with a sealed secret. seal
+    /// compares the whole code and never returns one, so this can check a webhook's
+    /// signature but cannot make one. A code that does not match is `Ok(false)`.
+    async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError>;
 
     /// Opens a Postgres session. seal logs in with the sealed credential; the stream
     /// then carries the session.

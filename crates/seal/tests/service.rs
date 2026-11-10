@@ -119,6 +119,22 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
         .unwrap();
     assert_eq!(error.code, ErrorCode::CallerDenied);
     assert!(provider.received().is_empty());
+    let webhook =
+        seal_format::policy::builder::webhook_hmac(seal_format::policy::HmacHash::Sha256).unwrap();
+    let verify = seal_client::VerifyRequest {
+        keyset: keyset(),
+        item: item(),
+        field: field("secret"),
+        value: instance
+            .setup
+            .seal("secret", b"SEALCANARY-signing", &webhook)
+            .await
+            .into(),
+        message: bytes::Bytes::from_static(b"message"),
+        mac: vec![0; 32],
+    };
+    let error = instance.client.verify(verify).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
     let keyset = KeysetId::new("other").unwrap();
     assert_eq!(
         instance

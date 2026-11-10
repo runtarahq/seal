@@ -107,6 +107,12 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   signature, so they are as trustworthy as the provider's response, and the sealer
   should name only claims that are not secret. Rules presented together must agree on
   them exactly, as on the rest of response sealing, so another value cannot add any.
+- **A caller can check codes, not make them.** With a value whose policy has `verify`,
+  a caller learns whether a message and a code go together, which the provider's own
+  webhooks already show it. seal computes the code and never returns it, compares
+  the whole of it in constant time and refuses a shorter one, so the answers do not
+  add up to a forgery. A compromised application can still accept a forged webhook by
+  not asking; that was always its own decision.
 - **A caller can read data with a credential it can use.** seal limits where a
   credential goes, not what the provider returns for an allowed request, nor what an
   allowed request does there: it may, for example, set S3 metadata or storage class.

@@ -12,14 +12,16 @@ use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
 use seal_broker::audit::{AuditRecord, AuditSink, Outcome};
 use seal_broker::client::RequestBody;
-use seal_broker::{Broker, BrokerError, ConnectRequest, ErrorCode, Presented, SendRequest};
+use seal_broker::{
+    Broker, BrokerError, ConnectRequest, ErrorCode, Presented, SendRequest, VerifyRequest,
+};
 use seal_format::{Envelope, FieldName, ItemId, KeysetId};
 use seal_keys::{KeyError, Keyring};
 use seal_proto::v1::seal_server::Seal;
 use seal_proto::v1::{
     ConnectIn, ConnectOut, Empty, Header, InfoReply, KeysetRequest, PublicKey, PublicKeysReply,
-    ResponseHead, SendHead, SendIn, SendOut, Trailer, WrappedKeyReply, connect_in, connect_out,
-    send_in, send_out,
+    ResponseHead, SendHead, SendIn, SendOut, Trailer, VerifyIn, VerifyReply, WrappedKeyReply,
+    connect_in, connect_out, send_in, send_out, verify_in,
 };
 use seal_proto::{ERROR_CODE_METADATA, MAX_BODY_CHUNK};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -224,16 +226,38 @@ fn bad(detail: &'static str) -> Status {
     refusal(ErrorCode::BadRequest, detail)
 }
 
+/// What a message after the head is, in a stream that carries a body.
+enum Part {
+    Chunk(Vec<u8>),
+    End,
+    Other,
+}
+
 /// The caller's body, from the messages that follow the head.
 fn request_body(inbound: Streaming<SendIn>) -> RequestBody {
-    let frames = stream::unfold((inbound, false), |(mut inbound, done)| async move {
+    body_of(inbound, |message| match message.f {
+        Some(send_in::F::Body(chunk)) => Part::Chunk(chunk),
+        Some(send_in::F::End(_)) => Part::End,
+        _ => Part::Other,
+    })
+}
+
+/// The message to verify, from the messages that follow the head.
+fn message_body(inbound: Streaming<VerifyIn>) -> RequestBody {
+    body_of(inbound, |message| match message.f {
+        Some(verify_in::F::Message(chunk)) => Part::Chunk(chunk),
+        Some(verify_in::F::End(_)) => Part::End,
+        _ => Part::Other,
+    })
+}
+
+fn body_of<M: Send + 'static>(inbound: Streaming<M>, part: fn(M) -> Part) -> RequestBody {
+    let frames = stream::unfold((inbound, false), move |(mut inbound, done)| async move {
         if done {
             return None;
         }
-        let item = match inbound.message().await {
-            Ok(Some(SendIn {
-                f: Some(send_in::F::Body(chunk)),
-            })) => {
+        let item = match inbound.message().await.map(|message| message.map(part)) {
+            Ok(Some(Part::Chunk(chunk))) => {
                 if chunk.len() > MAX_BODY_CHUNK {
                     Err(BrokerError::new(
                         ErrorCode::BadRequest,
@@ -243,10 +267,8 @@ fn request_body(inbound: Streaming<SendIn>) -> RequestBody {
                     Ok(Frame::data(Bytes::from(chunk)))
                 }
             }
-            Ok(Some(SendIn {
-                f: Some(send_in::F::End(_)),
-            })) => return None,
-            Ok(Some(_)) => Err(BrokerError::new(
+            Ok(Some(Part::End)) => return None,
+            Ok(Some(Part::Other)) => Err(BrokerError::new(
                 ErrorCode::BadRequest,
                 "a head after the body started",
             )),
@@ -602,6 +624,66 @@ impl Seal for Service {
             .await
             .map_err(|error| broker_status(&error))?;
         Ok(Response::new(session_stream(session, inbound, permit)))
+    }
+
+    async fn verify(
+        &self,
+        request: Request<Streaming<VerifyIn>>,
+    ) -> Result<Response<VerifyReply>, Status> {
+        let caller = self.caller(&request)?;
+        // Held to the end: the message is buffered while this call lasts.
+        let _permit = Arc::clone(&self.streams)
+            .try_acquire_owned()
+            .map_err(|_| refusal(ErrorCode::LimitExceeded, "too many streams"))?;
+        if !self.per_caller.allow(&caller.name) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
+        }
+        let mut inbound = request.into_inner();
+        let head = match inbound.message().await {
+            Ok(Some(VerifyIn {
+                f: Some(verify_in::F::Head(head)),
+            })) => head,
+            _ => return Err(bad("the first message must be the head")),
+        };
+        let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
+        if !caller.may_use(&keyset) {
+            return Err(refusal(
+                ErrorCode::CallerDenied,
+                "the caller may not use this keyset",
+            ));
+        }
+        if !self.per_keyset.allow(&keyset) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the keyset's rate"));
+        }
+        let envelope = Envelope::from_json(head.sealed.as_bytes())
+            .map_err(|_| bad("an envelope is not valid"))?;
+        // A shared value comes from another keyset, which the caller must be allowed too.
+        if !caller.may_use(envelope.keyset()) {
+            return Err(refusal(
+                ErrorCode::CallerDenied,
+                "the caller may not use a value's keyset",
+            ));
+        }
+        let value_item = (!head.value_item.is_empty())
+            .then(|| ItemId::new(head.value_item).map_err(|_| bad("an item is not valid")))
+            .transpose()?;
+        let valid = self
+            .broker
+            .verify(VerifyRequest {
+                caller: caller.name,
+                keyset,
+                item: ItemId::new(head.item).map_err(|_| bad("the item is not valid"))?,
+                field: FieldName::new(head.field).map_err(|_| bad("a field name is not valid"))?,
+                value: Presented {
+                    envelope,
+                    item: value_item,
+                },
+                message: message_body(inbound),
+                mac: head.mac,
+            })
+            .await
+            .map_err(|error| broker_status(&error))?;
+        Ok(Response::new(VerifyReply { valid }))
     }
 
     async fn generate_keyset(

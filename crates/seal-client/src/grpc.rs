@@ -17,7 +17,7 @@ use seal_format::{Envelope, FieldName, KeysetId};
 use seal_proto::v1::seal_client::SealClient as Generated;
 use seal_proto::v1::{
     ConnectHead, ConnectIn, ConnectOut, Empty, Header, KeysetRequest, SendHead, SendIn, SendOut,
-    connect_in, connect_out, send_in, send_out,
+    VerifyHead, VerifyIn, connect_in, connect_out, send_in, send_out, verify_in,
 };
 use seal_proto::{ERROR_CODE_METADATA, MAX_BODY_CHUNK};
 use tokio::net::{TcpStream, UnixStream};
@@ -26,7 +26,7 @@ use tower::ServiceExt;
 
 use crate::{
     Body, ConnectRequest, ErrorCode, Info, Mode, PgStream, PublicKeyInfo, SealClient, SealError,
-    SendRequest, SendResponse, WrappedKey,
+    SendRequest, SendResponse, VerifyRequest, WrappedKey,
 };
 
 /// How to reach seal over mutual TLS.
@@ -438,6 +438,41 @@ impl SealClient for GrpcClient {
                 })
                 .collect::<Result<_, _>>()?,
         })
+    }
+
+    async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {
+        let head = VerifyHead {
+            keyset: request.keyset.to_string(),
+            item: request.item.to_string(),
+            field: request.field.to_string(),
+            sealed: request
+                .value
+                .envelope
+                .to_json()
+                .map_err(|_| transport("an envelope could not be written"))?,
+            value_item: request
+                .value
+                .item
+                .map(|item| item.to_string())
+                .unwrap_or_default(),
+            mac: request.mac,
+        };
+        let message = request.message;
+        // The head, the message in chunks of at most 64 KiB, then the end.
+        let chunks = (0..message.len())
+            .step_by(MAX_BODY_CHUNK)
+            .map(move |start| {
+                let end = message.len().min(start + MAX_BODY_CHUNK);
+                verify_in::F::Message(message[start..end].to_vec())
+            });
+        let parts = std::iter::once(verify_in::F::Head(head))
+            .chain(chunks)
+            .chain(std::iter::once(verify_in::F::End(Empty {})))
+            .map(|part| VerifyIn { f: Some(part) });
+        let reply = self
+            .call(|mut client| async move { client.verify(stream::iter(parts)).await })
+            .await?;
+        Ok(reply.valid)
     }
 
     async fn connect_pg(&self, request: ConnectRequest) -> Result<PgStream, SealError> {

@@ -12,7 +12,7 @@ use seal_keys::Keyring;
 
 use crate::{
     ConnectRequest, ErrorCode, Info, Mode, PgStream, PublicKeyInfo, SealClient, SealError,
-    SendRequest, SendResponse, WrappedKey,
+    SendRequest, SendResponse, VerifyRequest, WrappedKey,
 };
 
 /// seal in this process.
@@ -124,6 +124,24 @@ impl SealClient for InProcessClient {
             sealed_fields: response.sealed_fields,
             claims: response.claims,
         })
+    }
+
+    async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {
+        self.broker
+            .verify(seal_broker::VerifyRequest {
+                caller: "in-process".to_owned(),
+                keyset: request.keyset,
+                item: request.item,
+                field: request.field,
+                value: seal_broker::Presented {
+                    envelope: request.value.envelope,
+                    item: request.value.item,
+                },
+                message: seal_broker::body::full_body(request.message),
+                mac: request.mac,
+            })
+            .await
+            .map_err(|error| from_broker(&error))
     }
 
     async fn connect_pg(&self, request: ConnectRequest) -> Result<PgStream, SealError> {

@@ -10,6 +10,10 @@ service Seal {
   rpc Send(stream SendIn) returns (stream SendOut);
   // A Postgres session using sealed values.
   rpc Connect(stream ConnectIn) returns (stream ConnectOut);
+  // Whether a message's authentication code was made with a sealed secret, such as a
+  // webhook's signature. The first message is the head, then message chunks, then an
+  // end. The code is never computed for the caller.
+  rpc Verify(stream VerifyIn) returns (VerifyReply);
   // Administrative: makes a keyset's first key.
   rpc GenerateKeyset(KeysetRequest) returns (WrappedKeyReply);
   // Administrative: adds a key, which becomes current.
@@ -102,6 +106,32 @@ message ConnectOut {
     bytes data = 1;
     Trailer trailer = 2;
   }
+}
+
+message VerifyIn {
+  oneof f {
+    VerifyHead head = 1;
+    bytes message = 2;
+    Empty end = 3;
+  }
+}
+
+message VerifyHead {
+  string keyset = 1;
+  string item = 2;
+  // The field the value is sealed as.
+  string field = 3;
+  // The envelope JSON.
+  string sealed = 4;
+  // The item the value is bound to, if not the request's: a shared value.
+  string value_item = 5;
+  // The code that came with the message, as bytes.
+  bytes mac = 6;
+}
+
+message VerifyReply {
+  // Whether the code matches. A code that does not is not an error.
+  bool valid = 1;
 }
 
 message KeysetRequest {

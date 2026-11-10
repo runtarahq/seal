@@ -58,10 +58,10 @@ the same code.
 | `OPEN_FAILED` | A sealed value did not open: wrong item, field or key | No |
 | `KEYSET_UNKNOWN` | The keyset has no keys | No |
 | `KEYS_UNAVAILABLE` | The keys could not be loaded | Yes |
-| `POLICY_DENIED` | No rule allows this request: a bug or an attack | No |
+| `POLICY_DENIED` | No rule allows this request, or the value may not verify: a bug or an attack | No |
 | `DESTINATION_REFUSED` | The destination's address is refused | No |
 | `CONFLICT` | Rules conflict, or the caller set something an injection sets | No |
-| `BODY_TOO_LARGE` | A body that has to be buffered is over the cap | No |
+| `BODY_TOO_LARGE` | A body that has to be buffered, or a message to verify, is over the cap | No |
 | `RESPONSE_TOO_LARGE` | A response that has to be sealed is over the cap; nothing of it is returned | No |
 | `RESPONSE_UNPARSEABLE` | A response that has to be sealed could not be parsed | No |
 | `UPSTREAM_CONNECT`, `UPSTREAM_TLS`, `UPSTREAM_RESET` | The provider could not be reached, or failed | Yes |
@@ -72,6 +72,20 @@ the same code.
 
 A request with a body is never retried by seal, and must not be retried blindly by the
 caller either: the provider may have acted on it.
+
+## `Verify`
+
+`rpc Verify(stream VerifyIn) returns (VerifyReply)` says whether a message's
+authentication code was made with a sealed secret: a webhook's signature, checked without
+the application holding the signing secret. The value's policy must have
+[`verify`](policy.md#verification).
+
+The caller sends one `VerifyHead` (the keyset and item, the field and its envelope JSON,
+`value_item` for a shared value, and the code as bytes), then the message in `message`
+chunks of at most 64 KiB, then one `end`. seal reads the message whole, up to the buffer
+cap, and replies `valid`. A code that does not match is `valid = false`, not an error:
+`POLICY_DENIED` means the value may not verify at all. seal never returns a code, and
+only one of the hash's full length can match.
 
 ## Administrative calls
 

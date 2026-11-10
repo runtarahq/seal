@@ -55,6 +55,28 @@ fn post_form(url: &str, sealed: &[(&str, &seal_format::Envelope)]) -> seal_clien
     request
 }
 
+const SIGNING_SECRET: &[u8] = b"SEALCANARY-signing-secret";
+
+fn hmac_sha256(message: &[u8]) -> Vec<u8> {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, SIGNING_SECRET);
+    ring::hmac::sign(&key, message).as_ref().to_vec()
+}
+
+fn verify_request(
+    value: &seal_format::Envelope,
+    message: Vec<u8>,
+    mac: Vec<u8>,
+) -> seal_client::VerifyRequest {
+    seal_client::VerifyRequest {
+        keyset: keyset(),
+        item: item(),
+        field: field("signing_secret"),
+        value: value.clone().into(),
+        message: message.into(),
+        mac,
+    }
+}
+
 const TOKENS: &[u8] =
     br#"{"access_token":"at-plaintext","refresh_token":"rt-plaintext","expires_in":3600}"#;
 
@@ -149,6 +171,46 @@ mode_matrix! {
         assert_eq!(claims.len(), 1);
         let exposed: Value = serde_json::from_str(&claims[&field("access_token")]).unwrap();
         assert_eq!(exposed, json!({ "authentication_event_id": "evt-1" }));
+    };
+
+    acceptance_a_webhook_signature_is_checked_without_the_secret_leaving_seal => |mode: Mode| async move {
+        let (instance, provider) = simple(mode).await;
+        let webhook = seal_format::policy::builder::webhook_hmac(seal_format::policy::HmacHash::Sha256).unwrap();
+        let secret = instance.setup.seal("signing_secret", SIGNING_SECRET, &webhook).await;
+        let message = b"v0:1700000000:{\"type\":\"event_callback\"}".to_vec();
+        let mac = hmac_sha256(&message);
+
+        assert!(instance.client.verify(verify_request(&secret, message.clone(), mac.clone())).await.unwrap());
+        let record = instance.setup.audit_records().pop().unwrap();
+        assert_eq!((&record["op"], &record["verified"], &record["outcome"]), (&json!("verify"), &json!(true), &json!("ok")));
+
+        // A forged message, and a code that is right only as far as it goes.
+        assert!(!instance.client.verify(verify_request(&secret, b"v0:1700000000:{}".to_vec(), mac.clone())).await.unwrap());
+        assert!(!instance.client.verify(verify_request(&secret, message.clone(), mac[..8].to_vec())).await.unwrap());
+        assert_eq!(instance.setup.audit_records().pop().unwrap()["verified"], json!(false));
+
+        // The secret can be sent nowhere, and a value sealed for sending verifies nothing.
+        let error = instance.client.send(get(&url(&provider, "/echo"), &[("signing_secret", &secret)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        let token = instance.setup.seal("signing_secret", SIGNING_SECRET, &policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }))).await;
+        let error = instance.client.verify(verify_request(&token, message, mac)).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert!(provider.received().is_empty());
+    };
+
+    a_message_to_verify_is_sent_in_chunks_and_held_to_the_buffer_cap => |mode: Mode| async move {
+        let (instance, _provider) = simple(mode).await;
+        let webhook = seal_format::policy::builder::webhook_hmac(seal_format::policy::HmacHash::Sha256).unwrap();
+        let secret = instance.setup.seal("signing_secret", SIGNING_SECRET, &webhook).await;
+        let large = vec![b'x'; 300 * 1024];
+        let mac = hmac_sha256(&large);
+        assert!(instance.client.verify(verify_request(&secret, large, mac)).await.unwrap());
+        assert!(instance.client.verify(verify_request(&secret, Vec::new(), hmac_sha256(b""))).await.unwrap());
+
+        let over = vec![b'x'; (1 << 20) + 1];
+        let mac = hmac_sha256(&over);
+        let error = instance.client.verify(verify_request(&secret, over, mac)).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::BodyTooLarge);
     };
 
     acceptance_rotating_refresh_tokens_keep_working => |mode: Mode| async move {

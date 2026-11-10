@@ -34,6 +34,10 @@ flows, and [`operations.md`](operations.md) running seal itself.
   wraps them. Once that has taken effect ([Destroying a
   keyset](operations.md#destroying-a-keyset)), its backups hold nothing usable. Running
   requests and Postgres sessions end on their own limits.
+- **Check webhooks through seal.** Seal a signing secret with `verify` and no rules,
+  then call `verify` with the message as the provider signs it and the code decoded to
+  bytes. Check the timestamp yourself, before or after: seal answers only whether the
+  code is right. Treat an error as a failed check.
 - **OAuth callbacks land on the application**, not on seal, which need not be reachable
   from the internet. The authorization code alone is not enough to redeem: that needs
   the sealed client secret and the PKCE verifier, and the tokens come back sealed.
