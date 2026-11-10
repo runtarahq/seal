@@ -1104,6 +1104,61 @@ fn a_copy_source_must_be_within_the_rules_prefix() {
     }
 }
 
+#[test]
+fn a_rule_for_a_host_of_every_bucket_may_allow_copies_from_any_of_them() {
+    let any_bucket = policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "s3.example.com" },
+        "inject": { "aws_sigv4": {
+            "region": "us-east-1", "service": "s3",
+            "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
+            "allow_headers": ["x-amz-copy-source"],
+            "allow_copy_from_any_bucket": true,
+        } },
+    }] }));
+    let policies = fields(&[("secret", any_bucket)]);
+    for source in [
+        "/bucket/original",
+        "other-bucket/dir/a%20b",
+        "/other-bucket/original?versionId=3HL4kqtJlcpXroDTDmJ",
+    ] {
+        let request = s3_request("/bucket/copy", &[], Some(source));
+        assert_eq!(code(request.decide(&policies)), None, "{source}");
+    }
+    // Still an object on this host, named plainly.
+    for source in [
+        "/bucket",
+        "/",
+        "/bucket/../other/secret",
+        "/bucket/%2e%2e/other/secret",
+        "/bucket/original?versionId=1&x=2",
+        "/bucket/original?partNumber=1",
+        "//other/secret",
+    ] {
+        let request = s3_request("/bucket/copy", &[], Some(source));
+        assert_eq!(
+            code(request.decide(&policies)),
+            Some(ErrorCode::PolicyDenied),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn the_operation_a_json_protocol_service_takes_may_be_named() {
+    let sqs = policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "sqs.us-east-1.amazonaws.com" },
+        "inject": { "aws_sigv4": {
+            "region": "us-east-1", "service": "sqs",
+            "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
+        } },
+    }] }));
+    let policies = fields(&[("secret", sqs)]);
+    let mut request = Request::to("https://sqs.us-east-1.amazonaws.com/");
+    request.method = Method::Post;
+    request.headers = vec!["X-Amz-Target", "content-type"];
+    assert_eq!(code(request.decide(&policies)), None);
+}
+
 // Postgres sessions.
 
 fn pg_policy(databases: &[&str], user: &str, inject: Value, plain: &[&str]) -> Policy {

@@ -97,6 +97,7 @@ const OPTIONS: &[&str] = &[
     "hash",
     "allow_presign",
     "max_expiry_s",
+    "allow_copy_from_any_bucket",
 ];
 
 fn policy_doc() -> String {

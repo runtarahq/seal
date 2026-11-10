@@ -605,6 +605,34 @@ fn sigv4_rules_allow_only_opt_in_amz_headers() {
 }
 
 #[test]
+fn copies_from_any_bucket_are_for_a_rule_with_no_prefix_that_allows_copies() {
+    let sigv4 = |headers: Value, prefix: Option<&str>| {
+        with_rule(|rule| {
+            rule["inject"] = json!({ "aws_sigv4": {
+                "region": "eu-west-1", "service": "s3",
+                "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
+                "allow_headers": headers,
+                "allow_copy_from_any_bucket": true,
+            } });
+            rule["destination"] = match prefix {
+                Some(prefix) => https_prefix(prefix),
+                None => https_host("s3.example.com"),
+            };
+        })
+    };
+    let policy = sigv4(json!(["x-amz-copy-source"]), None).unwrap();
+    assert_eq!(
+        parse(&serde_json::to_value(&policy).unwrap()).unwrap(),
+        policy
+    );
+    // A prefix already holds the source, and the option would then mean nothing.
+    sigv4(json!(["x-amz-copy-source"]), Some("/bucket/")).unwrap_err();
+    // It allows nothing by itself.
+    sigv4(json!([]), None).unwrap_err();
+    sigv4(json!(["x-amz-acl"]), None).unwrap_err();
+}
+
+#[test]
 fn which_amz_headers_a_caller_may_set() {
     use super::amz_header_allowed;
     let none: &[String] = &[];
@@ -617,6 +645,7 @@ fn which_amz_headers_a_caller_may_set() {
         "x-amz-checksum-crc32",
         "x-amz-expected-bucket-owner",
         "x-amz-request-payer",
+        "x-amz-target",
     ] {
         assert!(amz_header_allowed(name, none), "{name}");
     }

@@ -38,6 +38,9 @@ The first release.
 - Signing: AWS Signature Version 4, Azure Storage Shared Key, JWT assertions (RS256,
   PS256, ES256), and client certificates toward providers. See
   [`docs/signing.md`](docs/signing.md).
+- A SigV4 request may name its operation in `X-Amz-Target`, as SQS, DynamoDB and other
+  services that take JSON need. A rule for a whole S3 endpoint addressed by path may set
+  `allow_copy_from_any_bucket`, so that a copy can read any object on its host.
 - Presigned S3 URLs and Blob shared access signatures, for a rule that sets
   `allow_presign`: off by default, within the lifetime the rule gives, and audited. This
   is the one credential seal hands back to a caller.
