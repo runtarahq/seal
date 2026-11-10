@@ -261,7 +261,9 @@ request too malformed to name a keyset.
 
 ## Health and metrics
 
-`/healthz` answers when the process is up, and `/readyz` when the key source answers.
+`/healthz` answers when the process is up, and `/readyz` when the key source answers;
+the key source is asked at most once in five seconds, however often `/readyz` is. The
+listener has no authentication: bind it to an address only the monitoring can reach.
 `/metrics` is in Prometheus format, with no keyset or item labels.
 
 ## Hardening
