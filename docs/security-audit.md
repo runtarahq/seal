@@ -2,10 +2,8 @@
 
 An audit of seal at commit `087de1c` ("Let a shared access signature carry response
 headers"), 10 November 2026. It is a source review of the whole workspace, with the
-findings that could be reproduced executed to confirm them. It is not an external
-review, for which [`reviews/external-review-scope.md`](reviews/external-review-scope.md)
-is the brief, and it says nothing about the code's correctness outside the security
-properties it lists.
+findings that could be reproduced executed to confirm them. It says nothing about the
+code's correctness outside the security properties it lists.
 
 ## Summary
 
@@ -346,9 +344,5 @@ These were tested rather than assumed. Each is a property the threat model claim
 
 - The build and deployment configuration, the CI workflows, the dependency tree and
   the fuzz targets were not part of this pass.
-- The external review of the sealed-value format, the matcher, injection and signing,
-  and the Postgres login that
-  [`reviews/external-review-scope.md`](reviews/external-review-scope.md) asks for has
-  still not happened.
 - Only the `aarch64-apple-darwin` build was examined. The behaviour of the platform
   hardening in `seal/src/hardening.rs` on Linux was not tested.

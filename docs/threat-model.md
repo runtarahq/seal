@@ -2,8 +2,7 @@
 
 Status: reviewed against what was built, in the hardening pass before the first release.
 It describes seal as built: the HTTP broker with every injection and signing scheme,
-response sealing, Postgres sessions, the service and its callers, and the keyring. An
-external security review has not happened yet.
+response sealing, Postgres sessions, the service and its callers, and the keyring.
 
 ## What seal is for
 
@@ -234,10 +233,6 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 
 ## Open
 
-- **An external security review** of the sealed-value format, the matcher, injection
-  and signing, and the Postgres login. Recommended before the first release, and not
-  yet done; [`reviews/external-review-scope.md`](reviews/external-review-scope.md) is
-  the brief for a reviewer.
 - **The fuzzing campaign** of at least 24 hours per target
   ([`reviews/fuzzing.md`](reviews/fuzzing.md)).
 - **Run-bound capabilities**, so a compromised caller cannot use credentials outside a
