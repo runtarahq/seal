@@ -198,6 +198,35 @@ If the key source is unreachable, loaded keysets keep working for `max_stale`, t
    output. Store the results.
 5. Delete the old wrapped key from the key source.
 
+### Changing policies
+
+A policy is sealed with its secret, so an application cannot change where an existing
+secret may go. Whoever runs seal can: `reseal` opens each value anyway. When a provider
+moves to another host, or an integration changes how it authenticates, this saves every
+user entering the secret again.
+
+The application writes the input, one line per value to change, with the policy that
+value is to have:
+
+```json
+{"item": "connection-1", "field": "token", "envelope": {…}, "policy": {"rules": […]}}
+```
+
+```sh
+seal reseal --config /etc/seal/seal.toml --keyset acme --rewrite-policies \
+  --in values.jsonl --out resealed.jsonl
+```
+
+- Read the input before running it. It decides where secrets may go from now on, and it
+  comes from the application, which this step exists not to trust. Without
+  `--rewrite-policies`, a line that names a policy fails the run.
+- A new policy is checked like any other, and it cannot change whether a value is
+  `shared`. Seal a value anew to share it.
+- A line with no `policy`, or with the policy its value already has, is resealed only if
+  its key is not the current one. The output has no policies, so it can be run again.
+- For OAuth, give the refresh token the builder's `refresh` definition as its policy,
+  and the access token the `api` one, or wait for the next refresh to replace it.
+
 ### Destroying a keyset
 
 Delete every wrapped key of the keyset from the key source, including any copies in

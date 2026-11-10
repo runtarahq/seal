@@ -49,6 +49,9 @@ The first release.
   `postgres` feature.
 - Key management: keysets, rotation, wrapped keys, key sources, and administrative
   calls for callers marked `admin`.
+- `seal reseal` moves stored values to a keyset's current key, and with
+  `--rewrite-policies` gives them new policies, so that a change of destination does not
+  mean entering every secret again. Only whoever runs seal can do this.
 - Audit records for every use, Prometheus metrics, and process hardening (no core dumps,
   not dumpable, memory locked as configured, never as root).
 - A systemd unit, a container image and example configurations in [`deploy/`](deploy).

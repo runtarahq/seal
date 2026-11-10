@@ -45,7 +45,8 @@ enum Command {
         wrapping_key: Option<PathBuf>,
     },
     /// Reseals values under a keyset's current key. Reads and writes JSON lines of
-    /// `{"item": …, "field": …, "envelope": …}`.
+    /// `{"item": …, "field": …, "envelope": …}`. With `--rewrite-policies`, an input
+    /// line may add `"policy": …`, the policy that value is to have from now on.
     Reseal {
         #[arg(long)]
         config: PathBuf,
@@ -55,6 +56,10 @@ enum Command {
         input: PathBuf,
         #[arg(long = "out")]
         output: PathBuf,
+        /// Gives each value the policy its input line names, if it names one. Read the
+        /// input first: this changes where existing secrets may go.
+        #[arg(long)]
+        rewrite_policies: bool,
     },
     /// Prints the version.
     Version,
@@ -132,6 +137,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             keyset: name,
             input,
             output,
+            rewrite_policies,
         } => {
             let config = Config::load(&config).map_err(|error| error.to_string())?;
             let keyset = keyset(&name)?;
@@ -141,12 +147,24 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             );
             let mut writer = std::fs::File::create_new(&output)
                 .map_err(|_| format!("cannot create {}; it must not exist", output.display()))?;
-            let changed =
-                runtime()?.block_on(seal::cli::reseal(&config, &keyset, reader, &mut writer))?;
+            let done = runtime()?.block_on(seal::cli::reseal(
+                &config,
+                &keyset,
+                rewrite_policies,
+                reader,
+                &mut writer,
+            ))?;
             writer
                 .sync_all()
                 .map_err(|_| "cannot write the output".to_owned())?;
-            println!("resealed {changed} values");
+            if rewrite_policies {
+                println!(
+                    "resealed {} values, {} with a new policy",
+                    done.values, done.policies
+                );
+            } else {
+                println!("resealed {} values", done.values);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Serve { config } => {

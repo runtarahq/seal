@@ -3,7 +3,7 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use seal_format::{Binding, Envelope, FieldName, ItemId, KeysetId, seal};
+use seal_format::{Binding, Envelope, FieldName, ItemId, KeysetId, Policy, seal};
 use seal_keys::{FileKeyWrap, Keyring, Keys};
 use serde::{Deserialize, Serialize};
 
@@ -85,10 +85,27 @@ pub struct ResealLine {
     pub field: FieldName,
     /// The sealed value.
     pub envelope: Envelope,
+    /// In the input only: the policy the value is to have from now on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
 }
 
-/// Reseals every value under the keyset's current key, keeping its policy. A value
-/// already under the current key is written out unchanged. Returns how many changed.
+/// What `reseal` did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Resealed {
+    /// How many values were sealed again, for a new key or a new policy.
+    pub values: usize,
+    /// How many of those got a new policy.
+    pub policies: usize,
+}
+
+/// Reseals every value under the keyset's current key. A value keeps its policy unless
+/// its line names a new one and `rewrite_policies` is set: only whoever runs seal can
+/// change where an existing secret may go. A value already under the current key, with
+/// nothing to change, is written out as it is.
+///
+/// A new policy cannot change whether a value is shared: that would let it serve every
+/// record, or stop it serving them, without anyone having sealed it so.
 ///
 /// # Errors
 ///
@@ -96,9 +113,10 @@ pub struct ResealLine {
 pub async fn reseal(
     config: &Config,
     keyset: &KeysetId,
+    rewrite_policies: bool,
     input: impl BufRead,
     output: &mut impl Write,
-) -> Result<usize, String> {
+) -> Result<Resealed, String> {
     let (source, wrap) = key_parts(config)?;
     let keyring =
         Keyring::new(source, wrap, config.keyring()).map_err(|error| error.to_string())?;
@@ -106,7 +124,7 @@ pub async fn reseal(
         .current_public_key(keyset)
         .await
         .map_err(|error| error.to_string())?;
-    let mut changed = 0;
+    let mut done = Resealed::default();
     for (index, line) in input.lines().enumerate() {
         let number = index + 1;
         let line = line.map_err(|_| format!("line {number} cannot be read"))?;
@@ -118,7 +136,18 @@ pub async fn reseal(
         if entry.envelope.keyset() != keyset {
             return Err(format!("line {number} is for another keyset"));
         }
-        if *entry.envelope.kid() != current_kid {
+        let new_policy = entry.policy.take();
+        if let Some(policy) = &new_policy {
+            if !rewrite_policies {
+                return Err(format!(
+                    "line {number} names a new policy, which needs --rewrite-policies"
+                ));
+            }
+            policy
+                .validate()
+                .map_err(|_| format!("line {number}: its new policy is not valid"))?;
+        }
+        if new_policy.is_some() || *entry.envelope.kid() != current_kid {
             let binding = Binding {
                 keyset,
                 item: &entry.item,
@@ -131,15 +160,27 @@ pub async fn reseal(
             let opened = seal_format::open(&key, &entry.envelope, binding)
                 .map_err(|_| format!("line {number} did not open"))?;
             drop(key);
-            entry.envelope = opened
-                .secret
-                .expose(|secret| seal(&current, &current_kid, binding, secret, &opened.policy))
-                .map_err(|_| format!("line {number} could not be sealed"))?;
-            changed += 1;
+            let rewritten = new_policy.filter(|policy| *policy != opened.policy);
+            if let Some(policy) = &rewritten
+                && policy.shared != opened.policy.shared
+            {
+                return Err(format!(
+                    "line {number}: a new policy cannot change whether a value is shared"
+                ));
+            }
+            if rewritten.is_some() || *entry.envelope.kid() != current_kid {
+                let policy = rewritten.as_ref().unwrap_or(&opened.policy);
+                entry.envelope = opened
+                    .secret
+                    .expose(|secret| seal(&current, &current_kid, binding, secret, policy))
+                    .map_err(|_| format!("line {number} could not be sealed"))?;
+                done.values += 1;
+                done.policies += usize::from(rewritten.is_some());
+            }
         }
         let json = serde_json::to_string(&entry)
             .map_err(|_| format!("line {number} could not be written"))?;
         writeln!(output, "{json}").map_err(|_| "cannot write the output".to_owned())?;
     }
-    Ok(changed)
+    Ok(done)
 }

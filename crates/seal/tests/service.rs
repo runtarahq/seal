@@ -407,6 +407,141 @@ async fn acceptance_reseal_round_trips_a_rotation() {
     assert!(!again.status.success());
 }
 
+/// Runs `seal reseal` over these lines, and returns whether it succeeded, what it
+/// printed and the lines it wrote.
+fn run_reseal(
+    setup: &Setup,
+    name: &str,
+    lines: &[serde_json::Value],
+    extra: &[&str],
+) -> (bool, String, Vec<serde_json::Value>) {
+    let input = setup.dir.path().join(format!("{name}.in.jsonl"));
+    let output = setup.dir.path().join(format!("{name}.out.jsonl"));
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&input, text).unwrap();
+    let config = write_config(
+        setup,
+        &setup.config_text(
+            Mode::Unix,
+            &Options::default(),
+            "[listen]\nunix = \"/unused\"\n",
+        ),
+    );
+    let result = Command::new(env!("CARGO_BIN_EXE_seal"))
+        .args(["reseal", "--keyset", "acme", "--config"])
+        .arg(&config)
+        .arg("--in")
+        .arg(&input)
+        .arg("--out")
+        .arg(&output)
+        .args(extra)
+        .output()
+        .unwrap();
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let written = std::fs::read_to_string(&output)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (result.status.success(), printed, written)
+}
+
+/// A provider moves, or an integration changes how it authenticates: whoever runs seal
+/// can give stored values a new policy without anyone entering the secrets again. The
+/// application cannot, since only seal's host can open them.
+#[tokio::test]
+async fn reseal_gives_a_value_a_new_policy_only_when_told_to() {
+    let provider = MockProvider::plain().await;
+    let instance = start(Mode::Unix, Options::default(), &[&provider]).await;
+    let setup = &instance.setup;
+    let token = setup
+        .seal("token", b"SEALCANARY-s3cret", &token_policy(&provider))
+        .await;
+    let kept = setup
+        .seal("kept", b"SEALCANARY-kept", &token_policy(&provider))
+        .await;
+    let api_key = json!({ "rules": [plain_rule(
+        &provider,
+        &json!({ "header": { "name": "X-Api-Key", "format": "{}" } }),
+    )] });
+    let line = |field: &str, envelope: &seal_format::Envelope| json!({ "item": item().as_str(), "field": field, "envelope": envelope });
+    let mut moved = line("token", &token);
+    moved["policy"] = api_key.clone();
+    let lines = [moved.clone(), line("kept", &kept)];
+
+    // Not without the flag, whatever the input says.
+    let (ok, printed, _) = run_reseal(setup, "unflagged", &lines, &[]);
+    assert!(!ok);
+    assert!(
+        printed.contains("line 1") && printed.contains("--rewrite-policies"),
+        "{printed}"
+    );
+    assert!(!printed.contains("SEALCANARY"));
+
+    let (ok, printed, written) = run_reseal(setup, "flagged", &lines, &["--rewrite-policies"]);
+    assert!(ok, "{printed}");
+    assert!(
+        printed.contains("resealed 1 values, 1 with a new policy"),
+        "{printed}"
+    );
+    assert_eq!(written.len(), 2);
+    assert!(
+        written[0].get("policy").is_none(),
+        "the output is only values"
+    );
+    assert_eq!(
+        written[1],
+        line("kept", &kept),
+        "a value with nothing to change is kept"
+    );
+    assert!(
+        !serde_json::to_string(&written)
+            .unwrap()
+            .contains("SEALCANARY")
+    );
+
+    let envelope =
+        seal_format::Envelope::from_json(written[0]["envelope"].to_string().as_bytes()).unwrap();
+    let response = instance
+        .client
+        .send(get(&url(&provider, "/echo"), &[("token", &envelope)]))
+        .await
+        .unwrap();
+    text(response).await;
+    let received = &provider.received()[0];
+    assert_eq!(received.header("x-api-key"), Some("SEALCANARY-s3cret"));
+    assert_eq!(received.header("authorization"), None);
+
+    // Naming the policy a value already has changes nothing.
+    let mut same = line("token", &envelope);
+    same["policy"] = api_key.clone();
+    let (ok, printed, written) = run_reseal(setup, "same", &[same], &["--rewrite-policies"]);
+    assert!(
+        ok && printed.contains("resealed 0 values, 0 with a new policy"),
+        "{printed}"
+    );
+    assert_eq!(written[0], line("token", &envelope));
+
+    // A new policy must be valid, and cannot make a value shared.
+    let mut invalid = moved.clone();
+    invalid["policy"]["rules"][0]["inject"] =
+        json!({ "header": { "name": "Host", "format": "{}" } });
+    let mut shared = moved;
+    shared["policy"]["shared"] = json!(true);
+    for (name, line, reason) in [
+        ("invalid", invalid, "its new policy is not valid"),
+        ("shared", shared, "cannot change whether a value is shared"),
+    ] {
+        let (ok, printed, written) = run_reseal(setup, name, &[line], &["--rewrite-policies"]);
+        assert!(!ok && printed.contains(reason), "{printed}");
+        assert!(written.is_empty());
+    }
+}
+
 // Limits.
 
 #[tokio::test]

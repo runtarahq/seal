@@ -90,6 +90,10 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 ### Accepted by design
 
 - **Root on seal's host** can read everything in seal's memory, including every key.
+- **Whoever runs seal can change a policy.** `seal reseal --rewrite-policies` gives
+  stored values the policies its input names. It needs the keys, so it is within what
+  root on seal's host can do anyway. Its input comes from the application: an operator
+  who runs it unread lets a compromised application choose where secrets go.
 - **Library mode** gives a compromised application every credential. The application
   logs this at startup and reports the mode.
 - **A provider that returns a credential.** One at an allowed destination that echoes

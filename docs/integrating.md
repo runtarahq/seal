@@ -12,8 +12,11 @@ flows, and [`operations.md`](operations.md) running seal itself.
 - **Build policies with the builder**, from the integration's definition: base URL,
   auth scheme, token endpoint. The application owns the mapping from its connection
   types to policies.
-- **Changing a destination means re-entering the secret.** A policy cannot be changed
-  without the plaintext, by design.
+- **Changing a destination means re-entering the secret, or asking the operator.** The
+  application cannot change a policy, by design. Whoever runs seal can, with `seal
+  reseal --rewrite-policies`, from a file the application writes and the operator
+  reads first ([Changing policies](operations.md#changing-policies)). Name hosts, and
+  path prefixes only where they limit something, so that fewer changes need it.
 - **Cache sealed tokens** with their plaintext `expires_in`, refresh through seal, and
   store the new envelopes atomically with the connection. If a refresh returns no new
   refresh token, keep the existing one.
