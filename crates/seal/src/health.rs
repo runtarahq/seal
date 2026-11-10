@@ -32,7 +32,7 @@ pub fn install_recorder() -> Result<PrometheusHandle, String> {
 /// How long an answer from the key source stands for. The listener has no
 /// authentication, so without this every request to `/readyz` would be a request to
 /// the key source, for anyone who can reach the address.
-const READINESS_LASTS: Duration = Duration::from_secs(5);
+pub const READINESS_LASTS: Duration = Duration::from_secs(5);
 
 /// Whether the key source answers, asked at most once in [`READINESS_LASTS`].
 pub struct Readiness {
