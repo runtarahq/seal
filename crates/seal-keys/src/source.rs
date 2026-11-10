@@ -90,6 +90,34 @@ impl DirKeySource {
         }
     }
 
+    /// The keysets that have a directory here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyError::Unavailable`] if the directory cannot be read, and
+    /// [`KeyError::Invalid`] if it holds a directory whose name is not a keyset's.
+    pub fn keysets(&self) -> Result<Vec<KeysetId>, KeyError> {
+        let mut keysets = Vec::new();
+        for entry in std::fs::read_dir(&self.root).map_err(|_| KeyError::Unavailable)? {
+            let entry = entry.map_err(|_| KeyError::Unavailable)?;
+            if !entry
+                .file_type()
+                .map_err(|_| KeyError::Unavailable)?
+                .is_dir()
+            {
+                continue;
+            }
+            let keyset = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| KeysetId::new(name).ok())
+                .ok_or(KeyError::Invalid("a directory that is not a keyset's"))?;
+            keysets.push(keyset);
+        }
+        keysets.sort();
+        Ok(keysets)
+    }
+
     fn keyset_dir(&self, keyset: &KeysetId) -> PathBuf {
         // A validated identifier is a single, safe path segment.
         self.root.join(keyset.as_str())
@@ -180,6 +208,59 @@ impl KeySource for DirKeySource {
             .await
             .map_err(|_| KeyError::Unavailable)?
     }
+}
+
+/// Wraps every key of `from` again, under another wrapping key, and stores it in `to`.
+/// This is how a wrapping key is rotated: `from` is left as it was, so nothing is lost
+/// if this stops part way, and `to` replaces it once seal is restarted with the new
+/// wrapping key. Returns how many keys were written.
+///
+/// Every key is unwrapped and compared with its public key before it is written, and
+/// a key already in `to` is never replaced.
+///
+/// # Errors
+///
+/// Returns [`KeyError::Invalid`] if the two wrapping keys are the same, or a key was
+/// not wrapped with `old` or does not match its public key; [`KeyError::Unavailable`]
+/// if a key cannot be read or unwrapped; and [`KeyError::AlreadyExists`] if `to`
+/// already has one of the keys.
+pub async fn rewrap(
+    from: &DirKeySource,
+    to: &DirKeySource,
+    old: &dyn crate::KeyWrap,
+    new: &dyn crate::KeyWrap,
+) -> Result<usize, KeyError> {
+    if old.id() == new.id() {
+        return Err(KeyError::Invalid("the new wrapping key is the old one"));
+    }
+    let mut written = 0;
+    for keyset in from.keysets()? {
+        for key in from.wrapped_keys(&keyset).await? {
+            if key.wrap_id != old.id() {
+                return Err(KeyError::Invalid(
+                    "a key was not wrapped with the old wrapping key",
+                ));
+            }
+            let private = old
+                .unwrap(&key.keyset, &key.kid, &key.wrapped_bytes()?)
+                .await?;
+            if private.public_key().map_err(|_| KeyError::Unavailable)? != key.public_key()? {
+                return Err(KeyError::Invalid(
+                    "a wrapped key does not match its public key",
+                ));
+            }
+            let wrapped = new.wrap(&key.keyset, &key.kid, &private).await?;
+            drop(private);
+            to.store(&WrappedKey {
+                wrap_id: new.id().to_owned(),
+                wrapped: URL_SAFE_NO_PAD.encode(wrapped),
+                ..key
+            })
+            .await?;
+            written += 1;
+        }
+    }
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -295,5 +376,120 @@ mod tests {
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&root.path().join("acme")), 0o700);
         assert_eq!(mode(&root.path().join("acme/k1.json")), 0o600);
+    }
+
+    /// A key made and wrapped as the keyring does it.
+    async fn real_key(wrap: &dyn crate::KeyWrap, keyset: &str, kid: &str) -> WrappedKey {
+        let (keyset, kid) = (
+            KeysetId::new(keyset).unwrap(),
+            KeyId::new(kid.to_owned()).unwrap(),
+        );
+        let (private, public) = seal_format::PrivateKey::generate();
+        let wrapped = wrap.wrap(&keyset, &kid, &private).await.unwrap();
+        WrappedKey {
+            keyset,
+            kid,
+            public: public.to_base64url(),
+            created: 1,
+            wrap_id: wrap.id().to_owned(),
+            wrapped: URL_SAFE_NO_PAD.encode(wrapped),
+        }
+    }
+
+    #[tokio::test]
+    async fn rewrapping_moves_every_key_to_a_new_wrapping_key() {
+        use crate::{FileKeyWrap, KeyWrap};
+        let (old, new) = (
+            FileKeyWrap::from_bytes(&[7; 32]).unwrap(),
+            FileKeyWrap::from_bytes(&[8; 32]).unwrap(),
+        );
+        let (from_dir, to_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let from = DirKeySource::new(from_dir.path(), 16);
+        let to = DirKeySource::new(to_dir.path(), 16);
+        let mut keys = Vec::new();
+        for (keyset, kid) in [("acme", "k1"), ("acme", "k2"), ("beta", "k1")] {
+            let key = real_key(&old, keyset, kid).await;
+            from.store(&key).await.unwrap();
+            keys.push(key);
+        }
+        std::fs::write(from_dir.path().join("notes.txt"), b"x").unwrap();
+
+        assert_eq!(rewrap(&from, &to, &old, &new).await, Ok(3));
+        for key in &keys {
+            let moved = to
+                .wrapped_keys(&key.keyset)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|moved| moved.kid == key.kid)
+                .unwrap();
+            assert_eq!(moved.wrap_id, new.id());
+            assert_eq!((&moved.public, moved.created), (&key.public, key.created));
+            // The new wrapping key opens it, to the same private key; the old cannot.
+            let bytes = moved.wrapped_bytes().unwrap();
+            let private = new.unwrap(&key.keyset, &key.kid, &bytes).await.unwrap();
+            assert_eq!(private.public_key().unwrap(), key.public_key().unwrap());
+            assert!(old.unwrap(&key.keyset, &key.kid, &bytes).await.is_err());
+        }
+        // The source is left as it was.
+        assert_eq!(from.wrapped_keys(&keys[0].keyset).await.unwrap().len(), 2);
+        // A second run would replace keys, and does not.
+        assert_eq!(
+            rewrap(&from, &to, &old, &new).await,
+            Err(KeyError::AlreadyExists)
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrapping_refuses_what_it_cannot_vouch_for() {
+        use crate::FileKeyWrap;
+        let (old, new, other) = (
+            FileKeyWrap::from_bytes(&[7; 32]).unwrap(),
+            FileKeyWrap::from_bytes(&[8; 32]).unwrap(),
+            FileKeyWrap::from_bytes(&[9; 32]).unwrap(),
+        );
+        let fresh = || {
+            let dir = tempfile::tempdir().unwrap();
+            let source = DirKeySource::new(dir.path(), 16);
+            (dir, source)
+        };
+
+        let (_from_dir, from) = fresh();
+        from.store(&real_key(&old, "acme", "k1").await)
+            .await
+            .unwrap();
+        let (_dir, to) = fresh();
+        assert!(matches!(
+            rewrap(&from, &to, &old, &old).await,
+            Err(KeyError::Invalid(_))
+        ));
+        // A key wrapped with something else.
+        assert!(matches!(
+            rewrap(&from, &to, &other, &new).await,
+            Err(KeyError::Invalid(_))
+        ));
+
+        // A key whose stored public key is not its own.
+        let (_from_dir, from) = fresh();
+        let mut swapped = real_key(&old, "acme", "k1").await;
+        swapped.public = seal_format::PrivateKey::generate().1.to_base64url();
+        from.store(&swapped).await.unwrap();
+        let (to_dir, to) = fresh();
+        assert!(matches!(
+            rewrap(&from, &to, &old, &new).await,
+            Err(KeyError::Invalid(_))
+        ));
+        assert!(
+            std::fs::read_dir(to_dir.path().join("acme")).is_err(),
+            "nothing was written"
+        );
+
+        // A directory that is no keyset's.
+        let (from_dir, from) = fresh();
+        std::fs::create_dir(from_dir.path().join("not a keyset")).unwrap();
+        assert!(matches!(
+            rewrap(&from, &to, &old, &new).await,
+            Err(KeyError::Invalid(_))
+        ));
     }
 }

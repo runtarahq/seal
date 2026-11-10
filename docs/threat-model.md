@@ -217,8 +217,10 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **The wrapping key file is read once.** seal holds it for the life of the process,
   so deleting or replacing the file takes effect only at a restart, and
   `max_unwrap_age` does not revoke it. A different wrapping key has a different
-  `wrap_id`, and no key wrapped with the old one can then be read: there is no command
-  to re-wrap keys, so the wrapping key cannot be rotated in place.
+  `wrap_id`, and no key wrapped with the old one can then be read, so the wrapping
+  key is rotated by re-wrapping every key with `seal rewrap` and restarting. Copies of
+  the keys wrapped with the old wrapping key stay readable to whoever has it, until
+  they are deleted.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups

@@ -190,7 +190,8 @@ it has not seen. So:
 - An unwrapped key is dropped after `max_unwrap_age` and unwrapped again when needed.
 - The wrapping key file is read once, at start-up. Deleting or replacing it takes
   effect at the next restart, and a restart with a different wrapping key cannot read
-  any key wrapped with the old one: there is no command to re-wrap keys.
+  any key wrapped with the old one. To change it, see
+  [rotating the wrapping key](#rotating-the-wrapping-key).
 - None of these interrupts a request already running.
 
 If the key source is unreachable, loaded keysets keep working for `max_stale`, then return
@@ -211,6 +212,27 @@ If the key source is unreachable, loaded keysets keep working for `max_stale`, t
    key pass through unchanged, so running it again is safe, and it never overwrites its
    output. Store the results.
 5. Delete the old wrapped key from the key source.
+
+### Rotating the wrapping key
+
+For a directory key source. A key service re-wraps the keys it holds itself.
+
+1. Make the new wrapping key, and wrap every key again into a new directory:
+
+   ```sh
+   seal keygen --wrapping-key /etc/seal/kek-2 && chown seal: /etc/seal/kek-2
+   seal rewrap --config /etc/seal/seal.toml --new-wrapping-key /etc/seal/kek-2 --out /var/lib/seal/keys-2
+   ```
+
+   Each key is unwrapped, checked against its public key and wrapped again. The
+   configured directory and wrapping key are not touched, the new directory must not
+   exist, and a run that fails part way leaves nothing in use: delete the new directory
+   and run it again.
+2. Point `keys.source` and `keys.wrap` at the new directory and the new wrapping key on
+   every instance, and restart. Keys made between step 1 and the restart are in the old
+   directory only, so do not generate or rotate keys in between.
+3. Delete the old directory and the old wrapping key, and any backups that hold them:
+   until then the old wrapping key still opens the old copies.
 
 ### Changing policies
 

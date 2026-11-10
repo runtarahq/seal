@@ -819,6 +819,76 @@ fn a_configuration_others_can_write_is_refused() {
 }
 
 #[test]
+fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
+    use seal_keys::{DirKeySource, FileKeyWrap, Keyring, KeyringConfig, Keys};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let config = write_config(
+        &setup,
+        &setup.config_text(
+            Mode::Unix,
+            &Options::default(),
+            "[listen]\nunix = \"/tmp/x.sock\"\n",
+        ),
+    );
+    let run = |args: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let new_kek = setup.dir.path().join("kek-2");
+    let new_keys = setup.dir.path().join("keys-2");
+    assert!(
+        run(&[
+            "keygen".as_ref(),
+            "--wrapping-key".as_ref(),
+            new_kek.as_ref()
+        ])
+        .status
+        .success()
+    );
+    let rewrap = || {
+        run(&[
+            "rewrap".as_ref(),
+            "--config".as_ref(),
+            config.as_ref(),
+            "--new-wrapping-key".as_ref(),
+            new_kek.as_ref(),
+            "--out".as_ref(),
+            new_keys.as_ref(),
+        ])
+    };
+    let done = rewrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(String::from_utf8_lossy(&done.stdout).starts_with("re-wrapped "));
+    assert!(
+        !rewrap().status.success(),
+        "an existing directory is not written into"
+    );
+
+    // The new directory and wrapping key give the keys the old ones gave.
+    let current = |keys: &std::path::Path, kek: &std::path::Path| {
+        let _guard = runtime.enter();
+        let keyring = Keyring::new(
+            std::sync::Arc::new(DirKeySource::new(keys, 16)),
+            std::sync::Arc::new(FileKeyWrap::from_file(kek).unwrap()),
+            KeyringConfig::default(),
+        )
+        .unwrap();
+        runtime.block_on(keyring.current_public_key(&keyset()))
+    };
+    let before = current(&setup.keys_dir, &setup.kek).unwrap();
+    assert_eq!(current(&new_keys, &new_kek).unwrap(), before);
+    assert!(current(&new_keys, &setup.kek).is_err());
+    assert!(current(&setup.keys_dir, &new_kek).is_err());
+}
+
+#[test]
 fn keygen_makes_wrapping_keys_and_keysets_and_version_prints() {
     let directory = tempfile::tempdir().unwrap();
     let kek = directory.path().join("kek");
