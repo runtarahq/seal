@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 
 use seal_format::KeysetId;
+use x509_parser::certificate::X509Certificate;
+use x509_parser::extensions::GeneralName;
 use x509_parser::objects::{oid_registry, oid2abbrev};
 use x509_parser::x509::X509Name;
 
@@ -15,6 +17,22 @@ pub enum Identity {
     Uid(u32),
     /// A TLS client certificate's subject, normalised.
     Subject(String),
+    /// A subject alternative name of a TLS client certificate: `uri:` and the URI as
+    /// written, or `dns:` and the name in lower case.
+    San(String),
+}
+
+impl Identity {
+    /// The identity a configured `cert_san` names. One with a colon is a URI, since a
+    /// DNS name has none.
+    #[must_use]
+    pub fn san(configured: &str) -> Self {
+        if configured.contains(':') {
+            Self::San(format!("uri:{configured}"))
+        } else {
+            Self::San(format!("dns:{}", configured.to_ascii_lowercase()))
+        }
+    }
 }
 
 /// A known caller.
@@ -49,9 +67,10 @@ impl CallerMap {
         let callers = configs
             .iter()
             .filter_map(|config| {
-                let identity = match (&config.unix_uid, &config.cert_subject) {
-                    (Some(uid), None) => Identity::Uid(*uid),
-                    (None, Some(subject)) => Identity::Subject(normalise_subject(subject)),
+                let identity = match (&config.unix_uid, &config.cert_subject, &config.cert_san) {
+                    (Some(uid), None, None) => Identity::Uid(*uid),
+                    (None, Some(subject), None) => Identity::Subject(normalise_subject(subject)),
+                    (None, None, Some(name)) => Identity::san(name),
                     _ => return None,
                 };
                 let caller = Caller {
@@ -74,6 +93,19 @@ impl CallerMap {
     #[must_use]
     pub fn get(&self, identity: &Identity) -> Option<&Caller> {
         self.callers.get(identity)
+    }
+
+    /// The one identity among a certificate's that is a known caller. `None` if none
+    /// is, or if the certificate is two callers at once, which is then neither.
+    #[must_use]
+    pub fn identify(&self, identities: Vec<Identity>) -> Option<Identity> {
+        let mut known = identities
+            .into_iter()
+            .filter(|identity| self.callers.contains_key(identity));
+        match (known.next(), known.next()) {
+            (Some(identity), None) => Some(identity),
+            _ => None,
+        }
     }
 }
 
@@ -120,6 +152,32 @@ pub fn certificate_subject(subject: &X509Name<'_>) -> Option<String> {
         parts.push(format!("{}={value}", name.to_ascii_uppercase()));
     }
     (!parts.is_empty()).then(|| parts.join(","))
+}
+
+/// Every identity a verified client certificate has: its subject, if that has a form
+/// a caller can be configured with, and each URI and DNS name among its subject
+/// alternative names.
+#[must_use]
+pub fn certificate_identities(certificate: &X509Certificate<'_>) -> Vec<Identity> {
+    let mut identities: Vec<Identity> = certificate_subject(certificate.subject())
+        .map(Identity::Subject)
+        .into_iter()
+        .collect();
+    if let Ok(Some(names)) = certificate.subject_alternative_name() {
+        for name in &names.value.general_names {
+            let identity = match name {
+                GeneralName::URI(uri) => Identity::San(format!("uri:{uri}")),
+                GeneralName::DNSName(dns) => {
+                    Identity::San(format!("dns:{}", dns.to_ascii_lowercase()))
+                }
+                _ => continue,
+            };
+            if !identities.contains(&identity) {
+                identities.push(identity);
+            }
+        }
+    }
+    identities
 }
 
 #[cfg(test)]
@@ -170,6 +228,7 @@ mod tests {
             name: name.to_owned(),
             unix_uid: uid,
             cert_subject: subject.map(str::to_owned),
+            cert_san: None,
             keysets: keysets.iter().map(|keyset| (*keyset).to_owned()).collect(),
             admin,
         }
@@ -198,6 +257,40 @@ mod tests {
                 .may_use(&KeysetId::new("anything").unwrap())
         );
         assert!(map.get(&Identity::Uid(1)).is_none());
+    }
+
+    #[test]
+    fn a_caller_can_be_a_subject_alternative_name() {
+        let mut by_uri = config("app", None, None, &["acme"], false);
+        by_uri.cert_san = Some("spiffe://example.org/app".to_owned());
+        let mut by_dns = config("batch", None, None, &["beta"], false);
+        by_dns.cert_san = Some("Batch.Example.org".to_owned());
+        let by_subject = config("ops", None, Some("CN=ops"), &[], true);
+        let map = CallerMap::new(&[by_uri, by_dns, by_subject]);
+        let pki = TestPki::new("client CA");
+        let caller = |issued: &seal_testkit::pki::Issued| {
+            let (_, parsed) =
+                x509_parser::parse_x509_certificate(issued.cert_der.as_ref()).unwrap();
+            map.identify(certificate_identities(&parsed))
+                .and_then(|identity| map.get(&identity).map(|caller| caller.name.clone()))
+        };
+
+        // Whatever the common name says, the name the certificate was issued for decides.
+        let app = pki.client_with_names("anything", &[], &["spiffe://example.org/app"]);
+        assert_eq!(caller(&app).as_deref(), Some("app"));
+        let batch = pki.client_with_names("anything", &["batch.example.org"], &[]);
+        assert_eq!(caller(&batch).as_deref(), Some("batch"));
+        assert_eq!(caller(&pki.client("ops")).as_deref(), Some("ops"));
+
+        // A URI is compared as written, and a DNS name is not a URI.
+        let other = pki.client_with_names("app", &["app"], &["spiffe://example.org/APP"]);
+        assert_eq!(caller(&other), None);
+        // A common name that spells a configured name is not that name.
+        assert_eq!(caller(&pki.client("spiffe://example.org/app")), None);
+        assert_eq!(caller(&pki.client("batch.example.org")), None);
+        // A certificate that is two callers at once is neither.
+        let both = pki.client_with_names("ops", &[], &["spiffe://example.org/app"]);
+        assert_eq!(caller(&both), None);
     }
 
     #[test]

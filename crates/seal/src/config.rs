@@ -196,6 +196,9 @@ pub struct CallerConfig {
     pub unix_uid: Option<u32>,
     /// The certificate subject, for TLS, such as `CN=app,O=Example`.
     pub cert_subject: Option<String>,
+    /// A subject alternative name of the certificate, for TLS: a URI such as
+    /// `spiffe://example.org/app`, or a DNS name.
+    pub cert_san: Option<String>,
     /// The keysets it may use. `*` means all.
     pub keysets: Vec<String>,
     /// Whether it may make and rotate keys.
@@ -502,15 +505,17 @@ impl Config {
         let mut names = std::collections::BTreeSet::new();
         let mut uids = std::collections::BTreeSet::new();
         let mut subjects = std::collections::BTreeSet::new();
+        let mut sans = std::collections::BTreeSet::new();
         for caller in &self.callers {
             if !names.insert(&caller.name) {
                 return Err(invalid(format!("caller {} appears twice", caller.name)));
             }
-            let identities =
-                usize::from(caller.unix_uid.is_some()) + usize::from(caller.cert_subject.is_some());
+            let identities = usize::from(caller.unix_uid.is_some())
+                + usize::from(caller.cert_subject.is_some())
+                + usize::from(caller.cert_san.is_some());
             if identities != 1 {
                 return Err(invalid(format!(
-                    "caller {} needs exactly one of unix_uid and cert_subject",
+                    "caller {} needs exactly one of unix_uid, cert_subject and cert_san",
                     caller.name
                 )));
             }
@@ -538,7 +543,20 @@ impl Config {
                     }
                     subjects.insert(subject)
                 }
-                (None, None) => true,
+                (None, None) => match &caller.cert_san {
+                    Some(name) => {
+                        let is_a_name =
+                            !name.is_empty() && name.chars().all(|c| c.is_ascii_graphic());
+                        if !is_a_name {
+                            return Err(invalid(format!(
+                                "caller {} has a cert_san that is not a URI or a DNS name",
+                                caller.name
+                            )));
+                        }
+                        sans.insert(crate::callers::Identity::san(name))
+                    }
+                    None => true,
+                },
             };
             if !is_new {
                 return Err(invalid(format!(
@@ -727,6 +745,31 @@ mod tests {
                 .0
                 .contains("identity of another caller")
         );
+        let by_name = mtls.replace(
+            "cert_subject = \"CN=app, O=Example\"",
+            "cert_san = \"spiffe://example.org/app\"",
+        );
+        Config::parse(&by_name).unwrap();
+        let same_name = format!(
+            "{by_name}\n[[callers]]\nname = \"other\"\ncert_san = \"spiffe://example.org/app\"\nkeysets = [\"*\"]"
+        );
+        assert!(
+            Config::parse(&same_name)
+                .unwrap_err()
+                .0
+                .contains("identity of another caller")
+        );
+        let two_ways = by_name.replace("cert_san", "cert_subject = \"CN=app\"\ncert_san");
+        assert!(Config::parse(&two_ways).is_err());
+        for name in ["", "a b", "caf\u{e9}.example"] {
+            let text = by_name.replace("spiffe://example.org/app", name);
+            assert!(
+                Config::parse(&text).unwrap_err().0.contains("cert_san"),
+                "{name}"
+            );
+        }
+        let name_on_unix = MINIMAL.replace("unix_uid = 990", "cert_san = \"app.example\"");
+        assert!(Config::parse(&name_on_unix).is_err());
         for subject in ["app", "CN=", "CN=app,", "=app"] {
             let text = mtls.replace("CN=app, O=Example", subject);
             assert!(

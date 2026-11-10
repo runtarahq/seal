@@ -19,7 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::server::Connected;
 
-use crate::callers::{CallerMap, Identity, certificate_subject};
+use crate::callers::{CallerMap, Identity, certificate_identities};
 
 /// A caller's connection, which tells the service who is calling.
 pub struct CallerStream<S> {
@@ -287,11 +287,17 @@ pub fn spawn_reloader(tls: &Arc<ReloadingTls>, interval: Duration) {
     });
 }
 
-/// The subject of a verified client certificate, in the form callers are configured in.
-fn subject_of(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Option<String> {
-    let certificate = stream.get_ref().1.peer_certificates()?.first()?;
-    let (_, parsed) = x509_parser::parse_x509_certificate(certificate.as_ref()).ok()?;
-    certificate_subject(parsed.subject())
+/// The identities of a verified client certificate: its subject and its subject
+/// alternative names, in the forms callers are configured in.
+fn identities_of(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Vec<Identity> {
+    stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .and_then(|certificate| x509_parser::parse_x509_certificate(certificate.as_ref()).ok())
+        .map(|(_, parsed)| certificate_identities(&parsed))
+        .unwrap_or_default()
 }
 
 /// Listens on TCP with TLS 1.3, accepting only known certificate subjects.
@@ -331,11 +337,7 @@ pub async fn tcp(
                         .increment(1);
                     return;
                 };
-                let identity = match subject_of(&stream) {
-                    Some(subject) => Identity::Subject(subject),
-                    None => return,
-                };
-                if callers.get(&identity).is_none() {
+                let Some(identity) = callers.identify(identities_of(&stream)) else {
                     metrics::counter!("seal_connections_refused_total", "reason" => "unknown")
                         .increment(1);
                     tracing::warn!(
@@ -343,7 +345,7 @@ pub async fn tcp(
                         "refused a connection from an unknown caller"
                     );
                     return;
-                }
+                };
                 let _ = sender
                     .send(CallerStream {
                         inner: stream,

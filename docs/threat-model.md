@@ -69,7 +69,7 @@ working afterwards.
 
 | Boundary | Enforced by | Checked by |
 |---|---|---|
-| Caller to seal | Peer credentials or the client certificate's subject, compared attribute by attribute; configured keysets, including a shared value's; an audit record of each refusal | `crates/seal/tests/service.rs`; `a_certificate_subject_is_compared_by_attribute`; `a_caller_needs_the_platform_keyset_to_use_a_shared_value` |
+| Caller to seal | Peer credentials, or the client certificate's subject, compared attribute by attribute, or one of its subject alternative names; configured keysets, including a shared value's; an audit record of each refusal | `crates/seal/tests/service.rs`; `a_certificate_subject_is_compared_by_attribute`; `a_caller_needs_the_platform_keyset_to_use_a_shared_value` |
 | Sealed value to seal | HPKE with associated data; the policy inside the ciphertext; the `shared` flag | `crates/seal-format/tests/acceptance.rs`, the published vectors, `a_value_from_another_record_is_refused_unless_shared` |
 | Caller's request to the policy | The matcher, a pure function over untrusted policies; strict URL parsing; refused headers | `crates/seal-broker/src/matcher/tests.rs` (with property tests), `url_match` and other fuzz targets, `caller_set_amz_headers_are_refused_before_dns` |
 | seal to provider | Address checks after DNS on every address; TLS; no redirects | `acceptance_a_private_address_is_refused_after_dns_with_no_connection`, `acceptance_redirects_are_returned_not_followed` |

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use seal_client::{ErrorCode, Mode, SealClient};
 use seal_format::KeysetId;
-use seal_testkit::pki::TestPki;
+use seal_testkit::pki::{Issued, TestPki};
 use serde_json::json;
 use support::*;
 
@@ -71,6 +71,44 @@ async fn a_certificate_from_another_ca_is_refused() {
         client.info().await.err().unwrap().code,
         ErrorCode::Transport
     );
+}
+
+#[tokio::test]
+async fn a_caller_is_known_by_the_name_its_certificate_was_issued_for() {
+    let callers = "[[callers]]\nname = \"app\"\ncert_san = \"spiffe://example.org/app\"\nkeysets = [\"acme\"]\n";
+    let options = Options {
+        callers: Some(callers.to_owned()),
+        ..Options::default()
+    };
+    let instance = start(Mode::Mtls, options, &[]).await;
+    let address = instance
+        .process
+        .as_ref()
+        .unwrap()
+        .address
+        .strip_prefix("tcp:")
+        .unwrap()
+        .to_owned();
+    let pki = &instance.setup.pki;
+    let connect = |issued: &Issued| {
+        seal_client::mtls(
+            std::slice::from_ref(&address),
+            &client_tls(&instance.setup, issued),
+        )
+        .unwrap()
+    };
+    let named = pki.client_with_names("whatever", &[], &["spiffe://example.org/app"]);
+    assert_eq!(connect(&named).info().await.unwrap().mode, "mtls");
+    // The same CA, a common name that spells the URI, and another URI.
+    for other in [
+        pki.client("spiffe://example.org/app"),
+        pki.client_with_names("app", &[], &["spiffe://example.org/other"]),
+    ] {
+        assert_eq!(
+            connect(&other).info().await.err().unwrap().code,
+            ErrorCode::Transport
+        );
+    }
 }
 
 #[tokio::test]

@@ -125,6 +125,27 @@ impl TestPki {
         self.issue(params)
     }
 
+    /// A client certificate whose subject is `CN=<common_name>`, with these DNS names
+    /// and URIs as subject alternative names.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a name cannot be in a certificate.
+    #[must_use]
+    pub fn client_with_names(&self, common_name: &str, dns: &[&str], uris: &[&str]) -> Issued {
+        let mut params = Self::client_params(common_name);
+        let name = |name: &str| {
+            rcgen::string::Ia5String::try_from(name)
+                .unwrap_or_else(|_| unreachable!("a name for a certificate"))
+        };
+        params.subject_alt_names = dns
+            .iter()
+            .map(|dns| rcgen::SanType::DnsName(name(dns)))
+            .chain(uris.iter().map(|uri| rcgen::SanType::URI(name(uri))))
+            .collect();
+        self.issue(params)
+    }
+
     /// A client certificate for an existing key, given as PKCS#8 PEM: RSA, ECDSA or
     /// Ed25519. `None` if the key cannot be read.
     #[must_use]

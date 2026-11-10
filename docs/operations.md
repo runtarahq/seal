@@ -51,7 +51,7 @@ configuration file that its group or others can write.
 | Setting | Default | |
 |---|---|---|
 | `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
-| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` |
+| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san` |
 | `reload_interval` | `10s` | How often certificate files are checked |
 
 ### `[[callers]]`
@@ -59,7 +59,7 @@ configuration file that its group or others can write.
 | Setting | |
 |---|---|
 | `name` | The name in audit records |
-| `unix_uid` or `cert_subject` | Exactly one, matching the listener |
+| `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
 | `admin` | Whether it may generate keysets, rotate and list public keys. Default `false` |
 
@@ -67,9 +67,13 @@ A `cert_subject` is the certificate's whole subject, attribute by attribute and 
 certificate's order, such as `CN=app,O=Example`. Attribute names and the spaces around
 separators do not matter; values are compared exactly. A certificate whose subject has
 a comma in a value, or more than one attribute in a relative distinguished name, is
-refused, because it could not be told from another subject once written down. The
-client CA should issue certificates for seal's callers only: seal checks the subject,
-not the subject alternative names.
+refused, because it could not be told from another subject once written down.
+
+A `cert_san` is one of the certificate's subject alternative names instead: a URI,
+compared as written, such as `spiffe://example.org/app`, or a DNS name. That is the
+name a certificate is issued for, and the better choice where the client CA also
+issues certificates for other services, since a subject is only what the requester
+asked for. A certificate that matches two configured callers is refused.
 
 ### `[keys]`
 
