@@ -2,9 +2,10 @@
 
 An audit of seal at commit `087de1c` ("Let a shared access signature carry response
 headers"), 10 November 2026. It is a source review of the whole workspace, with the
-findings that could be reproduced executed to confirm them. It is not the external
-review the [threat model](threat-model.md#open) still asks for, and it says nothing
-about the code's correctness outside the security properties it lists.
+findings that could be reproduced executed to confirm them. It is not an external
+review, for which [`reviews/external-review-scope.md`](reviews/external-review-scope.md)
+is the brief, and it says nothing about the code's correctness outside the security
+properties it lists.
 
 ## Summary
 
@@ -35,41 +36,40 @@ needs a server that already satisfies TLS verification. Both fail silently.
 ## Resolution
 
 What has changed since, by commit. The findings below are left as they were written,
-against `087de1c`.
+against `087de1c`; every one of them has since been fixed or, where that is said, has
+its limit documented.
 
-| Finding | State | Commit |
+| Finding | What was done | Commit |
 |---|---|---|
-| 1. mTLS subject | Fixed: the subject is compared attribute by attribute, and one with a comma in a value or a multi-valued name is refused. Identity is still the subject, not the subject alternative name | `6d52265` |
-| 2. Postgres login without authentication | Fixed: with a password to present, the server must ask for it | `dbe121c` |
-| 3. Reflected credential | Fixed for response headers, for a secret of eight bytes or more. A response body is still not inspected | `8b216cd` |
-| 4. Unaudited refusals | Fixed for a refused keyset, shared value or administrative call. Rate-limit refusals leave no record, by design: they bound the others | `1d255f0` |
-| 5. Metadata addresses | Fixed: `100.100.100.200`, `fd00:ec2::254` and `fd20:ce::254` are metadata addresses, which no rule can allow | `c23a2d7` |
-| 6. `framed_length` overflow | Fixed: checked arithmetic, and the request is refused | `6a7b539` |
-| Two callers with one identity | Fixed | `46c40d1` |
-| Key source URL with a password | Fixed | `e58807e` |
-| Wrapped key file read whole | Fixed | `c7dc0b6` |
-| Audit file permissions | Fixed: a file its group can write or others can reach is refused | `b22ce28` |
-| Control characters in a literal | Fixed. A certificate literal is PEM and keeps its line ends, which is why whitespace was allowed | `259f064` |
-| Postgres login deadline | Fixed | `398473d` |
-| Unix socket's directory | Fixed: a directory its group or others can write is refused | `c1842ff` |
-| `;` in form bodies | Fixed: refused in requests seal reads and in responses it seals | `09470d5` |
-| Wrapping key rotation, channel binding, unsigned tokens' claims | Not changed in code. The threat model and the operations guide no longer claim otherwise | `2d6ae4e` |
+| 1. mTLS subject | The subject is compared attribute by attribute, and one with a comma in a value or a multi-valued name is refused | `6d52265` |
+| 1. Identity bound to the subject only | A caller can be configured by `cert_san`, a URI or DNS name among the certificate's subject alternative names | `b12a2b7` |
+| 2. Postgres login without authentication | With a password to present, the server must ask for it | `dbe121c` |
+| 3. Reflected credential | Response headers that repeat an injected secret of eight bytes or more are dropped. A response body is not inspected, which the threat model says | `8b216cd` |
+| 4. Unaudited refusals | A refused keyset, shared value or administrative call is audited. Rate-limit refusals are not, on purpose: they bound the others | `1d255f0` |
+| 5. Metadata addresses | `100.100.100.200`, `fd00:ec2::254` and `fd20:ce::254` are metadata addresses, which no rule can allow | `c23a2d7` |
+| 6. `framed_length` overflow | Checked arithmetic, and the request is refused | `6a7b539` |
+| Presigned URL copied unwiped | The broker and `seal-client` return it in a string that wipes itself, and the service moves it into its reply. The transport's copy remains | `d25806d` |
+| `;` in form bodies | Refused in requests seal reads and in responses it seals | `09470d5` |
+| Control characters in a literal | Refused. A certificate literal is PEM and keeps its line ends, which is why whitespace was allowed | `259f064` |
+| `path_prefix` and an injected path prefix | By design: the injected prefix goes in front of the path the rule constrains. The policy guide now says what that bounds | `1af19a9` |
+| XML locations matched by qualified name | Matched by local name, so a prefix cannot take a token out of reach | `0e49c2c` |
+| SigV4 whitespace | A tab in a signed header is refused, and folding matches the SDKs | `c5e9fad` |
+| Azure `collapse`, and a caller's `x-ms-version` | Trimming is ASCII, as folding was. The version must be one date | `5a4a834` |
+| Unix socket's directory | A directory its group or others can write is refused | `c1842ff` |
+| Two callers with one identity | Refused | `46c40d1` |
+| Postgres login deadline | The login has the connection's deadline | `398473d` |
+| Wrapping key cannot be rotated | `seal rewrap` wraps every key again under a new wrapping key. The documents no longer say that revoking the file takes effect within `max_unwrap_age` | `835681a`, `2d6ae4e` |
+| Channel binding cannot be required | `require_channel_binding` on a `pg_password` rule | `2583e0c` |
+| Key source URL with a password | Refused | `e58807e` |
+| Wrapped key file read whole | Read to a bound | `c7dc0b6` |
+| `public_keys` unverified | The list comes from the loaded keyset, where each key was unwrapped and compared | `2bbfcaa` |
+| Caller's `Content-Length` forwarded | A body that is longer or shorter than it declares fails the request. Testing this found that a longer one was cut short without an error | `8d74426` |
+| Audit file permissions | A file its group can write or others can reach is refused | `b22ce28` |
+| Metrics listener and `/readyz` | The key source is asked at most once in five seconds. The listener still has no authentication, which the operations guide says | `17fd940` |
+| Claims of an unsigned token | A token with `alg` `none`, no `alg` or no signature exposes nothing | `c2b996d` |
 
-Still open, each needing a decision rather than a patch:
-
-- Binding a caller to a certificate's subject alternative name, which changes the
-  configuration format.
-- Rotating or re-wrapping the wrapping key, and a policy option to require channel
-  binding.
-- XML namespaces in response locations, and `path_prefix` against an injected path
-  prefix.
-- Whitespace other than a space in a signed header, for SigV4 and Azure. Today such a
-  request is signed differently from the SDK and refused by the provider, which fails
-  safe; changing it needs a check against the real services.
-- The presigned URL's unwiped copy. The URL is handed to the caller as a plain string
-  in any case.
-- The caller's `Content-Length` and `x-ms-version`, the unauthenticated metrics
-  listener, and `public_keys` returning the stored public key.
+The row about `NegotiateProtocolVersion` in the first draft of this audit was wrong
+and has been removed: the protocol asks for no reply to it.
 
 ## Findings
 
