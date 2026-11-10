@@ -50,7 +50,7 @@ configuration file that its group or others can write.
 
 | Setting | Default | |
 |---|---|---|
-| `unix` | | A socket path. Callers then need `unix_uid` |
+| `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
 | `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` |
 | `reload_interval` | `10s` | How often certificate files are checked |
 

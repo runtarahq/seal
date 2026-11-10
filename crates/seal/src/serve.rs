@@ -206,7 +206,7 @@ pub async fn run(
     match (&config.listen.unix, config.listen.tcp, &config.listen.tls) {
         (Some(path), _, _) => {
             let incoming = listen::unix(path, callers, limits.max_caller_connections)
-                .map_err(|_| format!("cannot listen on {}", path.display()))?;
+                .map_err(|error| format!("cannot listen on {}: {error}", path.display()))?;
             listening(&Listening::Unix(path.clone()));
             tracing::info!(mode, "seal is listening");
             builder

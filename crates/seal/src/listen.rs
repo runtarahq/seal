@@ -92,16 +92,39 @@ impl<S> Stream for Incoming<S> {
     }
 }
 
+/// Refuses a socket in a directory its group or others can write: any of them could
+/// replace the socket with their own, and callers would then talk to an impostor.
+fn check_socket_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        if std::fs::metadata(directory)?.permissions().mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the socket's directory is writable by its group or others",
+            ));
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+
 /// Listens on a Unix socket, accepting only known uids.
 ///
 /// # Errors
 ///
-/// Returns an error if the socket cannot be bound.
+/// Returns an error if the socket cannot be bound, or if its directory is writable
+/// by its group or others.
 pub fn unix(
     path: &Path,
     callers: Arc<CallerMap>,
     max_connections: usize,
 ) -> io::Result<Incoming<tokio::net::UnixStream>> {
+    check_socket_directory(path)?;
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -332,4 +355,38 @@ pub async fn tcp(
         }
     });
     Ok((Incoming { receiver }, local))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_socket_is_refused_in_a_directory_others_can_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("seal.sock");
+        let callers = Arc::new(CallerMap::default());
+        let set = |mode| {
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        };
+        for mode in [0o770, 0o757, 0o777] {
+            set(mode);
+            let error = unix(&path, Arc::clone(&callers), 1).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{mode:o}");
+            assert!(!path.exists());
+        }
+        // As the systemd unit has it, and a socket left by an earlier run is replaced.
+        set(0o750);
+        drop(unix(&path, Arc::clone(&callers), 1).unwrap());
+        unix(&path, callers, 1).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o660
+        );
+    }
 }
