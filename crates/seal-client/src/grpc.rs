@@ -473,10 +473,11 @@ impl SealClient for GrpcClient {
             url: request.url,
             expires_s: request.expires_s,
         };
-        let reply = self
+        let mut reply = self
             .call(|mut client| async move { client.presign(message).await })
             .await?;
-        Ok(Zeroizing::new(reply.url))
+        // Moved out, and the reply wipes what is left of itself.
+        Ok(Zeroizing::new(std::mem::take(&mut reply.url)))
     }
 
     async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {
