@@ -183,12 +183,14 @@ it has not seen. So:
 - A key added to the source reaches every instance within `max_stale`, normally within
   `refresh_interval`.
 - A key deleted from the source stops opening on every instance within `max_stale`.
-- Revoking or destroying the wrapping key takes effect within `max_unwrap_age`.
+- An unwrapped key is dropped after `max_unwrap_age` and unwrapped again when needed.
+- The wrapping key file is read once, at start-up. Deleting or replacing it takes
+  effect at the next restart, and a restart with a different wrapping key cannot read
+  any key wrapped with the old one: there is no command to re-wrap keys.
 - None of these interrupts a request already running.
 
 If the key source is unreachable, loaded keysets keep working for `max_stale`, then return
-`KEYS_UNAVAILABLE`. If the wrapping key is unavailable, they keep working until each key's
-`max_unwrap_age`.
+`KEYS_UNAVAILABLE`.
 
 ### Rotation
 
