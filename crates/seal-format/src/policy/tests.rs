@@ -663,6 +663,23 @@ fn client_certificates_need_valid_pem_and_https() {
     .unwrap_err();
 }
 
+#[test]
+fn a_literal_has_no_control_characters_but_the_line_ends_of_pem() {
+    for username in ["us\ner", "user\r\n", "us\ter", "us\u{c}er", "us\u{0}er"] {
+        with_inject(json!({ "basic": { "username": { "literal": username } } })).unwrap_err();
+    }
+    with_inject(json!({ "basic": { "username": { "literal": "a user" } } })).unwrap();
+
+    let certificate = |literal: &str| {
+        with_inject(json!({ "client_cert": {
+            "cert": { "literal": literal }, "chain": { "literal": literal },
+        } }))
+    };
+    certificate("-----BEGIN CERTIFICATE-----\r\nMIIB\n-----END CERTIFICATE-----\n").unwrap();
+    certificate("-----BEGIN CERTIFICATE-----\n\u{0}").unwrap_err();
+    certificate("-----BEGIN CERTIFICATE-----\t").unwrap_err();
+}
+
 // JWT assertions.
 
 #[test]
