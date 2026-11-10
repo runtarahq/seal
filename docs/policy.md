@@ -122,7 +122,9 @@ For an API that takes its credential in the URL's path, such as Telegram's
 `/bot<token>/sendMessage`. `prefix` goes before the caller's path, with exactly one `{}`
 for the secret: whole segments, starting with `/` and not ending with one. The caller
 names the URL without it, here `https://api.telegram.org/sendMessage`, and that is the
-path a `path_prefix` matches and the audit record holds.
+path a `path_prefix` matches and the audit record holds. A `path_prefix` therefore
+bounds what follows the injected prefix, not the whole path sent: with a prefix of
+`/bot{}` and a `path_prefix` of `/send`, requests go to `/bot<token>/send…`.
 
 ```json
 { "rules": [{
