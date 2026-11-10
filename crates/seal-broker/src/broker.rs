@@ -475,7 +475,10 @@ impl Broker {
     ///
     /// Returns a [`BrokerError`] with the reason, which never includes a value or the
     /// URL.
-    pub async fn presign(&self, request: PresignRequest) -> Result<String, BrokerError> {
+    pub async fn presign(
+        &self,
+        request: PresignRequest,
+    ) -> Result<zeroize::Zeroizing<String>, BrokerError> {
         let mut record = self.first_record(
             "presign",
             &request.caller,
@@ -505,7 +508,7 @@ impl Broker {
         &self,
         request: PresignRequest,
         audit: &mut AuditGuard,
-    ) -> Result<String, BrokerError> {
+    ) -> Result<zeroize::Zeroizing<String>, BrokerError> {
         let PresignRequest {
             keyset,
             item,
@@ -547,7 +550,7 @@ impl Broker {
             },
             self.clock.now(),
         )?;
-        Ok(presigned.as_str().to_owned())
+        Ok(presigned)
     }
 
     /// Says whether a message's authentication code was made with a sealed secret, whose

@@ -2578,6 +2578,7 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

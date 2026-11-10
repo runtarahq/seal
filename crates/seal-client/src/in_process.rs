@@ -3,6 +3,7 @@
 //! logs, errors or responses by accident.
 
 use std::sync::Once;
+use zeroize::Zeroizing;
 
 use async_trait::async_trait;
 use http_body_util::BodyExt;
@@ -126,7 +127,7 @@ impl SealClient for InProcessClient {
         })
     }
 
-    async fn presign(&self, request: PresignRequest) -> Result<String, SealError> {
+    async fn presign(&self, request: PresignRequest) -> Result<Zeroizing<String>, SealError> {
         self.broker
             .presign(seal_broker::PresignRequest {
                 caller: "in-process".to_owned(),

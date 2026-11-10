@@ -196,6 +196,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   login ends, not just for one request; the caller's preamble comes in between, under
   the idle timeout. `postgres-protocol`'s SCRAM also keeps copies derived from the
   password, which seal cannot wipe.
+- **A presigned URL** is wiped when seal and `seal-client` drop it, but the transport
+  between them holds a copy seal cannot wipe, and the application keeps whatever
+  copies it makes.
 - **SigV4 signing keys** are derived from the secret access key for one day, region and
   service. A chunked upload holds one for as long as the upload streams; it is wiped
   when the upload ends.

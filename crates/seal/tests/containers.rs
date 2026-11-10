@@ -437,7 +437,7 @@ container_matrix! {
         assert!(head.contains("content-type: text/csv; charset=utf-8"), "{response}");
         assert!(head.contains("content-disposition: attachment; filename=\"q3.csv\""), "{response}");
         let retyped = url.replace("rsct=text%2Fcsv", "rsct=text%2Fhtml");
-        assert_ne!(retyped, url);
+        assert_ne!(retyped, *url);
         assert_eq!(fetch_directly("GET", &retyped, &[], b"").await.0, 403);
 
         // An upload and a delete, each with a signature of its own.

@@ -760,7 +760,7 @@ impl Seal for Service {
                 "the caller may not use a value's keyset",
             ));
         }
-        let url = self
+        let mut url = self
             .broker
             .presign(seal_broker::PresignRequest {
                 caller: caller.name,
@@ -775,7 +775,10 @@ impl Seal for Service {
             })
             .await
             .map_err(|error| broker_status(&error))?;
-        Ok(Response::new(PresignReply { url }))
+        // Moved into the reply, not copied: the transport's own copy is the only other.
+        Ok(Response::new(PresignReply {
+            url: std::mem::take(&mut *url),
+        }))
     }
 
     async fn generate_keyset(

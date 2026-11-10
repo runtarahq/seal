@@ -241,7 +241,7 @@ mode_matrix! {
         let object = "https://s3.eu-west-1.amazonaws.com/tenant-a/q3.csv";
         let allowed = instance.setup.seal("secret_key", b"SEALCANARY-secret-access-key", &rule(true)).await;
         let url = instance.client.presign(presign(&allowed, Method::GET, object, 600)).await.unwrap();
-        assert!(url.starts_with(&format!("{object}?X-Amz-Algorithm=AWS4-HMAC-SHA256&")), "{url}");
+        assert!(url.starts_with(&format!("{object}?X-Amz-Algorithm=AWS4-HMAC-SHA256&")), "{}", *url);
         assert!(url.contains("&X-Amz-Expires=600&") && url.contains("&X-Amz-Signature="));
         assert!(!url.contains("SEALCANARY"));
         let record = instance.setup.audit_records().pop().unwrap();
