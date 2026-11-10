@@ -129,6 +129,60 @@ async fn each_injection_kind_reaches_the_provider_as_the_rule_says() {
     assert_eq!(received, json!({ "a": 1, "auth": { "token": "s3cret" } }));
 }
 
+/// The secret goes in the path, as Telegram's bot API has it. The audit record has the
+/// path the caller named, and a header that repeats the secret is not passed on.
+#[tokio::test]
+async fn a_secret_in_the_path_reaches_the_provider_and_is_not_recorded_or_reflected() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let policy = plain_policy(&provider, &json!({ "path": { "prefix": "/bot{}" } }));
+    let token = harness.seal("token", b"123456:PATH-canary_value", &policy);
+    provider.respond(
+        "/bot123456:PATH-canary_value/redirect",
+        CannedResponse {
+            status: 301,
+            headers: vec![
+                (
+                    "location".to_owned(),
+                    "/bot123456:PATH-canary_value/redirect/".to_owned(),
+                ),
+                ("x-kept".to_owned(), "yes".to_owned()),
+            ],
+            body: Vec::new(),
+        },
+    );
+
+    let response = harness
+        .get(&url(&provider, "/redirect?a=1"), &[("token", &token)])
+        .await
+        .unwrap();
+    assert_eq!(response.status, 301);
+    assert!(!response.headers.contains_key(header::LOCATION));
+    assert_eq!(response.headers["x-kept"], "yes");
+    read_body(response).await.unwrap();
+
+    assert_eq!(
+        provider.received()[0].uri,
+        "/bot123456:PATH-canary_value/redirect?a=1"
+    );
+    let record = harness.audit.last();
+    assert_eq!(record.path.as_deref(), Some("/redirect"));
+    assert_eq!(record.status, Some(301));
+
+    // Presented with it, another value would be carried outside its own path prefix.
+    let bearer = harness.seal("other", b"x", &plain_policy(&provider, &bearer()));
+    let error = harness
+        .get(
+            &url(&provider, "/echo"),
+            &[("token", &token), ("other", &bearer)],
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert_eq!(provider.received().len(), 1);
+}
+
 #[tokio::test]
 async fn caller_headers_pass_through_and_hop_by_hop_ones_do_not() {
     let provider = MockProvider::plain().await;

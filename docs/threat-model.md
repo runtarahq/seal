@@ -151,8 +151,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   who can read seal's memory, who is already out of scope. seal's own buffers that
   hold a secret are sized up front, so none leaves an unwiped allocation behind as it
   grows; [the review](reviews/secret-handling.md) lists every place a secret is read.
-- **Secrets in requests.** A query parameter holding a secret is copied into a `Uri`, and
-  a header into a `HeaderValue`. A body with an injected secret is wiped when its last
+- **Secrets in requests.** A query parameter or path holding a secret is copied into a
+  `Uri`, and a header into a `HeaderValue`. A body with an injected secret is wiped when its last
   reference goes, but `hyper` may have copied it into a write buffer.
 - **Client-certificate keys in TLS configurations** stay in memory while the identity
   exists, an explicit exception to "plaintext lasts one request", and may also be

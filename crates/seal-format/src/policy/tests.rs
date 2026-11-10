@@ -108,6 +108,7 @@ fn accepts_every_inject_kind() {
         json!({ "basic": { "username": { "literal": "user" } } }),
         json!({ "basic": { "username": { "field": "username" } } }),
         json!({ "query": { "name": "api_key" } }),
+        json!({ "path": { "prefix": "/bot{}" } }),
         json!({ "form_field": { "name": "password" } }),
         json!({ "json_field": { "pointer": "/auth/token" } }),
         json!({ "client_cert": {
@@ -365,6 +366,21 @@ fn json_pointers_must_be_valid_and_not_the_whole_document() {
         assert!(with_inject(inject).is_err(), "{pointer:?}");
     }
     with_inject(json!({ "json_field": { "pointer": "/a~0b/c~1d" } })).unwrap();
+}
+
+#[test]
+fn an_injected_path_is_whole_segments_with_one_place_for_the_secret() {
+    for prefix in ["/bot{}", "/{}", "/v1/{}/api", "/a:b@c/key={}"] {
+        with_inject(json!({ "path": { "prefix": prefix } }))
+            .unwrap_or_else(|error| panic!("{error} for {prefix:?}"));
+    }
+    for prefix in [
+        "", "/bot", "bot{}", "/bot{}/", "/{}{}", "/a//{}", "/../{}", "/./{}", "/{}/..", "/a?b={}",
+        "/a#{}", "/a%2f{}", "/a b{}", "/a\\{}", "/{x}{}", "/é{}",
+    ] {
+        let inject = json!({ "path": { "prefix": prefix } });
+        assert!(with_inject(inject).is_err(), "{prefix:?}");
+    }
 }
 
 #[test]

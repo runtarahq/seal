@@ -435,6 +435,12 @@ pub enum Inject {
         /// The parameter's name.
         name: String,
     },
+    /// In the URL's path, before the caller's path, through a template such as
+    /// `/bot{}`. No other value may be presented with it.
+    Path {
+        /// What is put before the caller's path, with exactly one `{}` for the secret.
+        prefix: String,
+    },
     /// In a field of a form-encoded body.
     FormField {
         /// The field's name.

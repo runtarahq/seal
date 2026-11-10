@@ -111,6 +111,26 @@ The secret is the password.
 }] }
 ```
 
+### `path`
+
+For an API that takes its credential in the URL's path, such as Telegram's
+`/bot<token>/sendMessage`. `prefix` goes before the caller's path, with exactly one `{}`
+for the secret: whole segments, starting with `/` and not ending with one. The caller
+names the URL without it, here `https://api.telegram.org/sendMessage`, and that is the
+path a `path_prefix` matches and the audit record holds.
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "api.telegram.org" },
+  "inject": { "path": { "prefix": "/bot{}" } }
+}] }
+```
+
+The secret is percent-encoded, so it cannot add a segment or end the path, and one that
+would make a `.` or `..` segment is refused. A response header that repeats it as written
+in the path, such as a redirect's `Location`, is dropped. No other sealed value may be
+presented with one that has this injection, since it changes where the request goes.
+
 ### `form_field`
 
 ```json
@@ -459,6 +479,7 @@ where it is used.
 |---|---|
 | `bearer(api_base)` | A bearer token for an API |
 | `api_key_header(api_base, name)` | An API key in a header |
+| `path_secret(api_base, prefix)` | A secret in the URL's path, such as a Telegram bot token |
 | `basic(api_base, username)` | A password for basic auth |
 | `oauth_client(config)` | Policies for an OAuth client secret or signing key, and for a password. Its tokens are limited to where they belong, and its refresh token's definition names itself |
 | `aws(region, service, endpoint, access_key_id, session_token, payload)` | A secret access key |

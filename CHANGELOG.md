@@ -23,8 +23,8 @@ The first release.
 - Policies name the destinations, methods and paths a value may be used for. The matcher
   treats every policy as untrusted, and checks every address it connects to. See
   [`docs/policy.md`](docs/policy.md).
-- Injection into a header, basic auth, the query, a form field or a JSON field;
-  companion values; shared values, such as a platform-wide OAuth app's client secret.
+- Injection into a header, basic auth, the query, the path, a form field or a JSON
+  field; companion values; shared values, such as a platform-wide OAuth app's client secret.
 - Response sealing: declared fields in JSON, form and XML responses come back sealed.
 - OAuth: authorization code with PKCE, refresh, client credentials, resource owner
   password, the JWT bearer grant, and revocation. Callbacks land on the application.

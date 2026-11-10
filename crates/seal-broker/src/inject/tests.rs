@@ -97,6 +97,59 @@ fn a_secret_that_is_not_valid_in_a_header_is_refused_and_not_echoed() {
     }
 }
 
+fn path(prefix: &str) -> Value {
+    json!({ "path": { "prefix": prefix } })
+}
+
+#[test]
+fn a_path_injection_goes_before_the_callers_path() {
+    let url = "https://api.example.com/sendMessage?chat_id=1";
+    let head = head_for(&path("/bot{}"), b"123:AA-b_c", url, &HeaderMap::new()).unwrap();
+    assert_eq!(
+        &*head.path_and_query,
+        "/bot123:AA-b_c/sendMessage?chat_id=1"
+    );
+    assert_eq!(
+        head.path_secret.as_deref().map(Vec::as_slice),
+        Some(&b"123:AA-b_c"[..])
+    );
+
+    let head = head_for(&path("/v1/{}/api"), b"key", URL, &HeaderMap::new()).unwrap();
+    assert_eq!(&*head.path_and_query, "/v1/key/api/v2/orders");
+}
+
+#[test]
+fn a_secret_in_a_path_cannot_add_a_segment_or_end_the_path() {
+    let head = head_for(
+        &path("/bot{}"),
+        b"a/../b?c#d%2e e\xff",
+        URL,
+        &HeaderMap::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        &*head.path_and_query,
+        "/bota%2F..%2Fb%3Fc%23d%252e%20e%FF/v2/orders"
+    );
+}
+
+#[test]
+fn a_secret_that_would_make_a_dot_segment_or_an_empty_one_is_refused() {
+    for (prefix, secret) in [
+        ("/{}", &b"."[..]),
+        ("/{}", b".."),
+        ("/.{}", b"."),
+        ("/{}.", b"."),
+        ("/a/{}/b", b".."),
+        ("/{}", b""),
+        ("/bot{}", b""),
+    ] {
+        let error = head_for(&path(prefix), secret, URL, &HeaderMap::new()).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BadRequest, "{prefix:?}");
+    }
+    head_for(&path("/bot{}"), b"..", URL, &HeaderMap::new()).unwrap();
+}
+
 #[test]
 fn basic_auth_encodes_username_and_password() {
     let inject = json!({ "basic": { "username": { "literal": "user" } } });

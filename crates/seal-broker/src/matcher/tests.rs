@@ -316,6 +316,26 @@ fn a_part_presented_both_sealed_and_plain_is_refused() {
 
 // Conflicts.
 
+/// A path injection moves the request after every rule matched the caller's path, so
+/// a value anyone could seal must not carry another value's credential with it.
+#[test]
+fn a_path_injection_cannot_be_combined_with_another_value() {
+    let path = one_rule(&json!({ "path": { "prefix": "/admin{}" } }));
+    let alone = Request::to(API)
+        .decide(&fields(&[("token", path.clone())]))
+        .unwrap();
+    assert_eq!(alone.injections.len(), 1);
+
+    let companion = one_rule(&json!({ "companion": {} }));
+    for other in [bearer(), path.clone(), companion] {
+        let policies = fields(&[("genuine", other), ("moved", path.clone())]);
+        assert_eq!(
+            refusal(Request::to(API).decide(&policies)),
+            ErrorCode::Conflict
+        );
+    }
+}
+
 #[test]
 fn two_rules_injecting_into_the_same_place_conflict() {
     let same = |first: Value, second: Value| {

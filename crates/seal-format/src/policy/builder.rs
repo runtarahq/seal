@@ -126,6 +126,22 @@ pub fn api_key_header(api_base: &str, name: &str) -> Result<Policy, FormatError>
     )))
 }
 
+/// A secret sent in the URL's path, before the caller's path: `prefix` is a template
+/// such as `/bot{}`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if `api_base` is not a valid `https` URL, or
+/// `prefix` is not whole path segments with one `{}`.
+pub fn path_secret(api_base: &str, prefix: &str) -> Result<Policy, FormatError> {
+    finish(Policy::from_rule(Rule::new(
+        endpoint(api_base)?,
+        Inject::Path {
+            prefix: prefix.to_owned(),
+        },
+    )))
+}
+
 /// A password sent with basic auth.
 ///
 /// # Errors
@@ -564,6 +580,16 @@ mod tests {
             Inject::Header { name, format } if name == "X-Api-Key" && format == "{}"
         ));
         api_key_header(API, "Host").unwrap_err();
+    }
+
+    #[test]
+    fn path_secret_puts_the_template_before_the_path() {
+        let policy = path_secret("https://api.telegram.org", "/bot{}").unwrap();
+        assert!(matches!(
+            &policy.rules[0].inject,
+            Inject::Path { prefix } if prefix == "/bot{}"
+        ));
+        path_secret("https://api.telegram.org", "/bot{}/").unwrap_err();
     }
 
     #[test]

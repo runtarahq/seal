@@ -43,6 +43,24 @@ const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
+/// Everything except the characters a path segment keeps as they are: RFC 3986's
+/// unreserved characters, sub-delimiters, `:` and `@`. So `/`, `?`, `#` and `%` are
+/// encoded, and a secret can never add a segment or end the path.
+const PATH_SEGMENT: &AsciiSet = &QUERY_VALUE
+    .remove(b'!')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'*')
+    .remove(b'+')
+    .remove(b',')
+    .remove(b';')
+    .remove(b'=')
+    .remove(b':')
+    .remove(b'@');
+
 /// The request to send, without its body.
 #[derive(Debug)]
 pub struct Outgoing {
@@ -56,6 +74,9 @@ pub struct Outgoing {
     pub signing: Option<Signing>,
     /// The client certificate to present, from the field holding its private key.
     pub client_cert: Option<crate::identity::ClientCertMaterial>,
+    /// A secret injected into the path, as it is written there. A response header
+    /// that repeats it, such as a redirect's `Location`, is not passed on.
+    pub path_secret: Option<Zeroizing<Vec<u8>>>,
 }
 
 /// A signature still to be made over the final request.
@@ -181,6 +202,7 @@ pub fn build_head(
     let mut json = Vec::new();
     let mut signing = None;
     let mut client_cert = None;
+    let mut path_secret = None;
 
     for injection in &plan.injections {
         let secret = sources.secrets.get(&injection.field).ok_or_else(|| {
@@ -227,6 +249,41 @@ pub fn build_head(
                 query.extend(percent_encode(name.as_bytes(), QUERY_VALUE));
                 query.push('=');
                 secret.expose(|bytes| query.extend(percent_encode(bytes, QUERY_VALUE)));
+            }
+            Inject::Path { prefix } => {
+                let (before, after) = prefix.split_once("{}").unwrap_or((prefix, ""));
+                let written: Zeroizing<Vec<u8>> = secret.expose(|bytes| {
+                    // At most three bytes per byte encoded, reserved before the secret
+                    // goes in.
+                    let mut written = Zeroizing::new(Vec::with_capacity(3 * bytes.len()));
+                    written.extend(percent_encode(bytes, PATH_SEGMENT).flat_map(str::bytes));
+                    written
+                });
+                // The segment the secret lands in, which must not become a dot segment.
+                let start = before.rsplit('/').next().unwrap_or("");
+                let end = after.split('/').next().unwrap_or("");
+                let mut segment =
+                    Zeroizing::new(Vec::with_capacity(start.len() + written.len() + end.len()));
+                segment.extend_from_slice(start.as_bytes());
+                segment.extend_from_slice(&written);
+                segment.extend_from_slice(end.as_bytes());
+                if written.is_empty() || matches!(segment.as_slice(), b"." | b"..") {
+                    return Err(BrokerError::for_field(
+                        ErrorCode::BadRequest,
+                        "this field's secret cannot be sent in a path",
+                        &injection.field,
+                    ));
+                }
+                let mut path = Zeroizing::new(String::with_capacity(
+                    before.len() + written.len() + after.len() + path_and_query.len(),
+                ));
+                path.push_str(before);
+                // Percent-encoding leaves only ASCII.
+                path.extend(written.iter().map(|byte| char::from(*byte)));
+                path.push_str(after);
+                path.push_str(&path_and_query);
+                path_and_query = path;
+                path_secret = Some(written);
             }
             Inject::FormField { name } => {
                 form.push((name.clone(), secret.expose(|b| Zeroizing::new(b.to_vec()))));
@@ -372,6 +429,7 @@ pub fn build_head(
         body,
         signing,
         client_cert,
+        path_secret,
     })
 }
 

@@ -213,6 +213,33 @@ fn path_prefix(prefix: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
+/// What a path injection puts before the caller's path: whole segments, written only
+/// with characters a path keeps as they are, with one `{}` for the secret. It does not
+/// end with `/`, because the caller's path starts with one.
+fn injected_path(prefix: &str) -> Result<(), FormatError> {
+    require(
+        prefix.len() <= MAX_NAME_BYTES && prefix.matches("{}").count() == 1,
+        "an injected path needs exactly one {}",
+    )?;
+    let written = prefix.replacen("{}", "", 1);
+    require(
+        written
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)),
+        "an injected path has a character that is not allowed",
+    )?;
+    require(
+        prefix.starts_with('/') && !prefix.ends_with('/'),
+        "an injected path starts with / and does not end with one",
+    )?;
+    require(
+        prefix[1..]
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | "..")),
+        "an injected path has an empty or dot segment",
+    )
+}
+
 fn inject(inject: &Inject) -> Result<(), FormatError> {
     match inject {
         Inject::Header { name, format } => {
@@ -224,6 +251,7 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         }
         Inject::Basic { username } => part(username),
         Inject::Query { name } | Inject::FormField { name } => parameter_name(name),
+        Inject::Path { prefix } => injected_path(prefix),
         Inject::JsonField { pointer } => json_pointer(pointer),
         Inject::ClientCert {
             cert, chain, ca, ..

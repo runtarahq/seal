@@ -42,6 +42,8 @@ const OPTIONS: &[&str] = &[
     "field",
     "literal",
     "query",
+    "path",
+    "prefix",
     "form_field",
     "json_field",
     "pointer",

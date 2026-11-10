@@ -120,6 +120,8 @@ pub fn decide(
         matched.insert(field, found);
     }
 
+    path_injection_stands_alone(&matched)?;
+
     // Step 2: resolve the parts each primary rule refers to.
     let mut used_as_companion: BTreeSet<&FieldName> = BTreeSet::new();
     let mut listed_plain: BTreeSet<&FieldName> = BTreeSet::new();
@@ -253,6 +255,7 @@ fn parts_of(inject: &Inject) -> Vec<&Part> {
         Inject::AzureSharedKey { account, .. } => vec![account],
         Inject::Header { .. }
         | Inject::Query { .. }
+        | Inject::Path { .. }
         | Inject::FormField { .. }
         | Inject::JsonField { .. }
         | Inject::JwtAssertion { .. }
@@ -310,6 +313,26 @@ fn resolve_part<'a>(
     }
 }
 
+/// A path injection changes the path every presented value is sent to, after each rule
+/// matched the path the caller named. Anyone can seal a value with such a rule, so it may
+/// not be combined with any other value: otherwise it would move another value's
+/// credential outside that value's path prefix.
+fn path_injection_stands_alone(
+    matched: &BTreeMap<&FieldName, (usize, &Rule)>,
+) -> Result<(), BrokerError> {
+    let injects_path = matched
+        .iter()
+        .find(|(_, (_, rule))| matches!(rule.inject, Inject::Path { .. }));
+    match injects_path {
+        Some((field, _)) if matched.len() > 1 => Err(BrokerError::for_field(
+            ErrorCode::Conflict,
+            "a path injection cannot be combined with other values",
+            field,
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// A place an injection writes to, normalised so that overlaps compare equal.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Placement {
@@ -326,6 +349,7 @@ fn placements_of(inject: &Inject) -> Vec<Placement> {
         Inject::Header { name, .. } => vec![Placement::Header(name.to_ascii_lowercase())],
         Inject::Basic { .. } => vec![Placement::Header("authorization".to_owned())],
         Inject::Query { name } => vec![Placement::Query(name.clone())],
+        Inject::Path { .. } => vec![Placement::Unique("path")],
         Inject::FormField { name } => vec![Placement::Form(name.clone())],
         Inject::JsonField { pointer } => vec![Placement::Json(pointer.clone())],
         Inject::JwtAssertion { form_field, .. } => vec![

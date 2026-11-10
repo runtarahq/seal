@@ -546,7 +546,7 @@ impl Broker {
         drop(policies);
 
         let limits = self.limits.tightened_by(&plan.limits);
-        let outgoing = build_head(
+        let mut outgoing = build_head(
             &plan,
             &target,
             &headers,
@@ -702,6 +702,9 @@ impl Broker {
             wait_for_head(sending, progress, &limits, total_deadline).await?;
         let (mut parts, incoming) = response.into_parts();
         remove_hop_by_hop(&mut parts.headers);
+        if let Some(secret) = outgoing.path_secret.take() {
+            remove_headers_repeating(&mut parts.headers, &secret);
+        }
         audit.update(|record| record.status = Some(parts.status.as_u16()));
 
         let Some(sealing) = plan.response else {
@@ -1067,6 +1070,26 @@ fn remove_hop_by_hop(headers: &mut HeaderMap) {
         "transfer-encoding",
         "upgrade",
     ] {
+        headers.remove(name);
+    }
+}
+
+/// Drops every header that repeats a secret seal put in the path, as it was written
+/// there: a redirect's `Location` is the usual one. A header is dropped whole, whichever
+/// of its values has it.
+fn remove_headers_repeating(headers: &mut HeaderMap, secret: &[u8]) {
+    let repeats = |value: &HeaderValue| {
+        value
+            .as_bytes()
+            .windows(secret.len())
+            .any(|window| window == secret)
+    };
+    let names: Vec<header::HeaderName> = headers
+        .iter()
+        .filter(|(_, value)| repeats(value))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in names {
         headers.remove(name);
     }
 }
