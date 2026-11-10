@@ -623,6 +623,82 @@ fn post_form(url: String, sealed: &[(&str, &Envelope)]) -> seal_broker::SendRequ
     send
 }
 
+/// A JWT whose payload is
+/// `{"authentication_event_id":"evt-1","exp":1700000000,"sub":"user"}`.
+const JWT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJhdXRoZW50aWNhdGlvbl9ldmVudF9pZCI6ImV2dC0xIiwiZXhwIjoxNzAwMDAwMDAwLCJzdWIiOiJ1c2VyIn0.c2lnbmF0dXJl";
+
+/// Xero names the tenant a token was issued for in a claim of the access token, which
+/// the application needs and could not otherwise read.
+#[tokio::test]
+async fn named_claims_of_a_sealed_jwt_are_returned_and_nothing_else_of_it() {
+    let provider = MockProvider::plain().await;
+    let tokens = json!({ "access_token": JWT, "refresh_token": "rt-opaque-plaintext" });
+    provider.respond(
+        "/token",
+        CannedResponse::ok("application/json", tokens.to_string().as_bytes()),
+    );
+    let mut rule = sealing_rule(
+        &provider,
+        "/token",
+        "json",
+        &[
+            ("/access_token", "access_token", "api"),
+            ("/refresh_token", "refresh_token", "api"),
+        ],
+    );
+    for field in rule["seal_response"]["fields"].as_array_mut().unwrap() {
+        field["expose_claims"] = json!(["authentication_event_id", "exp", "absent"]);
+    }
+    let policy = Policy::from_json(
+        json!({
+            "rules": [rule],
+            "definitions": { "api": { "rules": [plain_rule(&provider, &bearer())] } }
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    let harness = Harness::new();
+    harness
+        .canaries
+        .lock()
+        .unwrap()
+        .register(&Canary::from_value(JWT));
+    let secret = harness.seal("client_secret", b"cs", &policy);
+
+    let response = harness
+        .broker
+        .send(post_form(
+            url(&provider, "/token"),
+            &[("client_secret", &secret)],
+        ))
+        .await
+        .unwrap();
+    let claims = response.claims.clone();
+    let sealed = response.sealed_fields.clone();
+    let body = read_text(response).await;
+
+    assert_eq!(
+        claims.keys().collect::<Vec<_>>(),
+        [&field("access_token")],
+        "an opaque token exposes nothing"
+    );
+    let exposed: Value = serde_json::from_str(&claims[&field("access_token")]).unwrap();
+    assert_eq!(
+        exposed,
+        json!({ "authentication_event_id": "evt-1", "exp": 1_700_000_000 })
+    );
+    assert!(
+        !body.contains(JWT) && !body.contains("rt-opaque-plaintext"),
+        "{body}"
+    );
+    assert!(!format!("{claims:?}").contains("c2lnbmF0dXJl"));
+    assert_eq!(
+        harness.open("access_token", &sealed[&field("access_token")]),
+        JWT.as_bytes()
+    );
+}
+
 const TOKEN_RESPONSE: &[u8] =
     br#"{"access_token":"at-plaintext","refresh_token":"rt-plaintext","expires_in":3600}"#;
 

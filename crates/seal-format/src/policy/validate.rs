@@ -12,6 +12,7 @@ use crate::id::PolicyName;
 const MAX_RULES: usize = 16;
 const MAX_DEFINITIONS: usize = 8;
 const MAX_SEALED_FIELDS: usize = 8;
+const MAX_EXPOSED_CLAIMS: usize = 8;
 const MAX_DATABASES: usize = 64;
 const MAX_JWT_LIFETIME_S: u16 = 300;
 const MAX_NAME_BYTES: usize = 256;
@@ -397,6 +398,17 @@ fn seal_response(
             definitions.contains_key(&field.policy),
             "seal_response names an unknown definition",
         )?;
+        require(
+            field.expose_claims.len() <= MAX_EXPOSED_CLAIMS,
+            "a sealed field exposes too many claims",
+        )?;
+        for (index, claim) in field.expose_claims.iter().enumerate() {
+            parameter_name(claim)?;
+            require(
+                !field.expose_claims[..index].contains(claim),
+                "an exposed claim repeats",
+            )?;
+        }
         match response.format {
             ResponseFormat::Json => {
                 json_pointer(&field.at)?;

@@ -40,6 +40,7 @@ fn oauth_policy() -> Policy {
         auth: OAuthClientAuth::ClientSecretPost,
         response_format: ResponseFormat::Json,
         shared: false,
+        access_token_claims: Vec::new(),
     })
     .unwrap()
     .client
@@ -68,6 +69,7 @@ fn jwt_policy(aud: JwtAudience) -> Policy {
         }),
         response_format: ResponseFormat::Json,
         shared: false,
+        access_token_claims: Vec::new(),
     })
     .unwrap()
     .client

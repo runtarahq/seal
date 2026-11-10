@@ -234,6 +234,9 @@ pub struct SendResponse {
     /// Values sealed from the response, by field name, so that a caller need not
     /// parse the body to find them.
     pub sealed_fields: BTreeMap<FieldName, Envelope>,
+    /// Claims of sealed values that are JWTs, in plaintext, where the policy names
+    /// them: by field name, each a JSON object.
+    pub claims: BTreeMap<FieldName, String>,
     /// The body.
     pub body: ResponseBody,
 }
@@ -713,6 +716,7 @@ impl Broker {
                 status: parts.status,
                 headers: parts.headers,
                 sealed_fields: BTreeMap::new(),
+                claims: BTreeMap::new(),
                 body: ResponseBody::buffered(Bytes::new()),
             };
             let progress = Arc::clone(progress);
@@ -749,21 +753,22 @@ impl Broker {
         drop(permit);
 
         let mut headers = parts.headers;
-        let unchanged_empty = body.is_empty() && sealed_response.0.is_empty();
+        let unchanged_empty = body.is_empty() && sealed_response.body.is_empty();
         if !unchanged_empty {
             headers.insert(
                 header::CONTENT_LENGTH,
-                HeaderValue::from(sealed_response.0.len()),
+                HeaderValue::from(sealed_response.body.len()),
             );
         }
-        let body_len = sealed_response.0.len() as u64;
+        let body_len = sealed_response.body.len() as u64;
         Ok(Sent::Sealed(Box::new(SealedOutcome {
             body_len,
             response: SendResponse {
                 status: parts.status,
                 headers,
-                sealed_fields: sealed_response.1,
-                body: ResponseBody::buffered(Bytes::from(sealed_response.0)),
+                sealed_fields: sealed_response.fields,
+                claims: sealed_response.claims,
+                body: ResponseBody::buffered(Bytes::from(sealed_response.body)),
             },
         })))
     }
@@ -846,7 +851,7 @@ impl Broker {
         item: &ItemId,
         headers: &HeaderMap,
         body: &[u8],
-    ) -> Result<(Vec<u8>, BTreeMap<FieldName, Envelope>), BrokerError> {
+    ) -> Result<SealedParts, BrokerError> {
         let (kid, public) =
             self.keys
                 .current_public_key(keyset)
@@ -859,7 +864,11 @@ impl Broker {
                         BrokerError::new(ErrorCode::KeysUnavailable, "the keys could not be loaded")
                     }
                 })?;
+        let mut claims = BTreeMap::new();
         let sealed = seal_response_fields(&sealing.sealing, headers, body, |field, plaintext| {
+            if let Some(exposed) = crate::claims::exposed(plaintext, &field.expose_claims) {
+                claims.insert(field.as_field.clone(), exposed);
+            }
             let policy = sealing
                 .policy
                 .for_response_field(&field.policy)
@@ -877,8 +886,19 @@ impl Broker {
                 )
             })
         })?;
-        Ok((sealed.body, sealed.fields))
+        Ok(SealedParts {
+            body: sealed.body,
+            fields: sealed.fields,
+            claims,
+        })
     }
+}
+
+/// A response with its fields sealed, and the claims its policy exposes.
+struct SealedParts {
+    body: Vec<u8>,
+    fields: BTreeMap<FieldName, Envelope>,
+    claims: BTreeMap<FieldName, String>,
 }
 
 struct SealedOutcome {

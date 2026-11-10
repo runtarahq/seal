@@ -758,6 +758,35 @@ fn response_field_lists_are_bounded_and_have_unique_names() {
 }
 
 #[test]
+fn exposed_claims_are_bounded_named_and_unique() {
+    let definitions = json!({ "p": { "rules": [bearer_rule()] } });
+    let exposing = |claims: Value| {
+        sealing(
+            json!([{ "at": "/a", "as": "a", "policy": "p", "expose_claims": claims }]),
+            "json",
+            definitions.clone(),
+        )
+    };
+    let policy = exposing(json!(["exp", "authentication_event_id"])).unwrap();
+    let fields = &policy.rules[0].seal_response.as_ref().unwrap().fields;
+    assert_eq!(fields[0].expose_claims, ["exp", "authentication_event_id"]);
+    exposing(json!(["a", "b", "c", "d", "e", "f", "g", "h"])).unwrap();
+    exposing(json!(["a", "b", "c", "d", "e", "f", "g", "h", "i"])).unwrap_err();
+    exposing(json!(["exp", "exp"])).unwrap_err();
+    exposing(json!([""])).unwrap_err();
+    exposing(json!(["a\nb"])).unwrap_err();
+    exposing(json!("exp")).unwrap_err();
+
+    // A policy that exposes nothing is written as it always was.
+    let none = exposing(json!([])).unwrap();
+    assert!(
+        !String::from_utf8(none.canonical_json().unwrap())
+            .unwrap()
+            .contains("expose_claims")
+    );
+}
+
+#[test]
 fn field_locations_must_suit_the_format() {
     let definitions = json!({ "p": { "rules": [bearer_rule()] } });
     let at = |format: &str, at: &str| {

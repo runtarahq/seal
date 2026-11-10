@@ -26,6 +26,7 @@ let policies = builder::oauth_client(&OAuthConfig {
     auth: OAuthClientAuth::ClientSecretPost,
     response_format: ResponseFormat::Json, // Form for GitHub's legacy responses
     shared: false, // true for a platform app every tenant uses; see below
+    access_token_claims: Vec::new(), // claims of a JWT access token to return in plaintext
 })?;
 ```
 
@@ -34,6 +35,11 @@ In every flow the caller sends a form body with the non-secret fields, such as
 request, and replaces `access_token` and `refresh_token` in the response with sealed
 values. It returns those values in the reply's `sealed_fields` too, so the application
 need not parse the body.
+
+Where the access token is a JWT and the application needs a claim of it, such as Xero's
+`authentication_event_id`, list the claim in `access_token_claims`. seal returns those
+claims in the reply's `claims`, in plaintext, on every grant; see
+[Response sealing](policy.md#response-sealing).
 
 ## The flows
 

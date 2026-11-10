@@ -86,6 +86,9 @@ pub struct OAuthConfig {
     /// authorization code and refresh grants, so that no tenant can obtain a token that
     /// acts as the app itself.
     pub shared: bool,
+    /// Claims of the access token to return in plaintext, if it is a JWT: such as
+    /// `exp`, or the tenant it is for.
+    pub access_token_claims: Vec<String>,
 }
 
 /// The grants a shared client secret may be used for: those that act for a user who
@@ -175,7 +178,7 @@ pub fn oauth_client(config: &OAuthConfig) -> Result<OAuthPolicies, FormatError> 
     }
     let token = endpoint(&config.token_url)?;
     let revoke = config.revoke_url.as_deref().map(endpoint).transpose()?;
-    let sealing = token_response_sealing(config.response_format)?;
+    let sealing = token_response_sealing(config.response_format, &config.access_token_claims)?;
 
     let revoke_with = |name: &str| {
         revoke.as_ref().map(|destination| {
@@ -450,7 +453,10 @@ fn jwt_injection(options: &JwtOptions, form_field: &str) -> Inject {
     }
 }
 
-fn token_response_sealing(format: ResponseFormat) -> Result<SealResponse, FormatError> {
+fn token_response_sealing(
+    format: ResponseFormat,
+    access_token_claims: &[String],
+) -> Result<SealResponse, FormatError> {
     let location = |name: &str| match format {
         ResponseFormat::Json => Ok(format!("/{name}")),
         ResponseFormat::Form => Ok(name.to_owned()),
@@ -465,11 +471,13 @@ fn token_response_sealing(format: ResponseFormat) -> Result<SealResponse, Format
                 at: location("access_token")?,
                 as_field: FieldName::new("access_token")?,
                 policy: PolicyName::new(API_DEFINITION)?,
+                expose_claims: access_token_claims.to_vec(),
             },
             SealedField {
                 at: location("refresh_token")?,
                 as_field: FieldName::new("refresh_token")?,
                 policy: PolicyName::new(REFRESH_DEFINITION)?,
+                expose_claims: Vec::new(),
             },
         ],
     })
@@ -552,6 +560,7 @@ mod tests {
             auth,
             response_format: ResponseFormat::Json,
             shared: false,
+            access_token_claims: Vec::new(),
         }
     }
 
@@ -580,6 +589,25 @@ mod tests {
             Inject::Header { name, format } if name == "X-Api-Key" && format == "{}"
         ));
         api_key_header(API, "Host").unwrap_err();
+    }
+
+    #[test]
+    fn oauth_exposes_the_named_claims_of_access_tokens_on_every_grant() {
+        let mut config = oauth(OAuthClientAuth::ClientSecretPost);
+        config.access_token_claims = vec!["exp".to_owned()];
+        let policies = oauth_client(&config).unwrap();
+        let exposed = |rule: &Rule| -> Vec<Vec<String>> {
+            let sealing = rule.seal_response.as_ref().unwrap();
+            sealing
+                .fields
+                .iter()
+                .map(|field| field.expose_claims.clone())
+                .collect()
+        };
+        let refresh = &policies.client.definitions[&PolicyName::new(REFRESH_DEFINITION).unwrap()];
+        for rule in [&policies.client.rules[0], &refresh.rules[0]] {
+            assert_eq!(exposed(rule), [vec!["exp".to_owned()], Vec::new()]);
+        }
     }
 
     #[test]

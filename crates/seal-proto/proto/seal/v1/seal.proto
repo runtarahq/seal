@@ -67,6 +67,9 @@ message ResponseHead {
   repeated Header headers = 2;
   // Field name to envelope JSON, for values sealed from the response.
   map<string, string> sealed_fields = 3;
+  // Field name to a JSON object: the claims of a sealed value that is a JWT, where its
+  // policy names them to be returned in plaintext.
+  map<string, string> claims = 4;
 }
 
 // Ends a reply that failed after its head was sent.

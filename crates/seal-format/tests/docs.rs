@@ -81,6 +81,7 @@ const OPTIONS: &[&str] = &[
     "at",
     "as",
     "policy",
+    "expose_claims",
     "buffer_cap_bytes",
     "idle_timeout_s",
     "connect_timeout_s",

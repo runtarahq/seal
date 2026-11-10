@@ -78,6 +78,7 @@ async fn google_service_account_jwt_bearer_grant() {
         auth: OAuthClientAuth::JwtBearerGrant(options),
         response_format: ResponseFormat::Json,
         shared: false,
+        access_token_claims: Vec::new(),
     })
     .unwrap();
 
@@ -132,6 +133,7 @@ async fn github_oauth_app_refresh() {
         auth: OAuthClientAuth::ClientSecretPost,
         response_format: ResponseFormat::Json,
         shared: false,
+        access_token_claims: Vec::new(),
     })
     .unwrap();
     let refresh_policy = policies

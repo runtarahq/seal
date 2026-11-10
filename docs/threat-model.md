@@ -98,6 +98,11 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **Response sealing covers declared fields at declared locations only.** The same
   value elsewhere in a response passes through, as does anything else a provider
   returns, such as a presigned URL it generates itself.
+- **Exposed claims are what the sealer chose, unverified.** A policy may name claims of
+  a sealed JWT to return in plaintext. seal reads them without checking the token's
+  signature, so they are as trustworthy as the provider's response, and the sealer
+  should name only claims that are not secret. Rules presented together must agree on
+  them exactly, as on the rest of response sealing, so another value cannot add any.
 - **A caller can read data with a credential it can use.** seal limits where a
   credential goes, not what the provider returns for an allowed request, nor what an
   allowed request does there: it may, for example, set S3 metadata or storage class.
@@ -146,7 +151,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 
 - **Third-party copies.** Dependencies copy values seal cannot zeroize: `hyper` header
   values and write buffers, `bytes::Bytes`, `ring`'s key pairs and HMAC keys,
-  `serde_json`'s parse of a response being sealed. Headers are marked sensitive, and
+  `serde_json`'s parse of a response being sealed, or of a JWT's payload whose claims are
+  exposed. Headers are marked sensitive, and
   plaintext may remain in freed memory until it is reused. This matters to someone
   who can read seal's memory, who is already out of scope. seal's own buffers that
   hold a secret are sized up front, so none leaves an unwiped allocation behind as it

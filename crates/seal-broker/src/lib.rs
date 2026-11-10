@@ -6,6 +6,7 @@ pub mod address;
 pub mod audit;
 pub mod body;
 pub mod broker;
+pub mod claims;
 pub mod client;
 pub mod error;
 pub mod identity;

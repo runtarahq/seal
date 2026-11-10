@@ -698,6 +698,10 @@ pub struct SealedField {
     pub as_field: FieldName,
     /// The definition that gives the new sealed value its policy.
     pub policy: PolicyName,
+    /// Claims to return in plaintext beside the sealed value, if it is a JWT: such as
+    /// `exp`, or the tenant a token is for. The token's signature is never returned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_claims: Vec<String>,
 }
 
 /// A rule's limits. Each can only tighten the global limit of the same name.

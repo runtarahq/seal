@@ -428,6 +428,15 @@ impl SealClient for GrpcClient {
         Ok(SendResponse {
             response,
             sealed_fields: named_envelopes(head.sealed_fields)?,
+            claims: head
+                .claims
+                .into_iter()
+                .map(|(name, claims)| {
+                    FieldName::new(name)
+                        .map(|name| (name, claims))
+                        .map_err(|_| transport("seal returned a bad field name"))
+                })
+                .collect::<Result<_, _>>()?,
         })
     }
 

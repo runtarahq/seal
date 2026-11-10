@@ -560,6 +560,21 @@ fn a_value_without_sealing_cannot_strip_another_values_sealing() {
     }
 }
 
+/// Nor may it have a token's claims returned in plaintext, where the genuine value's
+/// policy exposes none.
+#[test]
+fn a_value_cannot_expose_claims_another_values_sealing_does_not() {
+    let genuine = sealing_policy(&form("client_secret"), "api.example.com");
+    let mut exposing = sealing_policy(&form("x"), "api.example.com");
+    let sealing = exposing.rules[0].seal_response.as_mut().unwrap();
+    sealing.fields[0].expose_claims = vec!["sub".to_owned()];
+    let policies = fields(&[("a_attacker", exposing), ("m_genuine", genuine)]);
+    assert_eq!(
+        refusal(Request::to(API).decide(&policies)),
+        ErrorCode::Conflict
+    );
+}
+
 /// Nor may it send the tokens somewhere it can read them, by naming a definition
 /// with the same name and different rules.
 #[test]
@@ -631,6 +646,7 @@ fn the_oauth_builders_refresh_token_and_client_secret_agree() {
         auth: OAuthClientAuth::ClientSecretPost,
         response_format: ResponseFormat::Json,
         shared: false,
+        access_token_claims: Vec::new(),
     })
     .unwrap();
     let refresh = policies

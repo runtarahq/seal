@@ -304,6 +304,10 @@ pub struct SendResponse {
     pub response: http::Response<Body>,
     /// Values sealed from the response, by field name.
     pub sealed_fields: BTreeMap<FieldName, Envelope>,
+    /// Claims of sealed values that are JWTs, in plaintext, where the policy names
+    /// them in `expose_claims`: by field name, each a JSON object. seal does not check
+    /// the token's signature.
+    pub claims: BTreeMap<FieldName, String>,
 }
 
 /// What seal says about itself.

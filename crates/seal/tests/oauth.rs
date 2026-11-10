@@ -55,6 +55,7 @@ fn config(server: &MockOAuth, auth: OAuthClientAuth, format: ResponseFormat) -> 
         auth,
         response_format: format,
         shared: false,
+        access_token_claims: Vec::new(),
     }
 }
 

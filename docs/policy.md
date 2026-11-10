@@ -343,6 +343,39 @@ value gets the rules of that definition, plus the same `definitions`:
 }
 ```
 
+A field may also name claims to return in plaintext, for a token that is a JWT. Some
+providers put what an application needs in the token itself: its expiry, or which tenant
+it was issued for. seal returns the named claims in the reply's `claims`, by field name,
+as a JSON object:
+
+```json
+{
+  "rules": [{
+    "destination": { "scheme": "https", "host": "identity.xero.com", "path_prefix": "/connect/token" },
+    "inject": { "form_field": { "name": "client_secret" } },
+    "seal_response": {
+      "format": "json",
+      "fields": [{
+        "at": "/access_token", "as": "access_token", "policy": "api",
+        "expose_claims": ["authentication_event_id", "exp"]
+      }]
+    }
+  }],
+  "definitions": {
+    "api": { "rules": [{
+      "destination": { "scheme": "https", "host": "api.xero.com" },
+      "inject": { "header": { "name": "Authorization", "format": "Bearer {}" } }
+    }] }
+  }
+}
+```
+
+At most 8 claims a field, each at most 1 KiB as JSON; a larger one is left out. A token
+that is not a JWT, or lacks a claim, exposes nothing and the response is sealed as usual.
+seal reads the claims without checking the token's signature, and never returns the
+signature, so the claims are no use as a credential. Name only claims that are not
+secret.
+
 The refresh token's definition names itself, so each rotation produces a byte-identical
 policy: rotations are unlimited, and the policy does not grow. Cycles are safe, because one
 response seals its fields once.

@@ -372,6 +372,11 @@ fn response_stream(
                 .iter()
                 .filter_map(|(name, envelope)| Some((name.to_string(), envelope.to_json().ok()?)))
                 .collect(),
+            claims: response
+                .claims
+                .iter()
+                .map(|(name, claims)| (name.to_string(), claims.clone()))
+                .collect(),
         })),
     };
     let body = stream::unfold(
@@ -680,6 +685,7 @@ mod tests {
                 auth: seal_format::policy::builder::OAuthClientAuth::ClientSecretPost,
                 response_format: seal_format::policy::ResponseFormat::Json,
                 shared: true,
+                access_token_claims: Vec::new(),
             },
         )
         .unwrap()

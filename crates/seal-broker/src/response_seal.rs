@@ -353,6 +353,7 @@ mod tests {
                     at: (*at).to_owned(),
                     as_field: FieldName::new(*name).unwrap(),
                     policy: PolicyName::new("api").unwrap(),
+                    expose_claims: Vec::new(),
                 })
                 .collect(),
         }

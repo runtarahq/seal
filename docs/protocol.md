@@ -35,8 +35,9 @@ The caller sends:
 
 seal replies with:
 
-1. One `ResponseHead`: the status, headers, and any values sealed from the response, as
-   envelope JSON by field name.
+1. One `ResponseHead`: the status, headers, any values sealed from the response, as
+   envelope JSON by field name, and any claims their policy exposes, as a JSON object by
+   field name.
 2. Any number of `body` chunks, each at most 64 KiB.
 3. A `Trailer`, only if the body failed after the head was sent.
 

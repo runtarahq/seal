@@ -122,6 +122,7 @@ impl SealClient for InProcessClient {
                 SealError::new(ErrorCode::Internal, "the response could not be formed")
             })?,
             sealed_fields: response.sealed_fields,
+            claims: response.claims,
         })
     }
 

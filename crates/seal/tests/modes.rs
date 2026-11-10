@@ -133,6 +133,24 @@ mode_matrix! {
         assert_eq!(provider.received().last().unwrap().header("authorization"), Some("Bearer at-plaintext"));
     };
 
+    named_claims_of_a_sealed_jwt_reach_the_caller_in_plaintext => |mode: Mode| async move {
+        // The payload is {"authentication_event_id":"evt-1","exp":1700000000,"sub":"user"}.
+        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJhdXRoZW50aWNhdGlvbl9ldmVudF9pZCI6ImV2dC0xIiwiZXhwIjoxNzAwMDAwMDAwLCJzdWIiOiJ1c2VyIn0.c2lnbmF0dXJl";
+        let (instance, provider) = simple(mode).await;
+        let tokens = json!({ "access_token": jwt, "refresh_token": "rt-plaintext" });
+        provider.respond("/token", CannedResponse::ok("application/json", tokens.to_string().as_bytes()));
+        let mut exposing = serde_json::to_value(oauth_like(&provider)).unwrap();
+        exposing["rules"][0]["seal_response"]["fields"][0]["expose_claims"] = json!(["authentication_event_id"]);
+        let secret = instance.setup.seal("client_secret", b"SEALCANARY-client-secret", &policy(&exposing)).await;
+        let response = instance.client.send(post_form(&url(&provider, "/token"), &[("client_secret", &secret)])).await.unwrap();
+        let claims = response.claims.clone();
+        let body = text(response).await;
+        assert!(!body.contains(jwt), "{body}");
+        assert_eq!(claims.len(), 1);
+        let exposed: Value = serde_json::from_str(&claims[&field("access_token")]).unwrap();
+        assert_eq!(exposed, json!({ "authentication_event_id": "evt-1" }));
+    };
+
     acceptance_rotating_refresh_tokens_keep_working => |mode: Mode| async move {
         let (instance, provider) = simple(mode).await;
         provider.respond("/token", CannedResponse::ok("application/json", TOKENS));

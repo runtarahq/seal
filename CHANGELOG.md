@@ -26,6 +26,7 @@ The first release.
 - Injection into a header, basic auth, the query, the path, a form field or a JSON
   field; companion values; shared values, such as a platform-wide OAuth app's client secret.
 - Response sealing: declared fields in JSON, form and XML responses come back sealed.
+  A policy may name claims of a sealed JWT to return in plaintext, such as its expiry.
 - OAuth: authorization code with PKCE, refresh, client credentials, resource owner
   password, the JWT bearer grant, and revocation. Callbacks land on the application.
   See [`docs/oauth.md`](docs/oauth.md).
