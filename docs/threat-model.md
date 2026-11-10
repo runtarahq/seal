@@ -171,8 +171,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 
 - **Third-party copies.** Dependencies copy values seal cannot zeroize: `hyper` header
   values and write buffers, `bytes::Bytes`, `ring`'s key pairs and HMAC keys,
-  `serde_json`'s parse of a response being sealed, or of a JWT's payload whose claims are
-  exposed. Headers are marked sensitive, and
+  `serde_json`'s reading of a field of a response being sealed, or of the claims a policy
+  names in a JWT's payload. Headers are marked sensitive, and
   plaintext may remain in freed memory until it is reused. This matters to someone
   who can read seal's memory, who is already out of scope. seal's own buffers that
   hold a secret are sized up front, so none leaves an unwiped allocation behind as it

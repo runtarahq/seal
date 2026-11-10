@@ -18,10 +18,10 @@ use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use seal_format::policy::{Inject, Part};
 use seal_format::{FieldName, Secret};
-use serde_json::Value;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::error::{BrokerError, ErrorCode};
+use crate::json::Node;
 use crate::matcher::Plan;
 use crate::target::Target;
 
@@ -538,11 +538,12 @@ pub fn media_type_is(headers: &HeaderMap, accepted: impl Fn(&str) -> bool) -> bo
 const NUMBER_TOKEN: &[u8] = b"$serde_json::private::Number";
 
 /// Whether any string in a JSON text, escapes decoded, is `serde_json`'s private number
-/// token. With `arbitrary_precision`, an object whose first key is that token parses as
-/// a number, so seal would pass on something other than what was sent; elsewhere, once
-/// seal writes keys in sorted order, it could come first. No real API uses it, so seal
-/// refuses any body that has it. This reads the raw text, since the parsed document no
-/// longer shows it. Found by fuzzing.
+/// token. A reader built with `arbitrary_precision` takes an object whose first key is
+/// that token for a number, so the same bytes would mean one thing to it and another to
+/// everything else. seal is not built that way, but the application or provider on
+/// either side of it may be, and seal writes an object it reads in key order, which can
+/// bring the token first. No real API uses it, so seal refuses any body that has it.
+/// This reads the raw text, escapes decoded. Found by fuzzing.
 #[must_use]
 pub fn mentions_number_token(json: &[u8]) -> bool {
     let mut bytes = json.iter().copied();
@@ -695,8 +696,8 @@ fn apply_to_json(
     fields: &[(String, Zeroizing<Vec<u8>>)],
     body: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
-    let mut document: Value = serde_json::from_slice(body)
-        .map_err(|_| BrokerError::new(ErrorCode::BadRequest, "body is not valid JSON"))?;
+    let mut document = Node::parse(body)
+        .ok_or_else(|| BrokerError::new(ErrorCode::BadRequest, "body is not valid JSON"))?;
     if !document.is_object() {
         return Err(BrokerError::new(
             ErrorCode::BadRequest,
@@ -709,25 +710,8 @@ fn apply_to_json(
             "the body has a key seal cannot pass on",
         ));
     }
-    let result = insert_all(&mut document, fields).and_then(|()| {
-        let mut output = Zeroizing::new(Vec::with_capacity(json_room(fields, body)));
-        serde_json::to_writer(&mut *output, &document)
-            .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not write JSON"))?;
-        Ok(output)
-    });
-    // Whatever happened, wipe the copies now in the document.
-    for (pointer, _) in fields {
-        if let Some(Value::String(value)) = document.pointer_mut(pointer) {
-            value.zeroize();
-        }
-    }
-    result
-}
-
-fn insert_all(
-    document: &mut Value,
-    fields: &[(String, Zeroizing<Vec<u8>>)],
-) -> Result<(), BrokerError> {
+    // The document borrows each secret, so the only copy made is the one written to
+    // the output, which is sized up front and wiped when it is dropped.
     for (pointer, value) in fields {
         let text = std::str::from_utf8(value).map_err(|_| {
             BrokerError::new(
@@ -735,14 +719,28 @@ fn insert_all(
                 "a secret must be UTF-8 to go in a JSON body",
             )
         })?;
-        insert_at_pointer(document, pointer, text)?;
+        insert_at_pointer(&mut document, pointer, text)?;
     }
-    Ok(())
+    let mut output = Zeroizing::new(Vec::with_capacity(json_room(fields, body)));
+    document
+        .write(&mut output)
+        .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not write JSON"))?;
+    Ok(output)
 }
 
 /// Inserts at an RFC 6901 pointer, creating objects on the way. Nothing may already
 /// exist at the location, and it cannot go through anything but objects.
-fn insert_at_pointer(document: &mut Value, pointer: &str, text: &str) -> Result<(), BrokerError> {
+fn insert_at_pointer<'a>(
+    document: &mut Node<'a>,
+    pointer: &str,
+    text: &'a str,
+) -> Result<(), BrokerError> {
+    let through_something_set = || {
+        BrokerError::new(
+            ErrorCode::Conflict,
+            "a JSON injection's location goes through something the caller set",
+        )
+    };
     let segments: Vec<String> = pointer
         .split('/')
         .skip(1)
@@ -751,31 +749,29 @@ fn insert_at_pointer(document: &mut Value, pointer: &str, text: &str) -> Result<
     let (last, parents) = segments
         .split_last()
         .ok_or_else(|| BrokerError::new(ErrorCode::Internal, "JSON pointer is empty"))?;
+    // An object on the way that passed as JSON but cannot be read might hold the very
+    // location, set by the caller, so the body is refused.
+    let unreadable = |_| BrokerError::new(ErrorCode::BadRequest, "body is not valid JSON");
     let mut current = document;
     for segment in parents {
-        let object = current.as_object_mut().ok_or_else(|| {
-            BrokerError::new(
-                ErrorCode::Conflict,
-                "a JSON injection's location goes through something the caller set",
-            )
-        })?;
-        current = object
+        current = current
+            .object_mut()
+            .map_err(unreadable)?
+            .ok_or_else(through_something_set)?
             .entry(segment.clone())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            .or_insert_with(Node::empty_object);
     }
-    let object = current.as_object_mut().ok_or_else(|| {
-        BrokerError::new(
-            ErrorCode::Conflict,
-            "a JSON injection's location goes through something the caller set",
-        )
-    })?;
+    let object = current
+        .object_mut()
+        .map_err(unreadable)?
+        .ok_or_else(through_something_set)?;
     if object.contains_key(last) {
         return Err(BrokerError::new(
             ErrorCode::Conflict,
             "the caller set a JSON location an injection sets",
         ));
     }
-    object.insert(last.clone(), Value::String(text.to_owned()));
+    object.insert(last.clone(), Node::Text(text));
     Ok(())
 }
 

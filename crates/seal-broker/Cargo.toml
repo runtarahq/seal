@@ -25,8 +25,10 @@ serde = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 seal-format = { workspace = true, features = ["open"] }
 seal-keys.workspace = true
-# Numbers in bodies pass through with their exact digits.
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+# `raw_value` keeps the parts of a body seal does not change as they were written. Not
+# `arbitrary_precision`: Cargo would turn that on for every crate an embedding
+# application builds, and change how all of them read and write numbers.
+serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 url = "2"

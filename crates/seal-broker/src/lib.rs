@@ -11,6 +11,7 @@ pub mod client;
 pub mod error;
 pub mod identity;
 pub mod inject;
+mod json;
 pub mod matcher;
 pub mod net;
 pub mod pg;

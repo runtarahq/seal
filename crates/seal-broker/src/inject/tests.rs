@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use seal_format::Policy;
 use seal_format::policy::Method;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::*;
 use crate::matcher::{Endpoint, RequestHead, decide};
@@ -458,6 +458,48 @@ fn numbers_in_a_json_body_keep_their_precision() {
     let written = text(&output);
     assert!(written.contains("12345678901234567890123"), "{written}");
     assert!(written.contains("0.1000000000000000000001"), "{written}");
+}
+
+/// Everything but the injected field is the caller's, and is sent as the caller wrote
+/// it: spacing, escapes and digits.
+#[test]
+fn what_the_caller_wrote_is_sent_as_written() {
+    let kept = r#"{"n" : 1.50, "e":1e999, "s":"é\/", "list":[ 1 ,2 ]}"#;
+    let body = format!(r#"{{ "z" : {kept}, "auth": {{ "user" : "u" }} }}"#);
+    let output = apply_to_body(
+        &json_body(&[("/auth/secret", b"s")]),
+        &json_type(),
+        body.as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        text(&output),
+        format!(r#"{{"auth":{{"secret":"s","user":"u"}},"z":{kept}}}"#)
+    );
+}
+
+/// A body can pass as JSON and still have an object seal cannot read: here, a key with
+/// half of a surrogate pair. The caller may have set the injection's location in it, so
+/// it is refused rather than taken to be empty.
+#[test]
+fn a_body_with_an_object_that_cannot_be_read_is_refused() {
+    for (pointer, body) in [
+        ("/a", r#"{"\ud800":1,"a":"CALLERVALUE"}"#),
+        ("/a/b", r#"{"a":{"\ud800":1,"b":"CALLERVALUE"}}"#),
+    ] {
+        let error = apply_to_body(
+            &json_body(&[(pointer, b"s")]),
+            &json_type(),
+            body.as_bytes(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BadRequest, "{pointer}");
+        assert!(!error.to_string().contains("CALLERVALUE"));
+    }
+    // Off the injection's way, such an object is the caller's own, and is sent.
+    let body = r#"{"other":{"\ud800":1}}"#;
+    let output = apply_to_body(&json_body(&[("/a", b"s")]), &json_type(), body.as_bytes()).unwrap();
+    assert_eq!(text(&output), r#"{"a":"s","other":{"\ud800":1}}"#);
 }
 
 #[test]
