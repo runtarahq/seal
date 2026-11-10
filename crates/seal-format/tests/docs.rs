@@ -91,6 +91,9 @@ const OPTIONS: &[&str] = &[
     "pg_max_session_s",
     "shared",
     "require_form",
+    "verify",
+    "hmac",
+    "hash",
 ];
 
 fn policy_doc() -> String {
@@ -178,6 +181,9 @@ fn every_enumerated_value_is_documented() {
         "xml",
         "verify_full",
         "token_endpoint",
+        "sha1",
+        "sha256",
+        "sha512",
     ] {
         assert!(document.contains(value), "{value}");
     }

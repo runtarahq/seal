@@ -23,11 +23,13 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-/// The rules for using one secret. A use must match one of `rules`.
+/// The rules for using one secret. A request must match one of `rules`; checking a
+/// message against the secret needs `verify`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
-    /// Between 1 and 16 rules.
+    /// Up to 16 rules, and at least one unless the policy has `verify`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
     /// The policies that values sealed from a response get, named so that a
     /// policy can refer to itself. See [`Policy::for_response_field`].
@@ -38,6 +40,10 @@ pub struct Policy {
     /// sealer decides this, and values sealed from responses are never shared.
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
+    /// Lets a caller ask whether a message's authentication code was made with this
+    /// secret, such as a webhook's signature. The answer is only yes or no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<Verify>,
 }
 
 impl Policy {
@@ -93,8 +99,32 @@ impl Policy {
             definitions: self.definitions.clone(),
             // A token belongs to the record it was sealed for.
             shared: false,
+            verify: None,
         })
     }
+}
+
+/// How a message may be checked against a secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Verify {
+    /// The secret is an HMAC key, and the caller presents a message and its code.
+    Hmac {
+        /// The hash.
+        hash: HmacHash,
+    },
+}
+
+/// The hash of an HMAC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HmacHash {
+    /// SHA-1, which some providers still sign webhooks with.
+    Sha1,
+    /// SHA-256.
+    Sha256,
+    /// SHA-512.
+    Sha512,
 }
 
 /// A named list of rules in a policy's `definitions`.

@@ -11,9 +11,14 @@ Policies are refused, not corrected, if anything is unexpected: an unknown field
 kind, a host that is not normalised, a path that could mean something else. A policy
 is limited to 16 rules (in each list), 8 definitions and 16 KiB in canonical form.
 
+Besides `rules`, a policy may have `definitions` ([Response sealing](#response-sealing)),
+`shared` ([Shared values](#shared-values)) and `verify` ([Verification](#verification)).
+
 ## Rules
 
-A use of a secret must match one of `rules`. The first rule that matches is used.
+A request that uses a secret must match one of `rules`. The first rule that matches is
+used. A secret that is only checked against, never sent, has [`verify`](#verification)
+instead.
 
 ```json
 {
@@ -458,6 +463,33 @@ itself.
 The builder's `oauth_client` does this when `shared` is set, and refuses to share a JWT
 bearer grant key, since that grant acts as the key's owner.
 
+## Verification
+
+A webhook's signing secret is never sent anywhere: the application uses it to check that
+a message came from the provider. With `verify`, the application asks seal instead, with
+the message and the code that came with it, and seal answers yes or no. A policy with
+`verify` needs no `rules`, and then its secret can go nowhere.
+
+```json
+{ "verify": { "hmac": { "hash": "sha256" } } }
+```
+
+`hash` is `sha1`, `sha256` or `sha512`. The caller builds the message as the provider
+signs it, such as Slack's `v0:<timestamp>:<body>`, and decodes the code to bytes. seal
+compares the whole code in constant time and never returns one, so a caller can check
+codes but cannot make them, nor find one a byte at a time. The builder's
+`webhook_hmac(hash)` makes this policy.
+
+A platform's own webhook secret, such as one Slack app's for every tenant, can also be
+`shared`:
+
+```json
+{ "verify": { "hmac": { "hash": "sha256" } }, "shared": true }
+```
+
+A policy may have both `rules` and `verify`. A value sealed from a response never has
+`verify`.
+
 ## Limits
 
 Each limit can only tighten the global limit of the same name, so a sealed policy can never
@@ -518,6 +550,7 @@ where it is used.
 | `aws(region, service, endpoint, access_key_id, session_token, payload)` | A secret access key |
 | `azure(account, service, endpoint)` | An account key |
 | `client_cert(api_base, cert, chain)` | A client certificate's private key |
+| `webhook_hmac(hash)` | A webhook signing secret, which only verifies |
 | `postgres(host, port, databases, user)` | A Postgres password, with SCRAM only and the server verified |
 
 A part of a composite credential comes from a `PartSource`: `Literal` fixes it in the policy,

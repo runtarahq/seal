@@ -54,7 +54,14 @@ pub(super) fn policy(policy: &Policy) -> Result<(), FormatError> {
         policy.definitions.len() <= MAX_DEFINITIONS,
         "too many definitions",
     )?;
-    rules(&policy.rules, &policy.definitions)?;
+    // A policy that only verifies sends its secret nowhere, and has no rules.
+    require(
+        !policy.rules.is_empty() || policy.verify.is_some(),
+        "a policy needs a rule or a verification",
+    )?;
+    if !policy.rules.is_empty() {
+        rules(&policy.rules, &policy.definitions)?;
+    }
     for definition in policy.definitions.values() {
         rules(&definition.rules, &policy.definitions)?;
     }

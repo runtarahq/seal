@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    AzureService, Definition, Destination, Host, Inject, JwtAlg, JwtAudience, JwtClaims, JwtHeader,
-    Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme, SealResponse, SealedField,
+    AzureService, Definition, Destination, HmacHash, Host, Inject, JwtAlg, JwtAudience, JwtClaims,
+    JwtHeader, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme, SealResponse,
+    SealedField, Verify,
 };
 use crate::error::FormatError;
 use crate::id::{FieldName, PolicyName};
@@ -145,6 +146,21 @@ pub fn path_secret(api_base: &str, prefix: &str) -> Result<Policy, FormatError> 
     )))
 }
 
+/// A secret that only checks messages: a webhook's signing secret. It can be sent
+/// nowhere, and a caller learns only whether a message's HMAC is right.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if the policy cannot be serialised.
+pub fn webhook_hmac(hash: HmacHash) -> Result<Policy, FormatError> {
+    finish(Policy {
+        rules: Vec::new(),
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: Some(Verify::Hmac { hash }),
+    })
+}
+
 /// A password sent with basic auth.
 ///
 /// # Errors
@@ -254,12 +270,14 @@ pub fn oauth_client(config: &OAuthConfig) -> Result<OAuthPolicies, FormatError> 
             rules: client_rules,
             definitions: definitions.clone(),
             shared: config.shared,
+            verify: None,
         })?,
         // A resource owner's password is theirs, never shared.
         password: finish(Policy {
             rules: vec![password_rule],
             definitions,
             shared: false,
+            verify: None,
         })?,
     })
 }
@@ -364,6 +382,7 @@ impl Policy {
             rules: vec![rule],
             definitions: BTreeMap::new(),
             shared: false,
+            verify: None,
         }
     }
 }
@@ -608,6 +627,16 @@ mod tests {
         for rule in [&policies.client.rules[0], &refresh.rules[0]] {
             assert_eq!(exposed(rule), [vec!["exp".to_owned()], Vec::new()]);
         }
+    }
+
+    #[test]
+    fn a_webhook_secret_has_no_rules_and_only_verifies() {
+        let policy = webhook_hmac(HmacHash::Sha256).unwrap();
+        assert!(policy.rules.is_empty() && !policy.shared);
+        assert_eq!(
+            String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
+            r#"{"verify":{"hmac":{"hash":"sha256"}}}"#
+        );
     }
 
     #[test]

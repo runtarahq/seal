@@ -330,6 +330,7 @@ fn sealing_refuses_an_invalid_policy() {
         rules: Vec::new(),
         definitions: std::collections::BTreeMap::new(),
         shared: false,
+        verify: None,
     };
     let (keyset, item, field) = (keyset(), item(), field());
     let result = seal(

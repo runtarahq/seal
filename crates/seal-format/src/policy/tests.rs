@@ -219,11 +219,65 @@ fn refuses_not_json_and_errors_do_not_echo_the_input() {
 #[test]
 fn refuses_an_empty_or_oversized_rule_list() {
     parse(&json!({ "rules": [] })).unwrap_err();
+    parse(&json!({})).unwrap_err();
     let rules = vec![bearer_rule(); 16];
     parse(&json!({ "rules": rules })).unwrap();
     let rules = vec![bearer_rule(); 17];
     parse(&json!({ "rules": rules })).unwrap_err();
     with_rule(|rule| rule["methods"] = json!([])).unwrap_err();
+}
+
+#[test]
+fn a_policy_may_verify_instead_of_having_rules() {
+    for hash in ["sha1", "sha256", "sha512"] {
+        let policy = parse(&json!({ "verify": { "hmac": { "hash": hash } } })).unwrap();
+        assert!(policy.rules.is_empty());
+        let canonical = policy.canonical_json().unwrap();
+        assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
+    }
+    // And may do both, or be shared: a platform's webhook secret.
+    parse(&json!({ "rules": [bearer_rule()], "verify": { "hmac": { "hash": "sha256" } } }))
+        .unwrap();
+    parse(&json!({ "verify": { "hmac": { "hash": "sha256" } }, "shared": true })).unwrap();
+
+    for verify in [
+        json!({}),
+        json!("hmac"),
+        json!({ "hmac": {} }),
+        json!({ "hmac": { "hash": "md5" } }),
+        json!({ "hmac": { "hash": "SHA256" } }),
+        json!({ "hmac": { "hash": "sha256", "truncate": 8 } }),
+        json!({ "rsa": { "hash": "sha256" } }),
+    ] {
+        assert!(parse(&json!({ "verify": verify })).is_err(), "{verify}");
+    }
+    assert_eq!(
+        parse(&json!({})).unwrap_err(),
+        FormatError::InvalidPolicy("a policy needs a rule or a verification")
+    );
+    // A definition's rules are what a sealed token gets, so it always has some.
+    parse(&json!({
+        "verify": { "hmac": { "hash": "sha256" } },
+        "definitions": { "p": { "rules": [] } }
+    }))
+    .unwrap_err();
+}
+
+/// A token sealed from a response is for sending, whatever its parent verified.
+#[test]
+fn a_value_sealed_from_a_response_never_verifies() {
+    let mut value = json!({
+        "rules": [bearer_rule()],
+        "definitions": { "p": { "rules": [bearer_rule()] } },
+        "verify": { "hmac": { "hash": "sha256" } }
+    });
+    value["rules"][0]["seal_response"] =
+        json!({ "format": "json", "fields": [{ "at": "/a", "as": "a", "policy": "p" }] });
+    let policy = parse(&value).unwrap();
+    let child = policy
+        .for_response_field(&PolicyName::new("p").unwrap())
+        .unwrap();
+    assert_eq!(child.verify, None);
 }
 
 // Hosts.
