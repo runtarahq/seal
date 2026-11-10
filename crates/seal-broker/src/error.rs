@@ -29,7 +29,8 @@ pub enum ErrorCode {
     BodyTooLarge,
     /// A response that has to be sealed is over the cap.
     ResponseTooLarge,
-    /// A response that has to be sealed could not be parsed.
+    /// A response that has to be sealed could not be parsed, or a response repeats a
+    /// credential seal sent.
     ResponseUnparseable,
     /// Could not connect to the provider. May be retried.
     UpstreamConnect,

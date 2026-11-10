@@ -18,7 +18,8 @@ use tokio::time::{Instant, sleep_until};
 use crate::address::NetworkPolicy;
 use crate::audit::{AuditGuard, AuditRecord, AuditSink, Clock, Outcome, SystemClock};
 use crate::body::{
-    Finish, Progress, ResponseBody, ResponseStream, TrackedRequestBody, read_capped, wiped_body,
+    Finish, Progress, ReflectionScan, ResponseBody, ResponseStream, TrackedRequestBody,
+    read_capped, wiped_body,
 };
 use crate::client::{ClientConfig, ConnectLimits, HttpClient, RequestBody, body_error};
 use crate::error::{BrokerError, ErrorCode};
@@ -945,9 +946,11 @@ impl Broker {
             wait_for_head(sending, progress, &limits, total_deadline).await?;
         let (mut parts, incoming) = response.into_parts();
         remove_hop_by_hop(&mut parts.headers);
-        for secret in std::mem::take(&mut outgoing.injected) {
-            remove_headers_repeating(&mut parts.headers, &secret);
+        let injected = std::mem::take(&mut outgoing.injected);
+        for secret in &injected {
+            remove_headers_repeating(&mut parts.headers, secret);
         }
+        let scan = ReflectionScan::new(injected);
         audit.update(|record| record.status = Some(parts.status.as_u16()));
 
         let Some(sealing) = plan.response else {
@@ -970,6 +973,7 @@ impl Broker {
                         progress,
                         idle,
                         stream_deadline,
+                        scan,
                     ))
                 }),
             ));
@@ -990,6 +994,14 @@ impl Broker {
         let sealed_response = self
             .seal_response(&sealing, &keyset, &item, &parts.headers, &body)
             .await?;
+        // Looked for once the declared fields are sealed: a provider may return a
+        // token it was sent, such as a refresh token, where the rule seals it.
+        if scan.is_some_and(|scan| scan.finds(&sealed_response.body)) {
+            return Err(BrokerError::new(
+                ErrorCode::ResponseUnparseable,
+                "the response repeats a credential",
+            ));
+        }
         drop(permit);
 
         let mut headers = parts.headers;

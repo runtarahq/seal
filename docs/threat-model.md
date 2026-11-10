@@ -98,11 +98,13 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   who runs it unread lets a compromised application choose where secrets go.
 - **Library mode** gives a compromised application every credential. The application
   logs this at startup and reports the mode.
-- **A provider that returns a credential.** One at an allowed destination that echoes
-  a credential in a response body gives it to the caller. seal drops a response header
-  that repeats a secret it put in the path, the query or a header, if the secret is at
-  least eight bytes, and does not inspect bodies. Policies should name API hosts, not
-  services that reflect requests.
+- **A provider that returns a credential in another form.** seal drops a response
+  header that repeats a secret it put in the request, and fails a response whose body
+  repeats one, passing on none of it. It looks for the secret as it was sealed and as
+  it was written in the request, if that is at least eight bytes. A provider that
+  returns it encoded some other way, compressed, or escaped inside JSON, still gives it
+  to the caller, and one that means to can always do so. Policies should name API
+  hosts, not services that reflect requests.
 - **Response sealing covers declared fields at declared locations only.** The same
   value elsewhere in a response passes through, as does anything else a provider
   returns, such as a presigned URL it generates itself.

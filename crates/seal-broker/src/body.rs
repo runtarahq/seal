@@ -306,11 +306,98 @@ impl Finish {
     }
 }
 
+/// Looks for the secrets seal put in a request in the response body that comes back,
+/// across the boundaries of the pieces it arrives in. The end of a piece is held back
+/// only while it is the start of a secret, so a response that repeats one gives the
+/// caller none of it, and any other response is not delayed.
+pub(crate) struct ReflectionScan {
+    secrets: Vec<Zeroizing<Vec<u8>>>,
+    /// The end of what has arrived, where it is the start of a secret.
+    held: Zeroizing<Vec<u8>>,
+}
+
+impl ReflectionScan {
+    /// A scan for these secrets, or `None` if none is long enough to look for.
+    pub(crate) fn new(secrets: Vec<Zeroizing<Vec<u8>>>) -> Option<Self> {
+        let secrets: Vec<_> = secrets
+            .into_iter()
+            .filter(|secret| secret.len() >= crate::inject::MIN_REFLECTED_SECRET)
+            .collect();
+        (!secrets.is_empty()).then(|| Self {
+            secrets,
+            held: Zeroizing::new(Vec::new()),
+        })
+    }
+
+    /// How many bytes at the end of `bytes` are the start of a secret: the most that
+    /// a secret arriving in pieces could have shown of itself so far.
+    fn started(&self, bytes: &[u8]) -> usize {
+        self.secrets
+            .iter()
+            .map(|secret| {
+                let longest = (secret.len() - 1).min(bytes.len());
+                (1..=longest)
+                    .rev()
+                    .find(|length| bytes.ends_with(&secret[..*length]))
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn repeated() -> BrokerError {
+        BrokerError::new(
+            ErrorCode::ResponseUnparseable,
+            "the response repeats a credential",
+        )
+    }
+
+    /// Whether these bytes hold one of the secrets.
+    pub(crate) fn finds(&self, bytes: &[u8]) -> bool {
+        self.secrets.iter().any(|secret| {
+            bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_slice())
+        })
+    }
+
+    /// Takes the next piece of the body, and gives back what can be passed on.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::ResponseUnparseable`] if the body so far holds a secret.
+    pub(crate) fn push(&mut self, data: &[u8]) -> Result<Bytes, BrokerError> {
+        let mut seen = Zeroizing::new(Vec::with_capacity(self.held.len() + data.len()));
+        seen.extend_from_slice(&self.held);
+        seen.extend_from_slice(data);
+        if self.finds(&seen) {
+            self.held.clear();
+            return Err(Self::repeated());
+        }
+        let pass = seen.len() - self.started(&seen);
+        self.held.clear();
+        self.held.extend_from_slice(&seen[pass..]);
+        Ok(Bytes::copy_from_slice(&seen[..pass]))
+    }
+
+    /// What was held back, once the body has ended: the start of a secret, and no more
+    /// of it than that.
+    pub(crate) fn finish(&mut self) -> Bytes {
+        let rest = Bytes::copy_from_slice(&self.held);
+        self.held.clear();
+        rest
+    }
+}
+
 /// A response body streaming from the provider.
 pub(crate) struct ResponseStream {
     inner: Incoming,
     watchdog: Watchdog,
     finish: Option<Finish>,
+    scan: Option<ReflectionScan>,
+    /// A frame that follows what the scan held back, such as trailers.
+    after_held: Option<Frame<Bytes>>,
+    ended: bool,
 }
 
 impl ResponseStream {
@@ -320,12 +407,34 @@ impl ResponseStream {
         progress: Arc<Progress>,
         idle: Duration,
         total_deadline: Option<Instant>,
+        scan: Option<ReflectionScan>,
     ) -> Self {
         progress.touch();
         Self {
             inner,
             watchdog: Watchdog::new(progress, idle, total_deadline),
             finish: Some(finish),
+            scan,
+            after_held: None,
+            ended: false,
+        }
+    }
+
+    fn count(&self, data: &Bytes) {
+        let progress = &self.watchdog.progress;
+        progress
+            .bytes_out
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        progress.touch();
+    }
+
+    fn complete(&mut self) -> Poll<Option<Result<Frame<Bytes>, BrokerError>>> {
+        match take_finish(&mut self.finish) {
+            Some(finish) => match finish.complete(None) {
+                Ok(()) => Poll::Ready(None),
+                Err(error) => Poll::Ready(Some(Err(error))),
+            },
+            None => Poll::Ready(None),
         }
     }
 
@@ -351,35 +460,63 @@ impl Body for ResponseStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BrokerError>>> {
         let this = self.get_mut();
-        match Pin::new(&mut this.inner).poll_frame(cx) {
-            Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref() {
-                    let progress = &this.watchdog.progress;
-                    progress
-                        .bytes_out
-                        .fetch_add(data.len() as u64, Ordering::Relaxed);
-                    progress.touch();
-                }
-                Poll::Ready(Some(Ok(frame)))
+        loop {
+            if let Some(frame) = this.after_held.take() {
+                return Poll::Ready(Some(Ok(frame)));
             }
-            Poll::Ready(Some(Err(error))) => {
-                let error = this.fail(body_error(&error));
-                Poll::Ready(Some(Err(error)))
+            if this.ended {
+                return this.complete();
             }
-            Poll::Ready(None) => match take_finish(&mut this.finish) {
-                Some(finish) => match finish.complete(None) {
-                    Ok(()) => Poll::Ready(None),
-                    Err(error) => Poll::Ready(Some(Err(error))),
-                },
-                None => Poll::Ready(None),
-            },
-            Poll::Pending => match this.watchdog.expired(cx) {
-                Some(error) => {
-                    let error = this.fail(error);
-                    Poll::Ready(Some(Err(error)))
+            match Pin::new(&mut this.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let Some(scan) = &mut this.scan else {
+                        if let Some(data) = frame.data_ref() {
+                            this.count(data);
+                        }
+                        return Poll::Ready(Some(Ok(frame)));
+                    };
+                    let passed = match frame.into_data() {
+                        Ok(data) => match scan.push(&data) {
+                            Ok(passed) => passed,
+                            Err(error) => {
+                                let error = this.fail(error);
+                                return Poll::Ready(Some(Err(error)));
+                            }
+                        },
+                        // Trailers end the data: what was held goes first.
+                        Err(other) => {
+                            this.after_held = Some(other);
+                            scan.finish()
+                        }
+                    };
+                    if passed.is_empty() {
+                        continue;
+                    }
+                    this.count(&passed);
+                    return Poll::Ready(Some(Ok(Frame::data(passed))));
                 }
-                None => Poll::Pending,
-            },
+                Poll::Ready(Some(Err(error))) => {
+                    let error = this.fail(body_error(&error));
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    this.ended = true;
+                    let rest = this.scan.as_mut().map(ReflectionScan::finish);
+                    if let Some(rest) = rest.filter(|rest| !rest.is_empty()) {
+                        this.count(&rest);
+                        return Poll::Ready(Some(Ok(Frame::data(rest))));
+                    }
+                }
+                Poll::Pending => {
+                    return match this.watchdog.expired(cx) {
+                        Some(error) => {
+                            let error = this.fail(error);
+                            Poll::Ready(Some(Err(error)))
+                        }
+                        None => Poll::Pending,
+                    };
+                }
+            }
         }
     }
 
@@ -606,6 +743,87 @@ mod tests {
         assert_eq!(
             progress.failure().unwrap().code(),
             ErrorCode::UpstreamTimeout
+        );
+    }
+
+    fn scan(secrets: &[&[u8]]) -> Option<ReflectionScan> {
+        ReflectionScan::new(
+            secrets
+                .iter()
+                .map(|secret| Zeroizing::new(secret.to_vec()))
+                .collect(),
+        )
+    }
+
+    /// Feeds a body in pieces, and returns everything that was passed on.
+    fn passed(scan: &mut ReflectionScan, pieces: &[&[u8]]) -> Result<Vec<u8>, BrokerError> {
+        let mut out = Vec::new();
+        for piece in pieces {
+            out.extend_from_slice(&scan.push(piece)?);
+        }
+        out.extend_from_slice(&scan.finish());
+        Ok(out)
+    }
+
+    #[test]
+    fn a_body_without_the_secret_passes_whole_however_it_is_cut() {
+        let body = b"{\"id\":42,\"note\":\"nothing to see, SECRET-canar is not it\"}";
+        for size in 1..=body.len() {
+            let mut scan = scan(&[b"SECRET-canary", b"another-secret-value"]).unwrap();
+            let pieces: Vec<&[u8]> = body.chunks(size).collect();
+            assert_eq!(
+                passed(&mut scan, &pieces).unwrap(),
+                body,
+                "pieces of {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_secret_is_found_across_pieces_and_none_of_it_is_passed_on() {
+        let body = b"<html>your key is SECRET-canary, keep it safe</html>";
+        for size in 1..=body.len() {
+            let mut scan = scan(&[b"another-secret-value", b"SECRET-canary"]).unwrap();
+            let mut out = Vec::new();
+            let mut refused = false;
+            for piece in body.chunks(size) {
+                match scan.push(piece) {
+                    Ok(bytes) => out.extend_from_slice(&bytes),
+                    Err(error) => {
+                        assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
+                        refused = true;
+                        break;
+                    }
+                }
+            }
+            assert!(refused, "pieces of {size}");
+            // Not even its first byte, which is where the body stops.
+            assert!(out.len() <= body.len() - b"SECRET-canary, keep it safe</html>".len());
+            assert!(body.starts_with(&out));
+            assert!(scan.finish().is_empty());
+        }
+    }
+
+    #[test]
+    fn only_the_start_of_a_secret_is_held_back() {
+        let mut scan = scan(&[b"SECRET-canary"]).unwrap();
+        // A streamed response is passed on as it arrives.
+        assert_eq!(scan.push(b"data: one\n\n").unwrap(), &b"data: one\n\n"[..]);
+        // Unless it ends as a secret begins, and then only that much waits.
+        assert_eq!(scan.push(b"data: SECRET-c").unwrap(), &b"data: "[..]);
+        assert_eq!(scan.push(b"anal\n").unwrap(), &b"SECRET-canal\n"[..]);
+        assert_eq!(scan.push(b"SEC").unwrap(), &b""[..]);
+        assert_eq!(scan.finish(), &b"SEC"[..]);
+    }
+
+    #[test]
+    fn secrets_too_short_to_look_for_are_not_looked_for() {
+        assert!(scan(&[]).is_none());
+        assert!(scan(&[b"short"]).is_none());
+        let mut scan = scan(&[b"short", b"long-enough"]).unwrap();
+        assert_eq!(
+            passed(&mut scan, &[b"a short story"]).unwrap(),
+            b"a short story"
         );
     }
 }

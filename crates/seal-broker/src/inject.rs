@@ -74,9 +74,10 @@ pub struct Outgoing {
     pub signing: Option<Signing>,
     /// The client certificate to present, from the field holding its private key.
     pub client_cert: Option<crate::identity::ClientCertMaterial>,
-    /// The secrets injected into the path, the query and the headers, as they are
-    /// written there. A response header that repeats one, such as a redirect's
-    /// `Location` or an echo of the request, is not passed on.
+    /// The secrets injected into the request, as they are written in its path, query
+    /// and headers, and as they were sealed. A response header that repeats one, such
+    /// as a redirect's `Location` or an echo of the request, is not passed on, and a
+    /// response body that repeats one fails the response.
     pub injected: Vec<Zeroizing<Vec<u8>>>,
 }
 
@@ -305,12 +306,14 @@ pub fn build_head(
             }
             Inject::FormField { name } => {
                 form.push((name.clone(), secret.expose(|b| Zeroizing::new(b.to_vec()))));
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::JsonField { pointer } => {
                 json.push((
                     pointer.clone(),
                     secret.expose(|b| Zeroizing::new(b.to_vec())),
                 ));
+                secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::JwtAssertion {
                 alg,

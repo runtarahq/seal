@@ -151,7 +151,7 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
         .await;
     let error = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
         .await
         .err()
         .unwrap();
@@ -320,7 +320,7 @@ async fn acceptance_a_restarted_instance_serves_the_same_values() {
     for _ in 0..2 {
         let (client, process) = connect(Mode::Unix, &Options::default(), &setup).await;
         let response = client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .unwrap();
         text(response).await;
@@ -374,7 +374,7 @@ async fn acceptance_a_rotation_and_a_deletion_on_one_instance_reach_another_with
         text(response).await;
         Ok(())
     }
-    let echo = url(&provider, "/echo");
+    let echo = url(&provider, "/quiet");
     send_with(&two, &echo, &old_token).await.unwrap();
 
     // Rotate on instance one.
@@ -386,7 +386,7 @@ async fn acceptance_a_rotation_and_a_deletion_on_one_instance_reach_another_with
     assert_eq!(new_token.kid().as_str(), rotated.kid);
     let response = two
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &new_token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &new_token)]))
         .await
         .unwrap();
     text(response).await;
@@ -464,7 +464,7 @@ async fn acceptance_reseal_round_trips_a_rotation() {
     );
     let response = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &envelope)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &envelope)]))
         .await
         .unwrap();
     text(response).await;
@@ -587,7 +587,7 @@ async fn reseal_gives_a_value_a_new_policy_only_when_told_to() {
         seal_format::Envelope::from_json(written[0]["envelope"].to_string().as_bytes()).unwrap();
     let response = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &envelope)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &envelope)]))
         .await
         .unwrap();
     text(response).await;
@@ -639,7 +639,7 @@ async fn the_rate_per_caller_is_enforced() {
         text(
             instance
                 .client
-                .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+                .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
                 .await
                 .unwrap(),
         )
@@ -647,7 +647,7 @@ async fn the_rate_per_caller_is_enforced() {
     }
     let error = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
         .await
         .err()
         .unwrap();
@@ -675,7 +675,7 @@ async fn concurrent_streams_are_limited() {
         .unwrap();
     let error = instance
         .client
-        .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
         .await
         .err()
         .unwrap();
@@ -684,7 +684,7 @@ async fn concurrent_streams_are_limited() {
     eventually(Duration::from_secs(5), || async {
         instance
             .client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .is_ok()
     })
@@ -708,7 +708,7 @@ async fn health_metrics_and_readiness_are_served() {
     text(
         instance
             .client
-            .send(get(&url(&provider, "/echo"), &[("token", &token)]))
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
             .await
             .unwrap(),
     )

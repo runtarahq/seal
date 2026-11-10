@@ -63,7 +63,7 @@ the same code.
 | `CONFLICT` | Rules conflict, or the caller set something an injection sets | No |
 | `BODY_TOO_LARGE` | A body that has to be buffered, or a message to verify, is over the cap | No |
 | `RESPONSE_TOO_LARGE` | A response that has to be sealed is over the cap; nothing of it is returned | No |
-| `RESPONSE_UNPARSEABLE` | A response that has to be sealed could not be parsed | No |
+| `RESPONSE_UNPARSEABLE` | A response that has to be sealed could not be parsed, or a response repeats a credential seal sent | No |
 | `UPSTREAM_CONNECT`, `UPSTREAM_TLS`, `UPSTREAM_RESET` | The provider could not be reached, or failed | Yes |
 | `UPSTREAM_TIMEOUT` | No progress within a timeout | Yes |
 | `PG_AUTH_FAILED` | A Postgres login failed | No |

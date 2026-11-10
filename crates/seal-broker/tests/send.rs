@@ -28,11 +28,6 @@ fn options_with_limits(change: impl FnOnce(&mut Limits)) -> Options {
     options
 }
 
-async fn echo_json(harness: &Harness, url: &str, sealed: &[(&str, &Envelope)]) -> Value {
-    let response = harness.get(url, sealed).await.unwrap();
-    serde_json::from_str(&read_text(response).await).unwrap()
-}
-
 // Injection reaches the provider.
 
 #[tokio::test]
@@ -71,7 +66,7 @@ async fn each_injection_kind_reaches_the_provider_as_the_rule_says() {
     let value = harness.seal("password", b"hunter2", &basic);
     read_body(
         harness
-            .get(&url(&provider, "/echo"), &[("password", &value)])
+            .get(&url(&provider, "/quiet"), &[("password", &value)])
             .await
             .unwrap(),
     )
@@ -86,17 +81,17 @@ async fn each_injection_kind_reaches_the_provider_as_the_rule_says() {
     let value = harness.seal("key", b"a b", &query);
     read_body(
         harness
-            .get(&url(&provider, "/echo?x=1"), &[("key", &value)])
+            .get(&url(&provider, "/quiet?x=1"), &[("key", &value)])
             .await
             .unwrap(),
     )
     .await
     .unwrap();
-    assert_eq!(provider.received()[1].uri, "/echo?x=1&api_key=a%20b");
+    assert_eq!(provider.received()[1].uri, "/quiet?x=1&api_key=a%20b");
 
     let form = plain_policy(&provider, &json!({ "form_field": { "name": "password" } }));
     let value = harness.seal("password", b"a&b", &form);
-    let mut send = request(&url(&provider, "/echo"), &[("password", &value)]);
+    let mut send = request(&url(&provider, "/quiet"), &[("password", &value)]);
     send.method = Method::POST;
     send.headers.insert(
         header::CONTENT_TYPE,
@@ -115,7 +110,7 @@ async fn each_injection_kind_reaches_the_provider_as_the_rule_says() {
         &json!({ "json_field": { "pointer": "/auth/token" } }),
     );
     let value = harness.seal("token", b"s3cret", &body_json);
-    let mut send = request(&url(&provider, "/echo"), &[("token", &value)]);
+    let mut send = request(&url(&provider, "/quiet"), &[("token", &value)]);
     send.method = Method::POST;
     send.headers.insert(
         header::CONTENT_TYPE,
@@ -190,6 +185,63 @@ async fn a_secret_a_response_header_repeats_is_not_passed_on() {
     read_body(response).await.unwrap();
 }
 
+/// A provider that repeats the credential in a response body fails the response, and
+/// the caller gets none of the credential.
+#[tokio::test]
+async fn a_secret_a_response_body_repeats_fails_the_response() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let token = harness.seal(
+        "token",
+        b"BODY-canary_value",
+        &plain_policy(&provider, &bearer()),
+    );
+    let large = "x".repeat(200_000);
+    for body in [
+        "{\"headers\":{\"authorization\":\"Bearer BODY-canary_value\"}}".to_owned(),
+        format!("{large}BODY-canary_value{large}"),
+        "BODY-canary_value".to_owned(),
+    ] {
+        provider.respond(
+            "/reflect",
+            CannedResponse::ok("application/json", body.as_bytes()),
+        );
+        let response = harness
+            .get(&url(&provider, "/reflect"), &[("token", &token)])
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        let mut stream = response.body;
+        let error = loop {
+            match http_body_util::BodyExt::frame(&mut stream).await {
+                Some(Ok(frame)) => received.extend_from_slice(frame.data_ref().unwrap()),
+                Some(Err(error)) => break error,
+                None => panic!("the body came back whole"),
+            }
+        };
+        assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
+        assert!(
+            !received.windows(4).any(|window| window == b"BODY"),
+            "none of the credential was passed on"
+        );
+        let record = harness.audit.last();
+        assert_eq!(record.outcome, seal_broker::audit::Outcome::Failed);
+        assert_eq!(record.code, Some("RESPONSE_UNPARSEABLE"));
+    }
+
+    // A body that only resembles it comes back whole.
+    let near = format!("{large}BODY-canary_valu{large}");
+    provider.respond(
+        "/reflect",
+        CannedResponse::ok("application/json", near.as_bytes()),
+    );
+    let response = harness
+        .get(&url(&provider, "/reflect"), &[("token", &token)])
+        .await
+        .unwrap();
+    assert_eq!(read_body(response).await.unwrap(), near.as_bytes());
+}
+
 /// The caller's `Content-Length` is passed on, and cannot frame the request other than
 /// the body does: a body that is longer or shorter than it says fails the request, and
 /// nothing after the declared length reaches the provider as a request of its own.
@@ -205,7 +257,7 @@ async fn a_content_length_that_disagrees_with_the_body_fails_the_request() {
     let smuggled: &'static [u8] =
         b"abcdPOST /admin HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\n\r\n";
     for declared in ["4", "100000"] {
-        let mut send = request(&url(&provider, "/echo"), &[("token", &token)]);
+        let mut send = request(&url(&provider, "/quiet"), &[("token", &token)]);
         send.method = Method::POST;
         send.headers
             .insert(header::CONTENT_LENGTH, HeaderValue::from_static(declared));
@@ -224,12 +276,12 @@ async fn a_content_length_that_disagrees_with_the_body_fails_the_request() {
         provider
             .received()
             .iter()
-            .all(|request| request.uri == "/echo"),
+            .all(|request| request.uri == "/quiet"),
         "no second request was made of the body"
     );
 
     // A length that is right goes through, with or without a body.
-    let mut send = request(&url(&provider, "/echo"), &[("token", &token)]);
+    let mut send = request(&url(&provider, "/quiet"), &[("token", &token)]);
     send.method = Method::POST;
     send.headers
         .insert(header::CONTENT_LENGTH, HeaderValue::from(smuggled.len()));
@@ -880,7 +932,7 @@ async fn sealed_tokens_can_only_be_used_where_their_definition_says() {
 
     let access = &sealed[&field("access_token")];
     let response = harness
-        .get(&url(&provider, "/echo"), &[("access_token", access)])
+        .get(&url(&provider, "/quiet"), &[("access_token", access)])
         .await
         .unwrap();
     read_body(response).await.unwrap();
@@ -1780,10 +1832,9 @@ async fn acceptance_a_canary_never_appears_in_logs_audit_errors_or_sealed_respon
     );
 }
 
-/// A boundary the threat model states: a provider that echoes a credential gives it to the
-/// caller, and seal does not inspect responses for this.
+/// A provider that echoes the request back does not hand the credential to the caller.
 #[tokio::test]
-async fn a_providers_own_echo_is_outside_the_guarantee() {
+async fn a_providers_echo_of_the_request_is_refused() {
     let provider = MockProvider::plain().await;
     let harness = Harness::new();
     let token = harness.seal(
@@ -1791,8 +1842,17 @@ async fn a_providers_own_echo_is_outside_the_guarantee() {
         b"s3cret-echoed",
         &plain_policy(&provider, &bearer()),
     );
-    let value = echo_json(&harness, &url(&provider, "/echo"), &[("token", &token)]).await;
-    assert!(value.to_string().contains("s3cret-echoed"));
+    let response = harness
+        .get(&url(&provider, "/echo"), &[("token", &token)])
+        .await
+        .unwrap();
+    let error = read_body(response).await.unwrap_err();
+    assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
+    assert_eq!(
+        provider.received()[0].header("authorization"),
+        Some("Bearer s3cret-echoed"),
+        "the provider was sent it"
+    );
 }
 
 #[tokio::test]
