@@ -19,7 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::server::Connected;
 
-use crate::callers::{CallerMap, Identity, normalise_subject};
+use crate::callers::{CallerMap, Identity, certificate_subject};
 
 /// A caller's connection, which tells the service who is calling.
 pub struct CallerStream<S> {
@@ -264,11 +264,11 @@ pub fn spawn_reloader(tls: &Arc<ReloadingTls>, interval: Duration) {
     });
 }
 
-/// The subject of a verified client certificate, normalised.
+/// The subject of a verified client certificate, in the form callers are configured in.
 fn subject_of(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Option<String> {
     let certificate = stream.get_ref().1.peer_certificates()?.first()?;
     let (_, parsed) = x509_parser::parse_x509_certificate(certificate.as_ref()).ok()?;
-    Some(normalise_subject(&parsed.subject().to_string()))
+    certificate_subject(parsed.subject())
 }
 
 /// Listens on TCP with TLS 1.3, accepting only known certificate subjects.

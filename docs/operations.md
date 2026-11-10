@@ -63,6 +63,14 @@ configuration file that its group or others can write.
 | `keysets` | The keysets it may use, or `["*"]` for all |
 | `admin` | Whether it may generate keysets, rotate and list public keys. Default `false` |
 
+A `cert_subject` is the certificate's whole subject, attribute by attribute and in the
+certificate's order, such as `CN=app,O=Example`. Attribute names and the spaces around
+separators do not matter; values are compared exactly. A certificate whose subject has
+a comma in a value, or more than one attribute in a relative distinguished name, is
+refused, because it could not be told from another subject once written down. The
+client CA should issue certificates for seal's callers only: seal checks the subject,
+not the subject alternative names.
+
 ### `[keys]`
 
 | Setting | Default | |

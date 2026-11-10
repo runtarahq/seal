@@ -1,7 +1,9 @@
 //! A throwaway certificate authority for tests.
 
+pub use rcgen::DnType;
+
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -108,6 +110,19 @@ impl TestPki {
     #[must_use]
     pub fn client(&self, common_name: &str) -> Issued {
         self.issue(Self::client_params(common_name))
+    }
+
+    /// A client certificate whose subject is these attributes, in this order.
+    #[must_use]
+    pub fn client_with_subject(&self, attributes: &[(DnType, &str)]) -> Issued {
+        let mut params = CertificateParams::new(Vec::<String>::new())
+            .unwrap_or_else(|_| unreachable!("parameters"));
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        for (kind, value) in attributes {
+            params.distinguished_name.push(kind.clone(), *value);
+        }
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        self.issue(params)
     }
 
     /// A client certificate for an existing key, given as PKCS#8 PEM: RSA, ECDSA or

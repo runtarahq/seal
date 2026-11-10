@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 
 use seal_format::KeysetId;
+use x509_parser::objects::{oid_registry, oid2abbrev};
+use x509_parser::x509::X509Name;
 
 use crate::config::CallerConfig;
 
@@ -94,9 +96,68 @@ pub fn normalise_subject(subject: &str) -> String {
         .join(",")
 }
 
+/// A certificate's subject in the form [`normalise_subject`] gives a configured one,
+/// built from its attributes rather than from text, so that a value cannot pass for
+/// an attribute boundary.
+///
+/// `None` for a subject that has no such form, which no caller can then be: one with
+/// no attributes or a multi-valued one, or with a value that is not text, is empty,
+/// holds a comma, or starts or ends with whitespace.
+#[must_use]
+pub fn certificate_subject(subject: &X509Name<'_>) -> Option<String> {
+    let mut parts = Vec::new();
+    for rdn in subject.iter() {
+        let mut attributes = rdn.iter();
+        let (Some(attribute), None) = (attributes.next(), attributes.next()) else {
+            return None;
+        };
+        let name = oid2abbrev(attribute.attr_type(), oid_registry())
+            .map_or_else(|_| attribute.attr_type().to_id_string(), str::to_owned);
+        let value = attribute.as_str().ok()?;
+        if value.is_empty() || value.contains(',') || value.trim() != value {
+            return None;
+        }
+        parts.push(format!("{}={value}", name.to_ascii_uppercase()));
+    }
+    (!parts.is_empty()).then(|| parts.join(","))
+}
+
 #[cfg(test)]
 mod tests {
+    use seal_testkit::pki::{DnType, TestPki};
+
     use super::*;
+
+    fn subject_of(attributes: &[(DnType, &str)]) -> Option<String> {
+        let issued = TestPki::new("client CA").client_with_subject(attributes);
+        let (_, parsed) = x509_parser::parse_x509_certificate(issued.cert_der.as_ref()).unwrap();
+        certificate_subject(parsed.subject())
+    }
+
+    #[test]
+    fn a_certificate_subject_is_compared_by_attribute() {
+        let honest = [
+            (DnType::CommonName, "app"),
+            (DnType::OrganizationName, "Example"),
+        ];
+        assert_eq!(subject_of(&honest).as_deref(), Some("CN=app,O=Example"));
+        assert_eq!(
+            subject_of(&honest),
+            Some(normalise_subject("cn=app, O=Example"))
+        );
+        // One attribute whose value reads like two is no subject at all.
+        assert_eq!(subject_of(&[(DnType::CommonName, "app,O=Example")]), None);
+        assert_eq!(subject_of(&[(DnType::CommonName, "app, O=Example")]), None);
+        // Nor is a value that trimming would turn into a configured one.
+        assert_eq!(subject_of(&[(DnType::CommonName, " app")]), None);
+        assert_eq!(subject_of(&[(DnType::CommonName, "")]), None);
+        assert_eq!(subject_of(&[]), None);
+        // A value may hold `=`, since a name never does.
+        assert_eq!(
+            subject_of(&[(DnType::CommonName, "a=b")]).as_deref(),
+            Some("CN=a=b")
+        );
+    }
 
     fn config(
         name: &str,
