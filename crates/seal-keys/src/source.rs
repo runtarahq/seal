@@ -1,5 +1,6 @@
 //! Where wrapped private keys are stored.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -120,11 +121,16 @@ fn read_keyset(
         if keys.len() >= max_files {
             return Err(KeyError::Unavailable);
         }
-        let metadata = entry.metadata().map_err(|_| KeyError::Unavailable)?;
-        if metadata.len() > MAX_WRAPPED_KEY_BYTES as u64 {
+        // Read to a bound, not to the size the file had a moment ago.
+        let mut bytes = Vec::new();
+        std::fs::File::open(entry.path())
+            .map_err(|_| KeyError::Unavailable)?
+            .take(MAX_WRAPPED_KEY_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| KeyError::Unavailable)?;
+        if bytes.len() > MAX_WRAPPED_KEY_BYTES {
             return Err(KeyError::Invalid("a wrapped key file is too large"));
         }
-        let bytes = std::fs::read(entry.path()).map_err(|_| KeyError::Unavailable)?;
         let key: WrappedKey = serde_json::from_slice(&bytes)
             .map_err(|_| KeyError::Invalid("a wrapped key file is not valid"))?;
         if key.keyset != *keyset || key.kid.as_str() != stem {
@@ -238,6 +244,28 @@ mod tests {
             source.wrapped_keys(&KeysetId::new("acme").unwrap()).await,
             Err(KeyError::Invalid(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_file_over_the_size_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let source = DirKeySource::new(root.path(), 16);
+        source.store(&wrapped("acme", "k1")).await.unwrap();
+        let mut large = serde_json::to_vec(&wrapped("acme", "k2")).unwrap();
+        large.resize(MAX_WRAPPED_KEY_BYTES + 1, b' ');
+        std::fs::write(root.path().join("acme/k2.json"), &large).unwrap();
+        assert_eq!(
+            source.wrapped_keys(&KeysetId::new("acme").unwrap()).await,
+            Err(KeyError::Invalid("a wrapped key file is too large"))
+        );
+        // At the limit it is read, whitespace and all.
+        large.truncate(MAX_WRAPPED_KEY_BYTES);
+        std::fs::write(root.path().join("acme/k2.json"), &large).unwrap();
+        let keys = source
+            .wrapped_keys(&KeysetId::new("acme").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(keys.len(), 2);
     }
 
     #[tokio::test]
