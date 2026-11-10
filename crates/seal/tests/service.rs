@@ -167,15 +167,29 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
             .code,
         ErrorCode::CallerDenied
     );
-    let refused: Vec<_> = instance
-        .setup
-        .audit_records()
-        .into_iter()
-        .filter(|record| record["op"] == "generate" || record["op"] == "public_keys")
+    // What it tried is in the audit log, each attempt refused.
+    let records = instance.setup.audit_records();
+    let refused: Vec<(&str, &str)> = records
+        .iter()
+        .map(|record| {
+            assert_eq!(record["outcome"], "refused");
+            assert_eq!(record["code"], "CALLER_DENIED");
+            assert_eq!(record["caller"], "app");
+            (
+                record["op"].as_str().unwrap(),
+                record["keyset"].as_str().unwrap(),
+            )
+        })
         .collect();
-    assert!(
-        refused.is_empty(),
-        "a refused caller never reaches the keys"
+    assert_eq!(
+        refused,
+        [
+            ("send", "acme"),
+            ("verify", "acme"),
+            ("presign", "acme"),
+            ("generate", "other"),
+            ("public_keys", "other"),
+        ]
     );
 }
 

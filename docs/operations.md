@@ -251,6 +251,12 @@ is someone guessing. A `presign` record has `expires_s`, how long the URL lasts:
 done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
+A caller refused a keyset, a value's keyset or an administrative call leaves a record
+too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an
+application trying what it was not given. Two refusals leave none: a request over a
+rate or concurrency limit, which bounds how many records a caller can cause, and a
+request too malformed to name a keyset.
+
 ## Health and metrics
 
 `/healthz` answers when the process is up, and `/readyz` when the key source answers.
