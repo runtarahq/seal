@@ -10,7 +10,8 @@ itself, and streams the response back.
 A compromised application can ask seal to *use* a credential, only toward the
 destination it was sealed for, and seal logs every use. It cannot *copy* one.
 Use ends when the breach is closed; a copied credential does not. The limits of
-that guarantee are in the [threat model](docs/threat-model.md).
+that guarantee are in the [threat model](docs/threat-model.md). The one exception is opt-in:
+a rule may allow presigned storage URLs, which are copies that expire.
 
 ## Status
 

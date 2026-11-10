@@ -38,6 +38,11 @@ flows, and [`operations.md`](operations.md) running seal itself.
   then call `verify` with the message as the provider signs it and the code decoded to
   bytes. Check the timestamp yourself, before or after: seal answers only whether the
   code is right. Treat an error as a failed check.
+- **Presign only what must leave.** A presigned URL is the one credential seal gives
+  back, and only for a rule sealed with `allow_presign`. Use it to hand an object to a
+  browser or another party; read and write objects of your own through `send`. Ask for
+  the shortest lifetime that works, never log the URL, and give such rules a narrow
+  `path_prefix` and only the methods they need.
 - **OAuth callbacks land on the application**, not on seal, which need not be reachable
   from the internet. The authorization code alone is not enough to redeem: that needs
   the sealed client secret and the PKCE verifier, and the tokens come back sealed.

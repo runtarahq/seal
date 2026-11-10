@@ -206,6 +206,25 @@ pub struct SendRequest {
     pub request: http::Request<Body>,
 }
 
+/// A URL to presign: an object a sealed storage credential's rule allows. It holds no
+/// credentials, but what comes back is one.
+pub struct PresignRequest {
+    /// The keyset the values are sealed to.
+    pub keyset: KeysetId,
+    /// The record the values belong to.
+    pub item: ItemId,
+    /// The sealed values, by field name: the signing key, and a session token if any.
+    pub sealed: BTreeMap<FieldName, SealedValue>,
+    /// Plain parts of a credential, by field name.
+    pub plain: BTreeMap<FieldName, String>,
+    /// The method the URL is for: `GET`, `HEAD`, `PUT` or `DELETE`.
+    pub method: http::Method,
+    /// The object's URL.
+    pub url: String,
+    /// How long the URL is to last, in seconds, within what the rule allows.
+    pub expires_s: u32,
+}
+
 /// A message to check against a sealed secret, such as a webhook and its signature. It
 /// holds no credentials.
 pub struct VerifyRequest {
@@ -374,6 +393,13 @@ pub trait SealClient: Send + Sync {
 
     /// Sends a request using sealed values.
     async fn send(&self, request: SendRequest) -> Result<SendResponse, SealError>;
+
+    /// A presigned S3 URL, or a Blob URL with a shared access signature, for one object.
+    /// It works only where the signing value's rule sets `allow_presign`, and for no
+    /// longer than that allows. Unlike everything else seal returns, the URL is a
+    /// credential: whoever holds it can use it without seal until it expires, so keep
+    /// it out of logs and give it the shortest life that will do.
+    async fn presign(&self, request: PresignRequest) -> Result<String, SealError>;
 
     /// Whether a message's authentication code was made with a sealed secret. seal
     /// compares the whole code and never returns one, so this can check a webhook's

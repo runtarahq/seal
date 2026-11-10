@@ -75,6 +75,61 @@ async fn status_and_text(instance: &Instance, request: SendRequest) -> (StatusCo
     (status, text(response).await)
 }
 
+/// Uses a presigned URL as its holder would: straight to the server, with no seal and
+/// no credentials but the URL. Returns the status and the body.
+async fn fetch_directly(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body_bytes: &[u8],
+) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rest = url.strip_prefix("http://").unwrap();
+    let (authority, path) = rest.split_at(rest.find('/').unwrap());
+    let port: u16 = authority.rsplit(':').next().unwrap().parse().unwrap();
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body_bytes.len()
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body_bytes).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response).into_owned();
+    let status = response.split(' ').nth(1).unwrap().parse().unwrap();
+    let body = response
+        .split_once("\r\n\r\n")
+        .map_or(String::new(), |(_, body)| body.to_owned());
+    (status, body)
+}
+
+fn presign_request(
+    method: Method,
+    url: &str,
+    sealed: &[(&str, &Envelope)],
+    expires_s: u32,
+) -> seal_client::PresignRequest {
+    seal_client::PresignRequest {
+        keyset: keyset(),
+        item: item(),
+        sealed: sealed
+            .iter()
+            .map(|(name, envelope)| (field(name), (*envelope).clone().into()))
+            .collect(),
+        plain: std::collections::BTreeMap::new(),
+        method,
+        url: url.to_owned(),
+        expires_s,
+    }
+}
+
 // S3, on RustFS.
 
 fn s3_policy(port: u16, payload: &[&str], allow_unsigned: bool) -> Policy {
@@ -280,6 +335,115 @@ container_matrix! {
         assert_eq!(refused.err().unwrap().code, seal_client::ErrorCode::PolicyDenied);
         let (status, _) = status_and_text(&instance, get(&object("stolen"), &sealed)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    };
+}
+
+container_matrix! {
+    acceptance_a_presigned_s3_url_works_without_seal_and_only_as_signed => |mode: Mode| async move {
+        let (_rustfs, port) = rustfs().await;
+        let instance = start(mode, Options::default(), &[]).await;
+        let mut allowing = serde_json::to_value(s3_policy(port, &["computed"], false)).unwrap();
+        allowing["rules"][0]["methods"] = json!(["GET", "PUT"]);
+        allowing["rules"][0]["inject"]["aws_sigv4"]["allow_presign"] = json!({ "max_expiry_s": 300 });
+        let key = instance.setup.seal("secret_key", RUSTFS_SECRET_KEY.as_bytes(), &policy(&allowing)).await;
+        let sealed = [("secret_key", &key)];
+        let bucket = format!("bucket-{}", rand_suffix());
+        let (status, text) = status_and_text(&instance, send_request(Method::PUT, &local(port, &format!("/{bucket}")), &sealed, Vec::new(), &[])).await;
+        assert_eq!(status, StatusCode::OK, "create bucket: {text}");
+        let object = local(port, &format!("/{bucket}/reports/q3%20final.csv"));
+        let (status, text) = status_and_text(&instance, send_request(Method::PUT, &object, &sealed, b"through seal".to_vec(), &[])).await;
+        assert_eq!(status, StatusCode::OK, "put: {text}");
+
+        // A download, by whoever holds the URL.
+        let url = instance.client.presign(presign_request(Method::GET, &object, &sealed, 60)).await.unwrap();
+        let (status, body) = fetch_directly("GET", &url, &[], b"").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.ends_with("through seal"), "{body}");
+
+        // The URL is for that object, that method and that signature.
+        let other = url.replace("q3%20final.csv", "q4%20final.csv");
+        assert_eq!(fetch_directly("GET", &other, &[], b"").await.0, 403);
+        assert_eq!(fetch_directly("PUT", &url, &[], b"overwritten").await.0, 403);
+        let longer = url.replace("X-Amz-Expires=60", "X-Amz-Expires=600");
+        assert_eq!(fetch_directly("GET", &longer, &[], b"").await.0, 403);
+
+        // An upload, then read back through seal.
+        let upload = local(port, &format!("/{bucket}/uploads/new.txt"));
+        let url = instance.client.presign(presign_request(Method::PUT, &upload, &sealed, 60)).await.unwrap();
+        let (status, body) = fetch_directly("PUT", &url, &[], b"uploaded directly").await;
+        assert_eq!(status, 200, "{body}");
+        let (status, text) = status_and_text(&instance, get(&upload, &sealed)).await;
+        assert_eq!((status, text.as_str()), (StatusCode::OK, "uploaded directly"));
+
+        // A response parameter is signed with the rest.
+        let named = format!("{object}?response-content-disposition=attachment%3B%20filename%3D%22q3.csv%22");
+        let url = instance.client.presign(presign_request(Method::GET, &named, &sealed, 60)).await.unwrap();
+        assert_eq!(fetch_directly("GET", &url, &[], b"").await.0, 200);
+
+        // Longer than the rule allows, or with a key whose rule does not allow it at all.
+        let error = instance.client.presign(presign_request(Method::GET, &object, &sealed, 301)).await.err().unwrap();
+        assert_eq!(error.code, seal_client::ErrorCode::PolicyDenied);
+        let plain = instance.setup.seal("secret_key", RUSTFS_SECRET_KEY.as_bytes(), &s3_policy(port, &["computed"], false)).await;
+        let error = instance.client.presign(presign_request(Method::GET, &object, &[("secret_key", &plain)], 60)).await.err().unwrap();
+        assert_eq!(error.code, seal_client::ErrorCode::PolicyDenied);
+
+        let record = instance.setup.audit_records().into_iter().rev().find(|record| record["op"] == "presign" && record["outcome"] == "ok").unwrap();
+        assert_eq!(record["expires_s"], json!(60));
+        assert!(!record.to_string().contains("X-Amz-Signature"));
+    };
+
+    acceptance_a_blob_shared_access_signature_works_without_seal_and_only_as_signed => |mode: Mode| async move {
+        let azurite = containers::azurite().await.expect("Azurite starts");
+        let port = azurite.port(10000).unwrap();
+        let instance = start(mode, Options::default(), &[]).await;
+        let allowing = policy(&json!({ "rules": [{
+            "destination": destination(port),
+            "allow_plain_http": true,
+            "methods": ["GET", "PUT", "DELETE"],
+            "inject": { "azure_shared_key": {
+                "account": { "literal": AZURITE_ACCOUNT }, "service": "blob",
+                "allow_presign": { "max_expiry_s": 300 }
+            } },
+        }] }));
+        let key = instance.setup.seal("account_key", AZURITE_KEY.as_bytes(), &allowing).await;
+        let sealed = [("account_key", &key)];
+        let suffix: String = rand_suffix().chars().filter(char::is_ascii_alphanumeric).collect();
+        let container = format!("c{suffix}");
+        let at = |path: &str| local(port, &format!("/{AZURITE_ACCOUNT}/{container}{path}"));
+        let (status, text) = status_and_text(&instance, send_request(Method::PUT, &at("?restype=container"), &sealed, Vec::new(), &[("content-length", "0")])).await;
+        assert_eq!(status, StatusCode::CREATED, "create container: {text}");
+        let blob = at("/reports/q3%20final.csv");
+        let (status, text) = status_and_text(&instance, send_request(Method::PUT, &blob, &sealed, b"through seal".to_vec(), &[("x-ms-blob-type", "BlockBlob"), ("content-length", "12")])).await;
+        assert_eq!(status, StatusCode::CREATED, "put blob: {text}");
+
+        // A download, by whoever holds the URL.
+        let url = instance.client.presign(presign_request(Method::GET, &blob, &sealed, 60)).await.unwrap();
+        let (status, body) = fetch_directly("GET", &url, &[], b"").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.ends_with("through seal"), "{body}");
+
+        // It reads that blob, and nothing else: not another blob, and not a write.
+        let other = url.replace("q3%20final.csv", "q4%20final.csv");
+        assert_eq!(fetch_directly("GET", &other, &[], b"").await.0, 403);
+        let (status, _) = fetch_directly("PUT", &url, &[("x-ms-blob-type", "BlockBlob")], b"overwritten").await;
+        assert_eq!(status, 403);
+        let wider = url.replace("sp=r", "sp=rw");
+        assert_eq!(fetch_directly("GET", &wider, &[], b"").await.0, 403);
+
+        // An upload and a delete, each with a signature of its own.
+        let upload = at("/uploads/new.txt");
+        let url = instance.client.presign(presign_request(Method::PUT, &upload, &sealed, 60)).await.unwrap();
+        let (status, body) = fetch_directly("PUT", &url, &[("x-ms-blob-type", "BlockBlob")], b"uploaded directly").await;
+        assert_eq!(status, 201, "{body}");
+        let (status, text) = status_and_text(&instance, get(&upload, &sealed)).await;
+        assert_eq!((status, text.as_str()), (StatusCode::OK, "uploaded directly"));
+        let url = instance.client.presign(presign_request(Method::DELETE, &upload, &sealed, 60)).await.unwrap();
+        assert_eq!(fetch_directly("DELETE", &url, &[], b"").await.0, 202);
+        let (status, _) = status_and_text(&instance, get(&upload, &sealed)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let error = instance.client.presign(presign_request(Method::GET, &blob, &sealed, 301)).await.err().unwrap();
+        assert_eq!(error.code, seal_client::ErrorCode::PolicyDenied);
     };
 }
 

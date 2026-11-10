@@ -135,6 +135,17 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
     };
     let error = instance.client.verify(verify).await.err().unwrap();
     assert_eq!(error.code, ErrorCode::CallerDenied);
+    let presign = seal_client::PresignRequest {
+        keyset: keyset(),
+        item: item(),
+        sealed: std::collections::BTreeMap::from([(field("token"), token.clone().into())]),
+        plain: std::collections::BTreeMap::new(),
+        method: http::Method::GET,
+        url: url(&provider, "/object"),
+        expires_s: 60,
+    };
+    let error = instance.client.presign(presign).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
     let keyset = KeysetId::new("other").unwrap();
     assert_eq!(
         instance

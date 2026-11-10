@@ -63,7 +63,38 @@ Other services encode the path as sent a second time. Neither normalises, since 
 refuses dot segments. The query is read as a form, with `+` as a space, as the AWS SDKs
 read it.
 
-Presigned URLs are not implemented: a presigned URL is a usable credential.
+### Presigned URLs
+
+A presigned URL is a credential: whoever holds it can fetch or store the object without
+seal, unaudited, until it expires. So seal makes one only for a rule that sets
+`allow_presign`, and that is the one place a caller gets something it can copy. It is for
+handing an object to something seal cannot sit in front of, such as a browser. Where the
+application itself reads or writes the object, send the request through seal instead.
+
+`Presign` takes the sealed values, a method, the object's URL and a lifetime, and returns
+the URL with its signature. seal refuses it unless:
+
+- the rule would allow seal to send that request: the same destination, path prefix and
+  `methods`, which a rule with `allow_presign` must list;
+- the method is `GET`, `HEAD`, `PUT` or `DELETE`;
+- the lifetime is at most the rule's `max_expiry_s`, itself at most seven days;
+- the service is `s3`, since a presigned call to another service can be an identity
+  rather than a download;
+- the signing value is the only one that would be used, apart from its own parts, such
+  as a session token. A rule with `seal_response` or `require_form` gives no URL.
+
+The URL signs the host and nothing of the body (`UNSIGNED-PAYLOAD`), as every presigned
+URL does. The caller's URL may carry only `versionId`, `partNumber`, `uploadId`, `x-id`
+and the `response-*` parameters that describe a download; anything else, such as `acl`,
+is refused. With temporary credentials the session token is in the URL.
+
+The audit record is the only trace of a presigned URL: it has the object, the method and
+the lifetime in `expires_s`, never the URL. What is done with the URL afterwards is in the
+provider's own logs.
+
+Checked against the example in the S3 documentation, botocore's presigner, and RustFS in
+all three modes: a URL downloads and uploads without seal, and one that is changed is
+refused.
 
 ### Temporary credentials
 
@@ -93,10 +124,24 @@ caller sent none, and `Authorization`. A caller cannot set `Authorization`, `x-m
 seal sets `Content-Length` before signing whenever the body's length is known, because
 the service signs it whenever the request carries it.
 
-SAS generation is not implemented: a SAS is a usable credential.
+### Shared access signatures
 
-Checked against the examples in Microsoft's Shared Key documentation, and against Azurite
-in all three modes: Blob, Queue and Table.
+With `allow_presign`, `Presign` returns a Blob URL with a service shared access signature
+for the one blob it names, on the same terms as [a presigned S3 URL](#presigned-urls). The
+permissions follow the method: read for `GET` and `HEAD`, create and write for `PUT`,
+delete for `DELETE`. The signature has an expiry and no start time, is for HTTPS only
+unless the rule itself is for plain HTTP, and covers no container, snapshot or stored
+access policy. The URL may have no query.
+
+seal signs for the blob it reads the URL to mean: with the account in the host name, as in
+`account.blob.core.windows.net`, the path is the container and blob. Otherwise the path
+must start with the account, as Azurite has it. A host that names no account, such as a
+custom domain, is refused.
+
+Checked against `azure-storage-blob`'s `generate_blob_sas`, and Azurite in all three modes.
+
+Shared Key is checked against the examples in Microsoft's documentation, and against
+Azurite in all three modes: Blob, Queue and Table.
 
 ## Client certificates
 

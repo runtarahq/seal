@@ -33,6 +33,9 @@ The first release.
 - Signing: AWS Signature Version 4, Azure Storage Shared Key, JWT assertions (RS256,
   PS256, ES256), and client certificates toward providers. See
   [`docs/signing.md`](docs/signing.md).
+- Presigned S3 URLs and Blob shared access signatures, for a rule that sets
+  `allow_presign`: off by default, within the lifetime the rule gives, and audited. This
+  is the one credential seal hands back to a caller.
 
 ### Checking webhooks
 

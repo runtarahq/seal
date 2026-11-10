@@ -11,8 +11,8 @@ use seal_format::KeysetId;
 use seal_keys::Keyring;
 
 use crate::{
-    ConnectRequest, ErrorCode, Info, Mode, PgStream, PublicKeyInfo, SealClient, SealError,
-    SendRequest, SendResponse, VerifyRequest, WrappedKey,
+    ConnectRequest, ErrorCode, Info, Mode, PgStream, PresignRequest, PublicKeyInfo, SealClient,
+    SealError, SendRequest, SendResponse, VerifyRequest, WrappedKey,
 };
 
 /// seal in this process.
@@ -124,6 +124,32 @@ impl SealClient for InProcessClient {
             sealed_fields: response.sealed_fields,
             claims: response.claims,
         })
+    }
+
+    async fn presign(&self, request: PresignRequest) -> Result<String, SealError> {
+        self.broker
+            .presign(seal_broker::PresignRequest {
+                caller: "in-process".to_owned(),
+                keyset: request.keyset,
+                item: request.item,
+                sealed: request
+                    .sealed
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let presented = seal_broker::Presented {
+                            envelope: value.envelope,
+                            item: value.item,
+                        };
+                        (name, presented)
+                    })
+                    .collect(),
+                plain: request.plain,
+                method: request.method,
+                url: request.url,
+                expires_s: request.expires_s,
+            })
+            .await
+            .map_err(|error| from_broker(&error))
     }
 
     async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {

@@ -14,6 +14,9 @@ service Seal {
   // webhook's signature. The first message is the head, then message chunks, then an
   // end. The code is never computed for the caller.
   rpc Verify(stream VerifyIn) returns (VerifyReply);
+  // A presigned URL for one object, where the value's rule allows it. What comes back
+  // is a credential the caller can copy: it works without seal until it expires.
+  rpc Presign(PresignRequest) returns (PresignReply);
   // Administrative: makes a keyset's first key.
   rpc GenerateKeyset(KeysetRequest) returns (WrappedKeyReply);
   // Administrative: adds a key, which becomes current.
@@ -132,6 +135,27 @@ message VerifyHead {
 message VerifyReply {
   // Whether the code matches. A code that does not is not an error.
   bool valid = 1;
+}
+
+message PresignRequest {
+  string keyset = 1;
+  string item = 2;
+  // Field name to envelope JSON.
+  map<string, string> sealed = 3;
+  // Field name to value.
+  map<string, string> plain = 4;
+  // Field name to item, for a shared value from another record, as in SendHead.
+  map<string, string> items = 5;
+  // GET, HEAD, PUT or DELETE.
+  string method = 6;
+  // The object's URL.
+  string url = 7;
+  // How long the URL is to last, in seconds, within what the rule allows.
+  uint32 expires_s = 8;
+}
+
+message PresignReply {
+  string url = 1;
 }
 
 message KeysetRequest {

@@ -23,6 +23,7 @@ use seal_proto::v1::{
     ResponseHead, SendHead, SendIn, SendOut, Trailer, VerifyIn, VerifyReply, WrappedKeyReply,
     connect_in, connect_out, send_in, send_out, verify_in,
 };
+use seal_proto::v1::{PresignReply, PresignRequest};
 use seal_proto::{ERROR_CODE_METADATA, MAX_BODY_CHUNK};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status, Streaming};
@@ -685,6 +686,54 @@ impl Seal for Service {
             .await
             .map_err(|error| broker_status(&error))?;
         Ok(Response::new(VerifyReply { valid }))
+    }
+
+    async fn presign(
+        &self,
+        request: Request<PresignRequest>,
+    ) -> Result<Response<PresignReply>, Status> {
+        let caller = self.caller(&request)?;
+        if !self.per_caller.allow(&caller.name) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
+        }
+        let request = request.into_inner();
+        let keyset = KeysetId::new(request.keyset).map_err(|_| bad("the keyset is not valid"))?;
+        if !caller.may_use(&keyset) {
+            return Err(refusal(
+                ErrorCode::CallerDenied,
+                "the caller may not use this keyset",
+            ));
+        }
+        if !self.per_keyset.allow(&keyset) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the keyset's rate"));
+        }
+        let sealed = presented(request.sealed, request.items)?;
+        // A shared value comes from another keyset, which the caller must be allowed too.
+        if sealed
+            .values()
+            .any(|value| !caller.may_use(value.envelope.keyset()))
+        {
+            return Err(refusal(
+                ErrorCode::CallerDenied,
+                "the caller may not use a value's keyset",
+            ));
+        }
+        let url = self
+            .broker
+            .presign(seal_broker::PresignRequest {
+                caller: caller.name,
+                keyset,
+                item: ItemId::new(request.item).map_err(|_| bad("the item is not valid"))?,
+                sealed,
+                plain: named(request.plain, Ok)?,
+                method: Method::from_bytes(request.method.as_bytes())
+                    .map_err(|_| bad("the method is not valid"))?,
+                url: request.url,
+                expires_s: request.expires_s,
+            })
+            .await
+            .map_err(|error| broker_status(&error))?;
+        Ok(Response::new(PresignReply { url }))
     }
 
     async fn generate_keyset(

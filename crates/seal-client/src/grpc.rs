@@ -25,8 +25,8 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::ServiceExt;
 
 use crate::{
-    Body, ConnectRequest, ErrorCode, Info, Mode, PgStream, PublicKeyInfo, SealClient, SealError,
-    SendRequest, SendResponse, VerifyRequest, WrappedKey,
+    Body, ConnectRequest, ErrorCode, Info, Mode, PgStream, PresignRequest, PublicKeyInfo,
+    SealClient, SealError, SendRequest, SendResponse, VerifyRequest, WrappedKey,
 };
 
 /// How to reach seal over mutual TLS.
@@ -438,6 +438,44 @@ impl SealClient for GrpcClient {
                 })
                 .collect::<Result<_, _>>()?,
         })
+    }
+
+    async fn presign(&self, request: PresignRequest) -> Result<String, SealError> {
+        let message = seal_proto::v1::PresignRequest {
+            keyset: request.keyset.to_string(),
+            item: request.item.to_string(),
+            items: request
+                .sealed
+                .iter()
+                .filter_map(|(name, value)| {
+                    let item = value.item.as_ref()?;
+                    Some((name.to_string(), item.to_string()))
+                })
+                .collect(),
+            sealed: request
+                .sealed
+                .iter()
+                .map(|(name, value)| {
+                    value
+                        .envelope
+                        .to_json()
+                        .map(|json| (name.to_string(), json))
+                        .map_err(|_| transport("an envelope could not be written"))
+                })
+                .collect::<Result<_, _>>()?,
+            plain: request
+                .plain
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+            method: request.method.to_string(),
+            url: request.url,
+            expires_s: request.expires_s,
+        };
+        let reply = self
+            .call(|mut client| async move { client.presign(message).await })
+            .await?;
+        Ok(reply.url)
     }
 
     async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {

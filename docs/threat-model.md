@@ -107,6 +107,16 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   signature, so they are as trustworthy as the provider's response, and the sealer
   should name only claims that are not secret. Rules presented together must agree on
   them exactly, as on the rest of response sealing, so another value cannot add any.
+- **A presigned URL is a copy, where a rule allows one.** A rule with `allow_presign`
+  lets its caller have a presigned S3 URL or a Blob shared access signature. That is a
+  credential for one object and one kind of request, which works without seal and
+  unaudited until it expires, at most seven days and no longer than the rule says. For
+  such a rule "use, not copies" becomes "copies that expire": a compromised application
+  can collect URLs for every object and method the rule allows, and they outlive the
+  breach by up to the rule's lifetime. The option is off unless the sealer sets it, the
+  rule must list its methods, and seal records each URL it issues, though not its use.
+  Keep the lifetime short and the path prefix narrow, and where the object need not leave
+  the application, do not set it.
 - **A caller can check codes, not make them.** With a value whose policy has `verify`,
   a caller learns whether a message and a code go together, which the provider's own
   webhooks already show it. seal computes the code and never returns it, compares

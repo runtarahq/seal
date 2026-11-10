@@ -41,10 +41,11 @@ left out.
 | `inject.rs:289, 294` (`form_field`, `json_field`) | The secret | Wiped copies, then a body sized up front | Fixed: bodies sized up front |
 | `inject.rs:327` (`jwt_assertion`) | A signing key | Parsed by `ring`; the JWT in a wiped string | `ring`'s key pair is a dependency's copy |
 | `inject.rs:353` (`aws_sigv4`) | A secret access key | A wiped signing key for one day, region and service | Sound |
-| `inject.rs:373` (`azure_shared_key`) | An account key | Decoded into a wiped buffer | Sound |
-| `inject.rs:387` (`client_cert`) | A private key | `ClientCertMaterial`, then a TLS configuration | Fixed: wiped on drop; the TLS configuration's copy lasts with the identity |
-| `inject.rs:473` (`insert_sensitive`) | Header values | Marked sensitive | Sound |
-| `broker.rs:524` (`verify`) | A signing secret | `ring`'s HMAC key, for one comparison; the code is never returned | `ring`'s HMAC key is a dependency's copy |
+| `inject.rs:375` (`azure_shared_key`) | An account key | Decoded into a wiped buffer | Sound |
+| `inject.rs:389` (`client_cert`) | A private key | `ClientCertMaterial`, then a TLS configuration | Fixed: wiped on drop; the TLS configuration's copy lasts with the identity |
+| `inject.rs:475` (`insert_sensitive`) | Header values | Marked sensitive | Sound |
+| `presign.rs:96, 134` (`presign`) | A secret access key or account key | A wiped signing key, as for a request; the URL it signs is returned to the caller, which is its purpose, and with temporary credentials holds the session token, which is no use without the key | Sound: nothing of the key is returned |
+| `broker.rs:631` (`verify`) | A signing secret | `ring`'s HMAC key, for one comparison; the code is never returned | `ring`'s HMAC key is a dependency's copy |
 | `inject/sigv4.rs:409` (`set`) | `Authorization`, `X-Amz-Security-Token` | Marked sensitive; the date and hash are not secrets | Sound |
 | `inject/azure.rs:276` | `Authorization` | Marked sensitive | Sound |
 

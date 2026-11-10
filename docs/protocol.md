@@ -87,6 +87,17 @@ cap, and replies `valid`. A code that does not match is `valid = false`, not an 
 `POLICY_DENIED` means the value may not verify at all. seal never returns a code, and
 only one of the hash's full length can match.
 
+## `Presign`
+
+`rpc Presign(PresignRequest) returns (PresignReply)` returns a presigned S3 URL, or a Blob
+URL with a shared access signature, for one object ([`signing.md`](signing.md#presigned-urls)).
+The request has the keyset, item, sealed and plain fields and `items` as in `SendHead`,
+the method, the object's URL and `expires_s`. Nothing is sent anywhere.
+
+The reply's `url` is a credential, unlike anything else seal returns: it works without
+seal until it expires. `POLICY_DENIED` means the rule does not set `allow_presign`, or not
+for this request or this long.
+
 ## Administrative calls
 
 `GenerateKeyset`, `Rotate` and `PublicKeys` need a caller with `admin = true`, and every

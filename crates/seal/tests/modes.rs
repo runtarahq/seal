@@ -213,6 +213,52 @@ mode_matrix! {
         assert_eq!(error.code, ErrorCode::BodyTooLarge);
     };
 
+    acceptance_a_url_is_presigned_only_where_a_rule_allows_it => |mode: Mode| async move {
+        let (instance, _provider) = simple(mode).await;
+        let rule = |allow: bool| {
+            let mut rule = json!({
+                "destination": { "scheme": "https", "host": "s3.eu-west-1.amazonaws.com", "path_prefix": "/tenant-a/" },
+                "methods": ["GET"],
+                "inject": { "aws_sigv4": {
+                    "region": "eu-west-1", "service": "s3",
+                    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" }, "payload": ["computed"]
+                } }
+            });
+            if allow {
+                rule["inject"]["aws_sigv4"]["allow_presign"] = json!({ "max_expiry_s": 900 });
+            }
+            policy(&json!({ "rules": [rule] }))
+        };
+        let presign = |key: &seal_format::Envelope, method: Method, url: &str, expires_s: u32| seal_client::PresignRequest {
+            keyset: keyset(),
+            item: item(),
+            sealed: std::collections::BTreeMap::from([(field("secret_key"), key.clone().into())]),
+            plain: std::collections::BTreeMap::new(),
+            method,
+            url: url.to_owned(),
+            expires_s,
+        };
+        let object = "https://s3.eu-west-1.amazonaws.com/tenant-a/q3.csv";
+        let allowed = instance.setup.seal("secret_key", b"SEALCANARY-secret-access-key", &rule(true)).await;
+        let url = instance.client.presign(presign(&allowed, Method::GET, object, 600)).await.unwrap();
+        assert!(url.starts_with(&format!("{object}?X-Amz-Algorithm=AWS4-HMAC-SHA256&")), "{url}");
+        assert!(url.contains("&X-Amz-Expires=600&") && url.contains("&X-Amz-Signature="));
+        assert!(!url.contains("SEALCANARY"));
+        let record = instance.setup.audit_records().pop().unwrap();
+        assert_eq!((&record["op"], &record["expires_s"], &record["outcome"]), (&json!("presign"), &json!(600), &json!("ok")));
+        assert!(!record.to_string().contains("X-Amz"));
+
+        for (key, method, url, expires_s) in [
+            (&allowed, Method::GET, object, 901),
+            (&allowed, Method::PUT, object, 60),
+            (&allowed, Method::GET, "https://s3.eu-west-1.amazonaws.com/tenant-b/q3.csv", 60),
+            (&instance.setup.seal("secret_key", b"SEALCANARY-secret-access-key", &rule(false)).await, Method::GET, object, 60),
+        ] {
+            let error = instance.client.presign(presign(key, method, url, expires_s)).await.err().unwrap();
+            assert_eq!(error.code, ErrorCode::PolicyDenied, "{url} for {expires_s}s");
+        }
+    };
+
     acceptance_rotating_refresh_tokens_keep_working => |mode: Mode| async move {
         let (instance, provider) = simple(mode).await;
         provider.respond("/token", CannedResponse::ok("application/json", TOKENS));

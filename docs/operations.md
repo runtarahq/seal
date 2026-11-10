@@ -239,7 +239,8 @@ One JSON line per request and per administrative call: time, caller, keyset, ite
 names, matched rule indexes, method, host, path without the query string, status, bytes
 each way, duration, outcome (`ok`, `refused`, `failed` or `cancelled`) and error code. A
 `verify` record has `verified`, whether the code matched: a run of `false` for one value
-is someone guessing. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
+is someone guessing. A `presign` record has `expires_s`, how long the URL lasts: what is
+done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
 ## Health and metrics
