@@ -17,8 +17,10 @@ pub mod pg;
 pub mod relay;
 pub mod response_seal;
 pub mod target;
+pub mod verify;
 
 pub use broker::{
-    Broker, BrokerConfig, ConnectRequest, Environment, Limits, Presented, SendRequest, SendResponse,
+    Broker, BrokerConfig, ConnectRequest, Environment, Limits, Presented, SendRequest,
+    SendResponse, VerifyRequest,
 };
 pub use error::{BrokerError, ErrorCode};

@@ -114,6 +114,11 @@ impl Progress {
         self.bytes_out.load(Ordering::Relaxed)
     }
 
+    /// Records the size of a message that was read whole, with no request to send.
+    pub(crate) fn set_bytes_in(&self, bytes: u64) {
+        self.bytes_in.store(bytes, Ordering::Relaxed);
+    }
+
     /// Records the size of a response that was buffered rather than streamed.
     pub(crate) fn set_bytes_out(&self, bytes: u64) {
         self.bytes_out.store(bytes, Ordering::Relaxed);

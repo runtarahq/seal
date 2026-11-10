@@ -140,6 +140,7 @@ impl Service {
             },
             code: error.map(ErrorCode::as_str),
             pg_auth: None,
+            verified: None,
         };
         self.audit
             .record(&record)

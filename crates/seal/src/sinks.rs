@@ -123,6 +123,7 @@ mod tests {
             outcome: Outcome::Ok,
             code: None,
             pg_auth: None,
+            verified: None,
         }
     }
 

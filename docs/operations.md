@@ -237,8 +237,9 @@ backups, or destroy the wrapping key. Once that has taken effect, within `max_st
 
 One JSON line per request and per administrative call: time, caller, keyset, item, field
 names, matched rule indexes, method, host, path without the query string, status, bytes
-each way, duration, outcome (`ok`, `refused`, `failed` or `cancelled`) and error code.
-Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
+each way, duration, outcome (`ok`, `refused`, `failed` or `cancelled`) and error code. A
+`verify` record has `verified`, whether the code matched: a run of `false` for one value
+is someone guessing. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
 ## Health and metrics

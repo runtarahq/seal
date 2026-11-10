@@ -1,4 +1,4 @@
-//! One record per `send`. Written by seal, so a compromised caller cannot hide its use.
+//! One record per `send`, session or `verify`. Written by seal, so a compromised caller cannot hide its use.
 //!
 //! A record has a fixed schema of identifiers and counts: never headers, bodies or
 //! query strings.
@@ -51,6 +51,8 @@ pub struct AuditRecord {
     pub code: Option<&'static str>,
     /// How a Postgres session logged in, such as `scram-sha-256-plus`.
     pub pg_auth: Option<&'static str>,
+    /// For `verify`: whether the code matched.
+    pub verified: Option<bool>,
 }
 
 /// How a request ended.
@@ -191,6 +193,7 @@ mod tests {
             outcome: Outcome::Ok,
             code: None,
             pg_auth: None,
+            verified: None,
         }
     }
 
@@ -223,7 +226,8 @@ mod tests {
                 "rules",
                 "shared",
                 "status",
-                "ts"
+                "ts",
+                "verified"
             ]
         );
         assert_eq!(json["outcome"], "ok");

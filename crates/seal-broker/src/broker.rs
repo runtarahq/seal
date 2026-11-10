@@ -225,6 +225,25 @@ pub struct ConnectRequest {
     pub port: u16,
 }
 
+/// A message to check against a sealed secret: a webhook and its signature. It holds
+/// no credentials.
+pub struct VerifyRequest {
+    /// Who is asking, for the audit record.
+    pub caller: String,
+    /// The keyset the request is for.
+    pub keyset: KeysetId,
+    /// The record the request is for.
+    pub item: ItemId,
+    /// The field the value is sealed as.
+    pub field: FieldName,
+    /// The sealed secret.
+    pub value: Presented,
+    /// The message, as the provider signed it. It is read whole, up to the buffer cap.
+    pub message: RequestBody,
+    /// The code that came with the message, as bytes.
+    pub mac: Vec<u8>,
+}
+
 /// What came back.
 pub struct SendResponse {
     /// The status. A redirect is returned, never followed.
@@ -309,6 +328,7 @@ impl Broker {
             outcome: Outcome::Refused,
             code: None,
             pg_auth: None,
+            verified: None,
         };
         match self.prepare_session(request, &mut record).await {
             Ok(session) => Ok(session),
@@ -423,6 +443,87 @@ impl Broker {
         })
     }
 
+    /// Says whether a message's authentication code was made with a sealed secret, whose
+    /// policy must allow it. The answer is only yes or no: the code is never computed
+    /// for the caller. Every call leaves one audit record, with the answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BrokerError`] with the reason, which never includes a value. A code
+    /// that does not match is not an error.
+    pub async fn verify(&self, request: VerifyRequest) -> Result<bool, BrokerError> {
+        let VerifyRequest {
+            caller,
+            keyset,
+            item,
+            field,
+            value,
+            message,
+            mac,
+        } = request;
+        let sealed = BTreeMap::from([(field.clone(), value)]);
+        let progress = Arc::new(Progress::new());
+        let record = self.first_record("verify", &caller, &keyset, &item, &sealed);
+        let mut audit = AuditGuard::new(Arc::clone(&self.audit), record, Arc::clone(&progress));
+        match self
+            .verify_audited(&keyset, &item, &field, &sealed, message, &mac, &progress)
+            .await
+        {
+            Ok(valid) => {
+                audit.update(|record| record.verified = Some(valid));
+                audit.finish(Outcome::Ok, None).map_err(|_| {
+                    BrokerError::new(ErrorCode::Internal, "could not write the audit record")
+                })?;
+                Ok(valid)
+            }
+            Err(error) => {
+                // The caller hears the refusal either way.
+                let _ = audit.finish(Outcome::Refused, Some(error.code()));
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // The parts of one request, already taken apart.
+    async fn verify_audited(
+        &self,
+        keyset: &KeysetId,
+        item: &ItemId,
+        field: &FieldName,
+        sealed: &BTreeMap<FieldName, Presented>,
+        message: RequestBody,
+        mac: &[u8],
+        progress: &Progress,
+    ) -> Result<bool, BrokerError> {
+        let (secrets, policies, _) = self.open_all(keyset, item, sealed).await?;
+        let verify = policies.get(field).and_then(|policy| policy.verify);
+        drop(policies);
+        let Some(seal_format::policy::Verify::Hmac { hash }) = verify else {
+            return Err(BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "this value's policy does not allow verification",
+                field,
+            ));
+        };
+        // The message is held whole, so it takes a buffer's place and its deadline.
+        let _permit = self.buffer_permit(self.limits.first_byte_timeout).await?;
+        let message = within(
+            Some(Instant::now() + self.limits.buffered_total_timeout),
+            read_capped(
+                message,
+                self.limits.buffer_cap,
+                BrokerError::new(ErrorCode::BodyTooLarge, "the message is over the cap"),
+                |error| error,
+            ),
+        )
+        .await?;
+        progress.set_bytes_in(message.len() as u64);
+        let secret = secrets.get(field).ok_or_else(|| {
+            BrokerError::for_field(ErrorCode::Internal, "a matched secret is missing", field)
+        })?;
+        Ok(secret.expose(|key| crate::verify::hmac_matches(hash, key, &message, mac)))
+    }
+
     /// Sends a request using the sealed values it presents. Every call leaves one audit
     /// record, including a refusal, and a request whose caller goes away.
     ///
@@ -433,7 +534,17 @@ impl Broker {
         let progress = Arc::new(Progress::new());
         let mut audit = AuditGuard::new(
             Arc::clone(&self.audit),
-            self.first_record(&request),
+            {
+                let mut record = self.first_record(
+                    "send",
+                    &request.caller,
+                    &request.keyset,
+                    &request.item,
+                    &request.sealed,
+                );
+                request.method.as_str().clone_into(&mut record.method);
+                record
+            },
             Arc::clone(&progress),
         );
         let mut contacted = false;
@@ -466,7 +577,16 @@ impl Broker {
         }
     }
 
-    fn first_record(&self, request: &SendRequest) -> AuditRecord {
+    /// The record of a request that has only just arrived: a cancellation, until it
+    /// ends some other way.
+    fn first_record(
+        &self,
+        op: &'static str,
+        caller: &str,
+        keyset: &KeysetId,
+        item: &ItemId,
+        sealed: &BTreeMap<FieldName, Presented>,
+    ) -> AuditRecord {
         let ts = self
             .clock
             .now()
@@ -474,23 +594,22 @@ impl Broker {
             .map_or(0, |elapsed| elapsed.as_secs());
         AuditRecord {
             ts,
-            op: "send",
-            caller: request.caller.clone(),
-            keyset: request.keyset.to_string(),
-            item: request.item.to_string(),
-            fields: request.sealed.keys().map(ToString::to_string).collect(),
-            shared: request
-                .sealed
+            op,
+            caller: caller.to_owned(),
+            keyset: keyset.to_string(),
+            item: item.to_string(),
+            fields: sealed.keys().map(ToString::to_string).collect(),
+            shared: sealed
                 .iter()
                 .filter_map(|(field, presented)| {
-                    let item = presented.item.as_ref().unwrap_or(&request.item);
-                    let elsewhere =
-                        presented.envelope.keyset() != &request.keyset || item != &request.item;
-                    elsewhere.then(|| format!("{field}={}/{item}", presented.envelope.keyset()))
+                    let value_item = presented.item.as_ref().unwrap_or(item);
+                    let elsewhere = presented.envelope.keyset() != keyset || value_item != item;
+                    elsewhere
+                        .then(|| format!("{field}={}/{value_item}", presented.envelope.keyset()))
                 })
                 .collect(),
             rules: Vec::new(),
-            method: request.method.as_str().to_owned(),
+            method: String::new(),
             host: None,
             path: None,
             status: None,
@@ -500,6 +619,7 @@ impl Broker {
             outcome: Outcome::Cancelled,
             code: None,
             pg_auth: None,
+            verified: None,
         }
     }
 
