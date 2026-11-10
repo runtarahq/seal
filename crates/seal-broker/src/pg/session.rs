@@ -46,6 +46,7 @@ pub struct PgSession {
     pub(crate) password: Option<Zeroizing<Vec<u8>>>,
     pub(crate) allow_md5: bool,
     pub(crate) allow_cleartext: bool,
+    pub(crate) require_channel_binding: bool,
     pub(crate) client_cert: Option<ClientCertMaterial>,
     pub(crate) allow_private: bool,
     pub(crate) connect_timeout: Duration,
@@ -200,6 +201,7 @@ impl PgSession {
             password: password.as_deref().map(Vec::as_slice),
             allow_md5: self.allow_md5,
             allow_cleartext: self.allow_cleartext,
+            require_channel_binding: self.require_channel_binding,
             client_cert: self.client_cert.is_some(),
             end_point,
         };

@@ -313,6 +313,20 @@ SCRAM-SHA-256 is always allowed. The others only run over TLS.
 }] }
 ```
 
+`require_channel_binding` goes the other way: the login must be SCRAM-SHA-256-PLUS,
+bound to the TLS connection, or it is refused. It cannot be combined with the two
+options above.
+
+```json
+{ "rules": [{
+  "destination": {
+    "scheme": "postgres", "host": "db.example.com", "port": 5432,
+    "databases": ["app"], "user": { "literal": "app_user" }
+  },
+  "inject": { "pg_password": { "require_channel_binding": true } }
+}] }
+```
+
 ### `companion`
 
 This value is not used directly. Another field's rule uses it at this destination, and
@@ -561,6 +575,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
+| `require_channel_binding` | `pg_password` | Not a weakening: refuses any login but SCRAM-SHA-256-PLUS. Cannot go with the two above |
 | `allow_replication` | A Postgres destination | Allows a replication session |
 
 ```json

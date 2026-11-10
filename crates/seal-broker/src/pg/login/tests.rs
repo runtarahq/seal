@@ -153,6 +153,7 @@ fn credentials(end_point: Option<Vec<u8>>) -> Credentials<'static> {
         password: Some(PASSWORD),
         allow_md5: false,
         allow_cleartext: false,
+        require_channel_binding: false,
         client_cert: false,
         end_point,
     }
@@ -324,6 +325,38 @@ async fn a_server_that_never_asks_for_the_password_is_refused() {
     nothing.password = None;
     let (result, _) = scripted(vec![auth(0, &[])], nothing).await;
     assert_eq!(result.unwrap(), PgAuth::Trust);
+}
+
+#[tokio::test]
+async fn a_rule_can_require_channel_binding() {
+    let required = |end_point: Option<Vec<u8>>| {
+        let mut credentials = credentials(end_point);
+        credentials.require_channel_binding = true;
+        credentials
+    };
+    let server = Server::new(&["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"]);
+    let end_point = server.end_point.clone();
+    let (result, _) = run_scram(server.clone(), required(Some(end_point.clone()))).await;
+    assert_eq!(result.unwrap().0, PgAuth::ScramPlus);
+
+    // A server that does not offer it, or a certificate that cannot be bound to: the
+    // login stops before the password is used.
+    for (mechanisms, end_point) in [
+        (b"SCRAM-SHA-256\0\0".to_vec(), Some(end_point)),
+        (b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0".to_vec(), None),
+    ] {
+        let (result, received) = scripted(vec![auth(10, &mechanisms)], required(end_point)).await;
+        assert_eq!(result.unwrap_err().error.code(), ErrorCode::PgAuthFailed);
+        assert!(received.is_empty(), "nothing was sent");
+    }
+    // Nor any method without binding, even one another flag would allow.
+    for request in [auth(5, &[1, 2, 3, 4]), auth(3, &[])] {
+        let mut credentials = required(None);
+        credentials.allow_md5 = true;
+        credentials.allow_cleartext = true;
+        let (result, _) = scripted(vec![request], credentials).await;
+        assert_eq!(result.unwrap_err().error.code(), ErrorCode::PgAuthFailed);
+    }
 }
 
 #[tokio::test]

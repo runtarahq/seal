@@ -314,6 +314,30 @@ async fn a_server_that_goes_quiet_during_the_login_is_given_up_on() {
 }
 
 #[tokio::test]
+async fn a_rule_that_requires_channel_binding_refuses_a_server_without_it() {
+    // The server knows the password, but offers SCRAM without binding only.
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
+    let harness = harness();
+    let policy = rule_policy(&json!({
+        "destination": destination(&server, Some(&server.ca_pem)),
+        "allow_private_destination": true,
+        "inject": { "pg_password": { "require_channel_binding": true } },
+    }));
+    let password = harness.seal("password", b"pw", &policy);
+    let (mut caller, task) = session(
+        &harness,
+        connect_request(&server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    assert_eq!(read_message(&mut caller).await.tag, b'E');
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        ErrorCode::PgAuthFailed
+    );
+}
+
+#[tokio::test]
 async fn a_cancel_is_forwarded_as_sent() {
     let server = MockPostgres::start_scram(HOST, b"pw").await;
     let harness = harness();

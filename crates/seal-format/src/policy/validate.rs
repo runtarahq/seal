@@ -337,7 +337,15 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             jwt_header(header)?;
             parameter_name(form_field)
         }
-        Inject::PgPassword { .. } | Inject::Companion {} => Ok(()),
+        Inject::PgPassword {
+            allow_md5,
+            allow_cleartext_password,
+            require_channel_binding,
+        } => require(
+            !(*require_channel_binding && (*allow_md5 || *allow_cleartext_password)),
+            "require_channel_binding cannot go with allow_md5 or allow_cleartext_password",
+        ),
+        Inject::Companion {} => Ok(()),
     }
 }
 

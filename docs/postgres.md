@@ -87,7 +87,10 @@ on the user and on TLS, and a session may use only the databases both allow.
 
    SCRAM checks the server's signature as well, so a server that does not know the
    password cannot pass as the real one. Channel binding ties the login to this TLS
-   connection. A server that accepts the login without asking for the password the
+   connection. With `require_channel_binding`, a login that would not be bound is
+   refused before anything derived from the password is sent: one to a server that
+   does not offer `SCRAM-SHA-256-PLUS`, or whose certificate has no hash to bind to.
+   A server that accepts the login without asking for the password the
    rule presents has proved nothing, and the login fails with `PG_AUTH_FAILED`.
 5. On success seal sends the application `AuthenticationOk`. From then on it relays.
 

@@ -449,6 +449,10 @@ impl Broker {
                 .password
                 .as_ref()
                 .is_some_and(|password| password.allow_cleartext),
+            require_channel_binding: terms
+                .password
+                .as_ref()
+                .is_some_and(|password| password.require_channel_binding),
             password,
             client_cert,
             allow_private: plan.allow_private_destination,

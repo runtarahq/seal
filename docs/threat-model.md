@@ -161,9 +161,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **Channel binding needs a hash.** For a server certificate signed with an algorithm
   that has none, such as Ed25519, seal logs in with SCRAM without binding and tells
   the server so. The login still needs TLS and checks the server's signature.
-- **Channel binding is the server's choice.** A server that offers only
-  `SCRAM-SHA-256` gets a login without binding, and a policy cannot require one. The
-  audit record's `pg_auth` says which it was.
+- **Channel binding is the server's choice unless the rule requires it.** A server
+  that offers only `SCRAM-SHA-256` gets a login without binding, unless the rule sets
+  `require_channel_binding`. The audit record's `pg_auth` says which it was.
 - **OAuth callbacks reach the application.** seal is never a public endpoint, so the
   authorization code passes through the application. It is not enough alone:
   redeeming it needs the sealed client secret and the flow's PKCE verifier.
