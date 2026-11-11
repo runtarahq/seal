@@ -715,8 +715,10 @@ Options that weaken a guarantee are named for it, and are off by default.
 ## The builder
 
 `seal_format::policy::builder` produces correct policies for the common cases, with companion
-rules generated. It accepts `https` endpoints only, so a weakening option has to be written out
-where it is used.
+rules generated. It accepts `https` endpoints only, and sets a weakening option only where a
+function is named for it or takes it as an argument, so that it is visible where it is used;
+plain HTTP and private addresses have to be written out. An endpoint's host may be a
+[pattern](#host-patterns), as in `https://*.example.com/`.
 
 | Function | Produces |
 |---|---|
@@ -726,11 +728,14 @@ where it is used.
 | `basic(api_base, username)` | A password for basic auth |
 | `oauth_client(config)` | Policies for an OAuth client secret or signing key, and for a password. Its tokens are limited to where they belong, and its refresh token's definition names itself |
 | `aws(region, service, endpoint, access_key_id, session_token, payload)` | A secret access key |
+| `aws_scoped(region, service, endpoint, access_key_id, session_token, payload)` | A secret access key whose region or service the caller may name with each request, in a plain field the rule then lists |
 | `azure(account, service, endpoint)` | An account key |
 | `client_cert(api_base, cert, chain)` | A client certificate's private key |
 | `webhook_hmac(hash)` | A webhook signing secret, which only verifies |
 | `webhook_token()` | A token a provider sends back with each webhook, which only verifies |
+| `registered_webhook_token(register_url, path_prefix, token_field, url_field, webhook_url)` | Such a token that is also sent when the webhook is registered, with a secret [in the path](#path), and only for that webhook's URL: Telegram's `setWebhook` |
 | `postgres(host, port, databases, user)` | A Postgres password, with SCRAM only and the server verified |
+| `postgres_with_tls(host, port, databases, user, tls)` | A Postgres password, with SCRAM only, for a server verified against its own CA or [not verified](postgres.md#servers-that-cannot-be-verified) |
 
 A part of a composite credential comes from a `PartSource`: `Literal` fixes it in the policy,
 `Plain` lists it in `plain`, and `Sealed` generates a companion policy for that field, returned
