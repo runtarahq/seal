@@ -44,6 +44,7 @@ rule's secret. An injection names only the other parts of a credential, each as
 | `limits` | Tighter limits for this rule |
 | `allow_private_destination` | See [Weakening options](#weakening-options) |
 | `allow_plain_http` | See [Weakening options](#weakening-options) |
+| `allow_injected_path` | See [Weakening options](#weakening-options) |
 
 ## Destinations
 
@@ -135,8 +136,28 @@ bounds what follows the injected prefix, not the whole path sent: with a prefix 
 
 The secret is percent-encoded, so it cannot add a segment or end the path, and one that
 would make a `.` or `..` segment is refused. A response header that repeats it as written
-in the path, such as a redirect's `Location`, is dropped. No other sealed value may be
-presented with one that has this injection, since it changes where the request goes.
+in the path, such as a redirect's `Location`, is dropped.
+
+A path injection changes where the request goes after every rule matched the caller's
+path, and anyone can seal a value with one. So another sealed value may be presented
+with it only if that value's own rule allows exactly this prefix, with
+`allow_injected_path`. Telegram's `setWebhook` takes the bot token in the path and the
+webhook's `secret_token` in the body:
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "api.telegram.org", "path_prefix": "/setWebhook" },
+  "methods": ["POST"],
+  "inject": { "form_field": { "name": "secret_token" } },
+  "allow_injected_path": "/bot{}",
+  "require_form": { "url": ["https://app.example.com/telegram"] }
+}], "verify": "equals" }
+```
+
+The rule's `path_prefix` still bounds what follows the injected prefix. What fills the
+prefix is whichever value is presented, which may be another bot's token, so the rule
+must be safe for any of them: here `require_form` holds the webhook to one URL, since
+Telegram sends the secret to whatever URL is registered.
 
 ### `form_field`
 
@@ -611,6 +632,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 |---|---|---|
 | `allow_private_destination` | A rule | Allows an internal address (loopback, RFC 1918, CGNAT, unique-local), if the deployment's configuration also permits it, and every value presented with this one sets it too. Never a link-local or metadata address |
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
+| `allow_injected_path` | A rule | Lets the value go with one that [injects into the path](#path) with exactly this prefix. The request is then sent under that prefix, filled by whichever such value is presented |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |
 | `allow_headers` | `aws_sigv4` | Lets the caller set ACL, grant or copy headers |
 | `allow_copy_from_any_bucket` | `aws_sigv4` | Lets a copy read any object on the rule's host, for a rule with no path prefix. Only for an endpoint addressed by path |

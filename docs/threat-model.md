@@ -129,6 +129,12 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   the whole of it in constant time and refuses a shorter one, so the answers do not
   add up to a forgery. A compromised application can still accept a forged webhook by
   not asking; that was always its own decision.
+- **A value that allows an injected path goes wherever that prefix leads.** With
+  `allow_injected_path`, a value is sent under a path prefix filled by another sealed
+  value, and anyone with the public key can seal one. A compromised application can
+  therefore send it under a prefix of its choosing, such as another Telegram bot's. The
+  sealer sets the option only where the rule is safe for any filling, and holds the rest
+  of the request with `path_prefix`, `methods` and `require_form`.
 - **A caller can guess a token.** With `"verify": "equals"`, each answer says whether
   one guess is the secret. seal compares the whole token in constant time, so an answer
   says nothing of where a guess went wrong, and the keyset's rate limit bounds the

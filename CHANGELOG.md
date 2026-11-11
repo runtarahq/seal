@@ -23,6 +23,9 @@ The first release.
 - Policies name the destinations, methods and paths a value may be used for. The matcher
   treats every policy as untrusted, and checks every address it connects to. See
   [`docs/policy.md`](docs/policy.md).
+- A value may go with one injected into the path where its own rule allows that prefix
+  with `allow_injected_path`, as Telegram's `setWebhook` needs for the bot token and the
+  webhook's secret.
 - Injection into a header, basic auth, the query, the path, a form field or a JSON
   field; companion values; shared values, such as a platform-wide OAuth app's client secret.
 - A response that repeats a credential seal sent, in a header or in its body, does not
