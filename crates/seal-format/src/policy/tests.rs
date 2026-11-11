@@ -1142,6 +1142,83 @@ fn weakening_flags_default_to_off() {
     assert!(!allow_md5 && !allow_cleartext_password && !require_channel_binding);
 }
 
+/// To a server that is not verified, or over no TLS at all, only SCRAM will do: it
+/// proves the password without sending it.
+#[test]
+fn a_postgres_server_may_go_unverified_or_without_tls_with_scram_only() {
+    let with = |tls: Value, inject: Value| {
+        parse(&json!({ "rules": [{
+            "destination": {
+                "scheme": "postgres", "host": "db.example.com", "port": 5432,
+                "databases": ["app"], "user": { "literal": "app_user" }, "tls": tls
+            },
+            "inject": inject,
+        }] }))
+    };
+    let password = |options: Value| json!({ "pg_password": options });
+    for (tls, expected) in [
+        ("unverified", PgTls::Unverified),
+        ("plaintext", PgTls::Plaintext),
+    ] {
+        let policy = with(json!(tls), password(json!({}))).unwrap();
+        let Destination::Postgres { tls: parsed, .. } = &policy.rules[0].destination else {
+            panic!("not Postgres")
+        };
+        assert_eq!(*parsed, expected);
+        assert!(!parsed.verifies_the_server());
+        let canonical = policy.canonical_json().unwrap();
+        assert!(
+            String::from_utf8(canonical.clone())
+                .unwrap()
+                .contains(&format!(r#""tls":"{tls}""#))
+        );
+        assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
+
+        // The password, or an MD5 hash that stands in for it, would reach whoever answers.
+        with(json!(tls), password(json!({ "allow_md5": true }))).unwrap_err();
+        with(
+            json!(tls),
+            password(json!({ "allow_cleartext_password": true })),
+        )
+        .unwrap_err();
+        // A client certificate's rule says how the server is verified, so it is.
+        with(
+            json!(tls),
+            json!({ "client_cert": { "cert": { "literal": "-----BEGIN CERTIFICATE-----" } } }),
+        )
+        .unwrap_err();
+    }
+    // Channel binding ties a login to the TLS connection, which catches an impostor
+    // even where the certificate is not verified. Without TLS there is nothing to bind.
+    with(
+        json!("unverified"),
+        password(json!({ "require_channel_binding": true })),
+    )
+    .unwrap();
+    with(
+        json!("plaintext"),
+        password(json!({ "require_channel_binding": true })),
+    )
+    .unwrap_err();
+
+    // The verified modes are as they were.
+    assert!(PgTls::VerifyFull.verifies_the_server());
+    assert!(PgTls::Ca(String::new()).verifies_the_server());
+    with(json!("verify_full"), password(json!({ "allow_md5": true }))).unwrap();
+    for tls in [
+        "require",
+        "disable",
+        "prefer",
+        "allow",
+        "verify_ca",
+        "Unverified",
+        "",
+    ] {
+        with(json!(tls), password(json!({}))).unwrap_err();
+    }
+    with(json!({ "unverified": {} }), password(json!({}))).unwrap_err();
+}
+
 #[test]
 fn requiring_channel_binding_rules_out_the_methods_that_have_none() {
     let with = |options: Value| {

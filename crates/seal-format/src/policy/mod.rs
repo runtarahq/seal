@@ -285,7 +285,7 @@ impl Destination {
     }
 }
 
-/// How a Postgres server's certificate is verified.
+/// How the connection to a Postgres server is protected, and its certificate verified.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PgTls {
@@ -294,6 +294,21 @@ pub enum PgTls {
     VerifyFull,
     /// Against this CA, in PEM, with the host name.
     Ca(String),
+    /// TLS with whatever certificate the server presents, as libpq's
+    /// `sslmode=require`: anyone on the path can pass as the server. The login is then
+    /// SCRAM only, so the password itself is never sent.
+    Unverified,
+    /// No TLS, as libpq's `sslmode=disable`: anyone on the path can read and change
+    /// the session. SCRAM only, and only where the deployment allows it.
+    Plaintext,
+}
+
+impl PgTls {
+    /// Whether the server is who the policy names: its certificate is verified.
+    #[must_use]
+    pub fn verifies_the_server(&self) -> bool {
+        matches!(self, Self::VerifyFull | Self::Ca(_))
+    }
 }
 
 /// The destination's flat JSON form, where `scheme` selects the variant.
@@ -603,10 +618,10 @@ pub enum Inject {
     },
     /// As a Postgres password.
     PgPassword {
-        /// Also allows MD5 authentication, over TLS.
+        /// Also allows MD5 authentication, over TLS to a verified server.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_md5: bool,
-        /// Also allows cleartext passwords, over TLS.
+        /// Also allows cleartext passwords, over TLS to a verified server.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_cleartext_password: bool,
         /// Refuses a login that is not bound to its TLS connection: only

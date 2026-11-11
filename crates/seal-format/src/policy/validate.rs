@@ -205,7 +205,7 @@ fn destination(destination: &Destination) -> Result<(), FormatError> {
             }
             part(user)?;
             match tls {
-                PgTls::VerifyFull => Ok(()),
+                PgTls::VerifyFull | PgTls::Unverified | PgTls::Plaintext => Ok(()),
                 PgTls::Ca(ca) => pem(ca),
             }
         }
@@ -425,8 +425,30 @@ fn presign_names_its_methods(rule: &Rule) -> Result<(), FormatError> {
 
 fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
     match (&rule.destination, &rule.inject) {
-        (Destination::Postgres { .. }, Inject::PgPassword { .. } | Inject::ClientCert { .. })
-        | (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion {}) => Ok(()),
+        (
+            Destination::Postgres { tls, .. },
+            Inject::PgPassword {
+                allow_md5,
+                allow_cleartext_password,
+                require_channel_binding,
+            },
+        ) => {
+            // To a server that may be anyone, only a login that never sends the
+            // password, or anything that stands in for it, will do.
+            require(
+                tls.verifies_the_server() || !(*allow_md5 || *allow_cleartext_password),
+                "MD5 and cleartext passwords need a verified server",
+            )?;
+            require(
+                *tls != PgTls::Plaintext || !*require_channel_binding,
+                "channel binding needs TLS",
+            )
+        }
+        (Destination::Postgres { tls, .. }, Inject::ClientCert { .. }) => require(
+            tls.verifies_the_server(),
+            "a client certificate needs a verified server",
+        ),
+        (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion {}) => Ok(()),
         (Destination::Postgres { .. }, _) => {
             refuse("a Postgres rule injects a password or a client certificate")
         }
