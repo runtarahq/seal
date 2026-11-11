@@ -28,12 +28,12 @@
       }
     },
     {
-      "name": "wildcard host",
+      "name": "wildcard inside a host",
       "policy": {
         "rules": [
           {
             "destination": {
-              "host": "*.example.com",
+              "host": "api.*.example.com",
               "scheme": "https"
             },
             "inject": {
@@ -341,6 +341,10 @@
     {
       "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"postgres\",\"host\":\"db.example.com\",\"port\":5432,\"databases\":[\"app\"],\"user\":{\"literal\":\"app_user\"}},\"inject\":{\"pg_password\":{}}}]}",
       "name": "Postgres"
+    },
+    {
+      "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"*.example.com\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}}]}",
+      "name": "host pattern"
     }
   ]
 }

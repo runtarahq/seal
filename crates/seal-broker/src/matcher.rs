@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use seal_format::policy::{Inject, Method, Part, Rule, RuleLimits, SealResponse};
+use seal_format::policy::{AwsScope, Inject, Method, Part, Rule, RuleLimits, SealResponse};
 use seal_format::{FieldName, Policy};
 
 use crate::error::{BrokerError, ErrorCode};
@@ -120,7 +120,7 @@ pub fn decide(
         matched.insert(field, found);
     }
 
-    path_injection_stands_alone(&matched)?;
+    path_injection_is_allowed_by_the_rest(&matched)?;
 
     // Step 2: resolve the parts each primary rule refers to.
     let mut used_as_companion: BTreeSet<&FieldName> = BTreeSet::new();
@@ -132,6 +132,16 @@ pub fn decide(
         for part in rule_parts(rule) {
             let Part::Field(name) = part else { continue };
             resolve_part(field, name, rule, &matched, head, &mut used_as_companion)?;
+        }
+        // A region or service the caller names comes with the request, in the plain.
+        for name in named_scopes(&rule.inject) {
+            if !(rule.plain.contains(name) && head.plain.contains(name)) {
+                return Err(BrokerError::for_field(
+                    ErrorCode::PolicyDenied,
+                    "the request does not name its region or service",
+                    name,
+                ));
+            }
         }
         listed_plain.extend(rule.plain.iter());
     }
@@ -238,6 +248,24 @@ fn rule_parts(rule: &Rule) -> Vec<&Part> {
     parts
 }
 
+/// The plain fields a SigV4 rule's region and service are named by, if the caller names
+/// them.
+fn named_scopes(inject: &Inject) -> Vec<&FieldName> {
+    let Inject::AwsSigv4 {
+        region, service, ..
+    } = inject
+    else {
+        return Vec::new();
+    };
+    [region, service]
+        .into_iter()
+        .filter_map(|scope| match scope {
+            AwsScope::Named(named) => Some(&named.field),
+            AwsScope::Fixed(_) => None,
+        })
+        .collect()
+}
+
 /// The other parts of a credential that an injection names.
 fn parts_of(inject: &Inject) -> Vec<&Part> {
     match inject {
@@ -314,22 +342,33 @@ fn resolve_part<'a>(
 }
 
 /// A path injection changes the path every presented value is sent to, after each rule
-/// matched the path the caller named. Anyone can seal a value with such a rule, so it may
-/// not be combined with any other value: otherwise it would move another value's
-/// credential outside that value's path prefix.
-fn path_injection_stands_alone(
+/// matched the path the caller named. Anyone can seal a value with such a rule, so it
+/// would move another value's credential outside that value's path prefix. It may go
+/// with another value only where that value's own rule allows exactly its prefix.
+fn path_injection_is_allowed_by_the_rest(
     matched: &BTreeMap<&FieldName, (usize, &Rule)>,
 ) -> Result<(), BrokerError> {
     let injects_path = matched
         .iter()
-        .find(|(_, (_, rule))| matches!(rule.inject, Inject::Path { .. }));
-    match injects_path {
-        Some((field, _)) if matched.len() > 1 => Err(BrokerError::for_field(
+        .find_map(|(field, (_, rule))| match &rule.inject {
+            Inject::Path { prefix } => Some((*field, prefix)),
+            _ => None,
+        });
+    let Some((field, prefix)) = injects_path else {
+        return Ok(());
+    };
+    let allowed = matched
+        .iter()
+        .filter(|(other, _)| **other != field)
+        .all(|(_, (_, rule))| rule.allow_injected_path.as_ref() == Some(prefix));
+    if allowed {
+        Ok(())
+    } else {
+        Err(BrokerError::for_field(
             ErrorCode::Conflict,
-            "a path injection cannot be combined with other values",
+            "a value presented with a path injection does not allow it",
             field,
-        )),
-        _ => Ok(()),
+        ))
     }
 }
 

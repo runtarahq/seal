@@ -23,6 +23,10 @@ service Seal {
   rpc Rotate(KeysetRequest) returns (WrappedKeyReply);
   // Administrative: a keyset's public keys.
   rpc PublicKeys(KeysetRequest) returns (PublicKeysReply);
+  // Deletes every key of a keyset from the key source, which cannot be undone: nothing
+  // sealed to it opens again. Only for a caller that may destroy keysets and may use
+  // this one; being an admin caller is neither needed nor enough.
+  rpc DestroyKeyset(KeysetRequest) returns (Empty);
   // The deployment mode, version and limits. Any caller.
   rpc Info(Empty) returns (InfoReply);
 }
@@ -128,7 +132,8 @@ message VerifyHead {
   string sealed = 4;
   // The item the value is bound to, if not the request's: a shared value.
   string value_item = 5;
-  // The code that came with the message, as bytes.
+  // The code that came with the message, as bytes. For a policy that verifies with
+  // `equals`, the token that came with it, and no message follows.
   bytes mac = 6;
 }
 

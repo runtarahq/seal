@@ -97,6 +97,7 @@ pub fn broker_config(config: &Config) -> Result<BrokerConfig, String> {
             deny_cidrs: parse(&config.network.deny_cidrs)?,
             allow_private_cidrs: parse(&config.network.allow_private_cidrs)?,
             honour_private_rules: config.network.honour_private_rules,
+            honour_plaintext_postgres_rules: config.network.honour_plaintext_postgres_rules,
         },
         client: ClientConfig {
             max_upstream_connections: config.pools.max_upstream_connections,

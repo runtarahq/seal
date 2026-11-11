@@ -75,6 +75,21 @@ pub async fn keygen(config: &Config, keyset: &KeysetId) -> Result<String, String
     Ok(key.kid.to_string())
 }
 
+/// Deletes every key of a keyset from the configured key source.
+///
+/// # Errors
+///
+/// Returns a message if the keyset has no keys or the key source cannot delete.
+pub async fn destroy_keyset(config: &Config, keyset: &KeysetId) -> Result<(), String> {
+    let (source, wrap) = key_parts(config)?;
+    let keyring =
+        Keyring::new(source, wrap, config.keyring()).map_err(|error| error.to_string())?;
+    keyring
+        .destroy(keyset)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Wraps every key in the configured key directory again, under a new wrapping key,
 /// into a new directory. The configured directory and wrapping key are left as they
 /// are; seal uses the new ones once its configuration names them and it is restarted.

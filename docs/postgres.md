@@ -70,10 +70,11 @@ on the user and on TLS, and a session may use only the databases both allow.
 
 1. seal connects to an address it has checked, like any destination. A private address
    needs `allow_private_destination` and an operator who honours it.
-2. It sends `SSLRequest`, and refuses a server that does not offer TLS. It reads exactly
+2. It sends `SSLRequest`, and refuses a server that does not offer TLS, unless the rule
+   says `"plaintext"` ([Servers that cannot be verified](#servers-that-cannot-be-verified)). It reads exactly
    the one-byte answer before the handshake, so nothing unprotected can be slipped in.
 3. TLS verifies the server against the configured roots, or the rule's CA, and the host
-   name, with ALPN `postgresql`. A client certificate goes here, if one was presented.
+   name, unless the rule says `"unverified"`, with ALPN `postgresql`. A client certificate goes here, if one was presented.
 4. seal sends the startup, then logs in with what the server asks for:
 
    | The server asks for | seal | Allowed |
@@ -123,6 +124,50 @@ A session ends when nothing moves for the idle timeout, or at `pg_max_session` (
 8 hours), whichever comes first. A rule can shorten either. Its bytes each way go in the
 audit record. Each session holds one of `max_concurrent_streams` and one provider
 connection.
+
+## Servers that cannot be verified
+
+Verify the server wherever it can be verified: a managed database has a certificate from
+a public CA or from one the provider publishes, which `verify_full` or `{ "ca": "…" }`
+takes. For a server that has neither, a rule can weaken the connection, as libpq's
+`sslmode` does:
+
+| `tls` | libpq | The connection | Someone on the path can |
+|---|---|---|---|
+| `"verify_full"`, `{ "ca": "…" }` | `verify-full` | TLS, server verified | Nothing |
+| `"unverified"` | `require` | TLS, any certificate | Pass as the server, and read and change the session |
+| `"plaintext"` | `disable` | No TLS | Read and change the session |
+
+```json
+{ "rules": [{
+  "destination": {
+    "scheme": "postgres", "host": "db.internal.example", "port": 5432,
+    "databases": ["app"], "user": { "literal": "app_user" },
+    "tls": "unverified"
+  },
+  "inject": { "pg_password": {} }
+}] }
+```
+
+What stays true in both is that the password is not given away. The login is SCRAM
+only: `allow_md5` and `allow_cleartext_password` are refused with these modes, since an
+MD5 response or the password itself would reach whoever answered. SCRAM proves the
+password without sending it and checks that the server knows it too, and a server that
+asks for no password is still not logged in to. What is lost is the session: without a
+verified server, someone on the path can relay the login to the real server and then
+read or change what follows.
+
+- With `"unverified"`, seal still requires TLS and does not fall back. A server that
+  offers `SCRAM-SHA-256-PLUS` is logged in to with channel binding, which fails if the
+  certificate seal saw is not the server's own; `require_channel_binding` insists on
+  it, and then an impostor is caught even though the certificate was not verified.
+- With `"plaintext"`, seal sends no `SSLRequest`. The operator must allow it, with
+  `honour_plaintext_postgres_rules` under `[network]`, or the session is refused before
+  any lookup. Keep it for a server on a network that is already private.
+- There is no mode like libpq's `prefer` or `allow`, which use TLS if the server offers
+  it: someone on the path decides that. Whoever seals the value finds out what the
+  server supports and says which it is.
+- A client certificate needs a verified server.
 
 ## Tested against
 

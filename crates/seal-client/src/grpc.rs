@@ -646,6 +646,15 @@ impl SealClient for GrpcClient {
             })
             .collect())
     }
+
+    async fn destroy_keyset(&self, keyset: &KeysetId) -> Result<(), SealError> {
+        let request = KeysetRequest {
+            keyset: keyset.to_string(),
+        };
+        self.call(|mut client| async move { client.destroy_keyset(request).await })
+            .await?;
+        Ok(())
+    }
 }
 
 fn wrapped(reply: seal_proto::v1::WrappedKeyReply) -> WrappedKey {

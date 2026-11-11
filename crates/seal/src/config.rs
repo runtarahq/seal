@@ -204,6 +204,10 @@ pub struct CallerConfig {
     /// Whether it may make and rotate keys.
     #[serde(default)]
     pub admin: bool,
+    /// Whether it may destroy the keysets it may use, which cannot be undone. Separate
+    /// from `admin`, so that a caller that makes keysets cannot also end them.
+    #[serde(default)]
+    pub destroy_keysets: bool,
 }
 
 /// Where wrapped keys come from and what unwraps them.
@@ -296,6 +300,9 @@ pub struct NetworkConfig {
     /// Whether a rule's `allow_private_destination` has any effect.
     #[serde(default)]
     pub honour_private_rules: bool,
+    /// Whether a Postgres rule whose `tls` is `plaintext` may connect with no TLS.
+    #[serde(default)]
+    pub honour_plaintext_postgres_rules: bool,
     /// More CAs to trust toward providers, in PEM files.
     #[serde(default)]
     pub extra_ca_files: Vec<PathBuf>,
@@ -693,6 +700,7 @@ mod tests {
         assert_eq!(config.keys.lock_memory, LockMemory::BestEffort);
         assert_eq!(config.audit.on_failure, AuditFailure::FailClosed);
         assert!(!config.network.honour_private_rules);
+        assert!(!config.network.honour_plaintext_postgres_rules);
         assert!(config.limits.max_stream_duration.is_none());
     }
 

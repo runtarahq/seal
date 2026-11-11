@@ -198,6 +198,28 @@ mode_matrix! {
         assert!(provider.received().is_empty());
     };
 
+    a_webhook_token_is_checked_without_leaving_seal => |mode: Mode| async move {
+        let (instance, provider) = simple(mode).await;
+        let webhook = seal_format::policy::builder::webhook_token().unwrap();
+        let secret = instance.setup.seal("signing_secret", SIGNING_SECRET, &webhook).await;
+
+        assert!(instance.client.verify(verify_request(&secret, Vec::new(), SIGNING_SECRET.to_vec())).await.unwrap());
+        let record = instance.setup.audit_records().pop().unwrap();
+        assert_eq!((&record["op"], &record["verified"], &record["outcome"]), (&json!("verify"), &json!(true), &json!("ok")));
+
+        // Another token, and one that is right only as far as it goes.
+        assert!(!instance.client.verify(verify_request(&secret, Vec::new(), b"another-token".to_vec())).await.unwrap());
+        assert!(!instance.client.verify(verify_request(&secret, Vec::new(), SIGNING_SECRET[..8].to_vec())).await.unwrap());
+        assert_eq!(instance.setup.audit_records().pop().unwrap()["verified"], json!(false));
+
+        // A token covers no message, and can be sent nowhere.
+        let error = instance.client.verify(verify_request(&secret, b"{}".to_vec(), SIGNING_SECRET.to_vec())).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        let error = instance.client.send(get(&url(&provider, "/quiet"), &[("signing_secret", &secret)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert!(provider.received().is_empty());
+    };
+
     a_message_to_verify_is_sent_in_chunks_and_held_to_the_buffer_cap => |mode: Mode| async move {
         let (instance, _provider) = simple(mode).await;
         let webhook = seal_format::policy::builder::webhook_hmac(seal_format::policy::HmacHash::Sha256).unwrap();

@@ -2,9 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::id::FieldName;
+
 use super::{
-    Definition, Destination, Inject, JwtAudience, JwtClaims, JwtHeader, MAX_POLICY_BYTES, Part,
-    PgTls, Policy, ResponseFormat, Rule, RuleLimits, Scheme, SealResponse,
+    AwsScope, Definition, Destination, Inject, JwtAudience, JwtClaims, JwtHeader, MAX_POLICY_BYTES,
+    Part, PgTls, Policy, ResponseFormat, Rule, RuleLimits, Scheme, SealResponse,
 };
 use crate::error::FormatError;
 use crate::id::PolicyName;
@@ -111,6 +113,25 @@ fn rule(rule: &Rule, definitions: &BTreeMap<PolicyName, Definition>) -> Result<(
         )?;
     }
     required_form(rule)?;
+    // The caller names them, so they are never a sealed value's to supply.
+    for field in named_scope_fields(&rule.inject) {
+        require(
+            rule.plain.contains(field),
+            "a named region or service must be a plain field the rule lists",
+        )?;
+    }
+    if let Some(prefix) = &rule.allow_injected_path {
+        require(
+            matches!(rule.destination, Destination::Http { .. }),
+            "only HTTP rules allow an injected path",
+        )?;
+        // Two values cannot both fill the path.
+        require(
+            !matches!(rule.inject, Inject::Path { .. }),
+            "a path rule cannot allow another injected path",
+        )?;
+        injected_path(prefix)?;
+    }
     rule.limits.as_ref().map_or(Ok(()), limits)
 }
 
@@ -165,12 +186,14 @@ fn destination(destination: &Destination) -> Result<(), FormatError> {
             path_prefix.as_deref().map_or(Ok(()), self::path_prefix)
         }
         Destination::Postgres {
+            host,
             port,
             databases,
             user,
             tls,
             ..
         } => {
+            require(!host.is_pattern(), "a Postgres host cannot be a pattern")?;
             require(*port != 0, "port is zero")?;
             require(!databases.is_empty(), "a database list is empty")?;
             require(databases.len() <= MAX_DATABASES, "too many databases")?;
@@ -182,7 +205,7 @@ fn destination(destination: &Destination) -> Result<(), FormatError> {
             }
             part(user)?;
             match tls {
-                PgTls::VerifyFull => Ok(()),
+                PgTls::VerifyFull | PgTls::Unverified | PgTls::Plaintext => Ok(()),
                 PgTls::Ca(ca) => pem(ca),
             }
         }
@@ -263,10 +286,18 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         Inject::Path { prefix } => injected_path(prefix),
         Inject::JsonField { pointer } => json_pointer(pointer),
         Inject::ClientCert {
-            cert, chain, ca, ..
+            cert,
+            chain,
+            ca,
+            server_name,
         } => {
             pem_part(cert)?;
             chain.as_ref().map_or(Ok(()), pem_part)?;
+            // A certificate is verified against one name.
+            require(
+                server_name.as_ref().is_none_or(|name| !name.is_pattern()),
+                "a server name cannot be a pattern",
+            )?;
             ca.as_deref().map_or(Ok(()), pem)
         }
         Inject::AwsSigv4 {
@@ -282,7 +313,10 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         } => {
             if let Some(terms) = allow_presign {
                 presign(terms)?;
-                require(service == "s3", "only S3 URLs can be presigned")?;
+                require(
+                    service.fixed() == Some("s3"),
+                    "only S3 URLs can be presigned",
+                )?;
             }
             require(
                 !*allow_copy_from_any_bucket
@@ -303,6 +337,12 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             }
             aws_scope(region)?;
             aws_scope(service)?;
+            if let (AwsScope::Named(region), AwsScope::Named(service)) = (region, service) {
+                require(
+                    region.field != service.field,
+                    "the region and the service are named by different fields",
+                )?;
+            }
             part(access_key_id)?;
             session_token.as_ref().map_or(Ok(()), part)?;
             require(
@@ -385,8 +425,30 @@ fn presign_names_its_methods(rule: &Rule) -> Result<(), FormatError> {
 
 fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
     match (&rule.destination, &rule.inject) {
-        (Destination::Postgres { .. }, Inject::PgPassword { .. } | Inject::ClientCert { .. })
-        | (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion {}) => Ok(()),
+        (
+            Destination::Postgres { tls, .. },
+            Inject::PgPassword {
+                allow_md5,
+                allow_cleartext_password,
+                require_channel_binding,
+            },
+        ) => {
+            // To a server that may be anyone, only a login that never sends the
+            // password, or anything that stands in for it, will do.
+            require(
+                tls.verifies_the_server() || !(*allow_md5 || *allow_cleartext_password),
+                "MD5 and cleartext passwords need a verified server",
+            )?;
+            require(
+                *tls != PgTls::Plaintext || !*require_channel_binding,
+                "channel binding needs TLS",
+            )
+        }
+        (Destination::Postgres { tls, .. }, Inject::ClientCert { .. }) => require(
+            tls.verifies_the_server(),
+            "a client certificate needs a verified server",
+        ),
+        (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion {}) => Ok(()),
         (Destination::Postgres { .. }, _) => {
             refuse("a Postgres rule injects a password or a client certificate")
         }
@@ -396,11 +458,16 @@ fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
         (
             Destination::Http {
                 scheme,
+                host,
                 path_prefix,
                 ..
             },
             inject,
         ) => {
+            if matches!(inject, Inject::JwtAssertion { .. }) {
+                // The assertion names its audience, which is one endpoint.
+                require(!host.is_pattern(), "a JWT rule's host cannot be a pattern")?;
+            }
             if let Inject::AwsSigv4 {
                 allow_headers,
                 allow_copy_from_any_bucket,
@@ -597,15 +664,54 @@ fn xml_path(path: &str) -> Result<(), FormatError> {
     )
 }
 
-fn aws_scope(value: &str) -> Result<(), FormatError> {
-    require(
-        !value.is_empty()
-            && value.len() <= MAX_NAME_BYTES
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
-        "AWS region or service is not valid",
-    )
+fn aws_scope(scope: &AwsScope) -> Result<(), FormatError> {
+    match scope {
+        AwsScope::Fixed(value) => aws_scope_value(value),
+        AwsScope::Named(named) => {
+            require(
+                named.allowed.len() <= MAX_ALLOWED_VALUES,
+                "too many allowed regions or services",
+            )?;
+            for (index, value) in named.allowed.iter().enumerate() {
+                aws_scope_value(value)?;
+                require(
+                    !named.allowed[..index].contains(value),
+                    "an allowed region or service repeats",
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The plain fields a SigV4 rule's region and service are named by.
+fn named_scope_fields(inject: &Inject) -> Vec<&FieldName> {
+    let Inject::AwsSigv4 {
+        region, service, ..
+    } = inject
+    else {
+        return Vec::new();
+    };
+    [region, service]
+        .into_iter()
+        .filter_map(|scope| match scope {
+            AwsScope::Named(named) => Some(&named.field),
+            AwsScope::Fixed(_) => None,
+        })
+        .collect()
+}
+
+fn aws_scope_value(value: &str) -> Result<(), FormatError> {
+    require(is_aws_scope(value), "AWS region or service is not valid")
+}
+
+/// Whether a value is written as AWS writes regions and services.
+pub(super) fn is_aws_scope(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_NAME_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn pem(value: &str) -> Result<(), FormatError> {

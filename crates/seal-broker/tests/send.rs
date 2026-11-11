@@ -18,8 +18,9 @@ use seal_testkit::canary::{Canary, CanaryRegistry};
 use seal_testkit::log_capture::LogCapture;
 use serde_json::{Value, json};
 use support::{
-    Alpn, CannedResponse, HOST, Harness, MockProvider, Options, TLS_HOST, bearer, field,
-    plain_policy, plain_rule, read_body, read_text, request, request_body, rule_policy, url,
+    Alpn, CannedResponse, HOST, Harness, MockProvider, Options, TLS_HOST, bearer, field, item,
+    keyset, plain_policy, plain_rule, read_body, read_text, request, request_body, rule_policy,
+    url,
 };
 
 fn options_with_limits(change: impl FnOnce(&mut Limits)) -> Options {
@@ -344,6 +345,123 @@ async fn a_secret_in_the_path_reaches_the_provider_and_is_not_recorded_or_reflec
         .unwrap();
     assert_eq!(error.code(), ErrorCode::Conflict);
     assert_eq!(provider.received().len(), 1);
+}
+
+/// A rule for the names under a domain, as a provider with regional hosts needs: the
+/// credential goes to any of them, to the host the caller named, and nowhere else.
+#[tokio::test]
+async fn a_host_pattern_sends_to_the_names_under_its_domain_only() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let mut rule = plain_rule(&provider, &bearer());
+    rule["destination"]["host"] = json!(format!("*.{HOST}"));
+    let token = harness.seal("token", b"PATTERN-canary", &rule_policy(&rule));
+    let to = |host: &str| format!("http://{host}:{}/quiet", provider.port());
+
+    for host in [format!("emea.{HOST}"), format!("a.b.{HOST}")] {
+        let response = harness.get(&to(&host), &[("token", &token)]).await.unwrap();
+        read_body(response).await.unwrap();
+        let received = provider.received();
+        let last = received.last().unwrap();
+        assert_eq!(last.header("authorization"), Some("Bearer PATTERN-canary"));
+        assert_eq!(
+            last.header("host"),
+            Some(format!("{host}:{}", provider.port()).as_str())
+        );
+        assert_eq!(harness.audit.last().host.as_deref(), Some(host.as_str()));
+    }
+
+    let (lookups, sent) = (harness.lookups(), provider.received().len());
+    for host in [
+        HOST.to_owned(),
+        format!("evil{HOST}"),
+        format!("emea.{HOST}.evil.test"),
+        "evil.test".to_owned(),
+        "127.0.0.1".to_owned(),
+    ] {
+        let error = harness
+            .get(&to(&host), &[("token", &token)])
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), ErrorCode::PolicyDenied, "{host}");
+    }
+    // Refused before any lookup, and nothing was sent.
+    assert_eq!(harness.lookups(), lookups);
+    assert_eq!(provider.received().len(), sent);
+}
+
+/// Telegram's `setWebhook`: the bot token in the path, and the webhook's secret token
+/// in the form, which its rule allows under that prefix and pins to one webhook URL.
+#[tokio::test]
+async fn a_value_whose_rule_allows_the_prefix_is_sent_with_a_secret_in_the_path() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let bot = plain_policy(&provider, &json!({ "path": { "prefix": "/bot{}" } }));
+    let token = harness.seal("token", b"123456:PATH-canary_value", &bot);
+    let mut rule = plain_rule(
+        &provider,
+        &json!({ "form_field": { "name": "secret_token" } }),
+    );
+    rule["allow_injected_path"] = json!("/bot{}");
+    rule["destination"]["path_prefix"] = json!("/setWebhook");
+    rule["require_form"] = json!({ "url": ["https://app.example.com/hook"] });
+    let policy = Policy::from_json(
+        json!({ "rules": [rule], "verify": "equals" })
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let secret = harness.seal("webhook_secret", b"FORM-canary_value", &policy);
+
+    let register = |body: &'static [u8]| {
+        let mut send = request(
+            &url(&provider, "/setWebhook"),
+            &[("token", &token), ("webhook_secret", &secret)],
+        );
+        send.method = Method::POST;
+        send.headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        send.body = request_body(body);
+        harness.broker.send(send)
+    };
+    read_body(
+        register(b"url=https%3A%2F%2Fapp.example.com%2Fhook")
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let received = &provider.received()[0];
+    assert_eq!(received.uri, "/bot123456:PATH-canary_value/setWebhook");
+    assert_eq!(
+        received.body,
+        b"url=https%3A%2F%2Fapp.example.com%2Fhook&secret_token=FORM-canary_value"
+    );
+    assert_eq!(harness.audit.last().path.as_deref(), Some("/setWebhook"));
+
+    // Registered for another URL, Telegram would send the secret there.
+    let error = register(b"url=https%3A%2F%2Fattacker.example%2Fhook")
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), ErrorCode::PolicyDenied);
+    assert!(!format!("{error:?} {error}").contains("canary"));
+    assert_eq!(provider.received().len(), 1);
+
+    // The same value still says whether a webhook's token is right.
+    let verify = seal_broker::VerifyRequest {
+        caller: "test-app".to_owned(),
+        keyset: keyset(),
+        item: item(),
+        field: field("webhook_secret"),
+        value: secret.clone().into(),
+        message: request_body(b""),
+        mac: b"FORM-canary_value".to_vec(),
+    };
+    assert!(harness.broker.verify(verify).await.unwrap());
 }
 
 #[tokio::test]

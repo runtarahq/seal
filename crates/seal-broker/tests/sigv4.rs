@@ -114,6 +114,11 @@ fn set_length(send: &mut seal_broker::SendRequest, length: usize) {
 
 /// Checks the received `Authorization` with the AWS SDK, signing the same headers.
 fn assert_signed_as_the_sdk_would(received: &Received, port: u16) {
+    assert_signed_as_the_sdk_would_for(received, port, "us-east-1", "s3");
+}
+
+/// The same, for the region and service a request was signed for.
+fn assert_signed_as_the_sdk_would_for(received: &Received, port: u16, region: &str, service: &str) {
     let authorization = received.header("authorization").expect("signed");
     let signed_headers = authorization
         .split("SignedHeaders=")
@@ -157,8 +162,8 @@ fn assert_signed_as_the_sdk_would(received: &Received, port: u16) {
     settings.percent_encoding_mode = PercentEncodingMode::Single;
     let params = v4::SigningParams::builder()
         .identity(&identity)
-        .region("us-east-1")
-        .name("s3")
+        .region(region)
+        .name(service)
         .time(std::time::UNIX_EPOCH + Duration::from_secs(seconds))
         .settings(settings)
         .build()
@@ -627,4 +632,137 @@ async fn a_copy_within_the_prefix_is_signed_and_one_outside_is_refused_before_dn
     assert_eq!(error.code(), ErrorCode::BadRequest);
     assert_eq!(harness.lookups(), lookups);
     assert_eq!(provider.received().len(), 1);
+}
+
+/// A rule whose region and service the caller names with each request.
+fn named(provider: &MockProvider, service: Value) -> Policy {
+    let mut rule = plain_rule(
+        provider,
+        &json!({ "aws_sigv4": {
+            "region": { "field": "aws_region", "allowed": ["us-east-1", "eu-west-1"] },
+            "service": service,
+            "access_key_id": { "literal": KEY_ID },
+            "payload": ["computed"],
+        } }),
+    );
+    rule["plain"] = json!(["aws_region", "aws_service"]);
+    policy(&rule)
+}
+
+fn naming(
+    harness: &Harness,
+    provider: &MockProvider,
+    policy: &Policy,
+    plain: &[(&str, &str)],
+) -> seal_broker::SendRequest {
+    let secret = harness.seal("secret_key", SECRET, policy);
+    let mut send = request(&url(provider, "/"), &[("secret_key", &secret)]);
+    send.method = Method::POST;
+    send.body = support::request_body(b"Action=ListQueues");
+    send.plain = plain
+        .iter()
+        .map(|(name, value)| (field(name), (*value).to_owned()))
+        .collect();
+    send
+}
+
+/// One credential, used for whichever service each request is for: the scope signed is
+/// the one the caller named.
+#[tokio::test]
+async fn a_request_names_the_region_and_service_it_is_signed_for() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let policy = named(&provider, json!({ "field": "aws_service" }));
+
+    for (region, service) in [
+        ("us-east-1", "sqs"),
+        ("eu-west-1", "dynamodb"),
+        ("eu-west-1", "s3"),
+    ] {
+        let plain = [("aws_region", region), ("aws_service", service)];
+        let response = harness
+            .broker
+            .send(naming(&harness, &provider, &policy, &plain))
+            .await
+            .unwrap();
+        read_body(response).await.unwrap();
+        let received = provider.received();
+        let authorization = received.last().unwrap().header("authorization").unwrap();
+        assert!(
+            authorization.contains(&format!("/{region}/{service}/aws4_request,")),
+            "{authorization}"
+        );
+        assert_signed_as_the_sdk_would_for(
+            received.last().unwrap(),
+            provider.port(),
+            region,
+            service,
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_region_or_service_that_is_missing_malformed_or_not_allowed_is_refused_before_dns() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let any = named(&provider, json!({ "field": "aws_service" }));
+    let listed = named(
+        &provider,
+        json!({ "field": "aws_service", "allowed": ["sqs", "sns"] }),
+    );
+
+    for (policy, plain) in [
+        // Not named at all.
+        (&any, vec![]),
+        (&any, vec![("aws_region", "us-east-1")]),
+        (&any, vec![("aws_service", "sqs")]),
+        // Not written as a service or region is: it would change the scope signed.
+        (
+            &any,
+            vec![("aws_region", "us-east-1"), ("aws_service", "SQS")],
+        ),
+        (&any, vec![("aws_region", "us-east-1"), ("aws_service", "")]),
+        (
+            &any,
+            vec![
+                ("aws_region", "us-east-1"),
+                ("aws_service", "sqs/aws4_request"),
+            ],
+        ),
+        (
+            &any,
+            vec![("aws_region", "us-east-1/sqs"), ("aws_service", "sqs")],
+        ),
+        (
+            &any,
+            vec![("aws_region", "us-east-1"), ("aws_service", "sqs\n")],
+        ),
+        // Not among those the rule lists.
+        (
+            &any,
+            vec![("aws_region", "ap-south-1"), ("aws_service", "sqs")],
+        ),
+        (
+            &listed,
+            vec![("aws_region", "us-east-1"), ("aws_service", "s3")],
+        ),
+    ] {
+        let error = harness
+            .broker
+            .send(naming(&harness, &provider, policy, &plain))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), ErrorCode::PolicyDenied, "{plain:?}");
+    }
+    assert_eq!((harness.lookups(), harness.connects()), (0, 0));
+    assert!(provider.received().is_empty());
+
+    // What the rule lists is signed for.
+    let plain = [("aws_region", "us-east-1"), ("aws_service", "sns")];
+    harness
+        .broker
+        .send(naming(&harness, &provider, &listed, &plain))
+        .await
+        .unwrap();
 }

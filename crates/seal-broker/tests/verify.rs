@@ -216,3 +216,80 @@ async fn each_hash_verifies_only_its_own_codes() {
         );
     }
 }
+
+/// What Telegram sends back in `X-Telegram-Bot-Api-Secret-Token`.
+const TOKEN: &[u8] = b"TOKEN-canary-secret_token";
+
+fn token_policy() -> Policy {
+    Policy::from_json(br#"{"verify":"equals"}"#).unwrap()
+}
+
+#[tokio::test]
+async fn a_token_matches_only_itself_and_the_answer_is_recorded() {
+    let harness = Harness::new();
+    let secret = harness.seal("signing_secret", TOKEN, &token_policy());
+    let verify = |presented: &[u8]| {
+        harness
+            .broker
+            .verify(request(secret.clone(), b"", presented.to_vec()))
+    };
+
+    assert!(verify(TOKEN).await.unwrap());
+    let record = harness.audit.last();
+    assert_eq!((record.op, record.verified), ("verify", Some(true)));
+    assert_eq!(record.outcome, Outcome::Ok);
+
+    for presented in [
+        &b""[..],
+        &TOKEN[..TOKEN.len() - 1],
+        b"TOKEN-canary-secret_tokeN",
+        b"TOKEN-canary-secret_token ",
+    ] {
+        assert!(!verify(presented).await.unwrap());
+        assert_eq!(harness.audit.last().verified, Some(false));
+    }
+    // Nor does the HMAC a signing secret would have made.
+    let key = hmac::Key::new(hmac::HMAC_SHA256, TOKEN);
+    assert!(!verify(hmac::sign(&key, b"").as_ref()).await.unwrap());
+    assert_no_traffic(&harness);
+}
+
+/// A token says nothing about a message, so one is not accepted alongside it.
+#[tokio::test]
+async fn a_token_is_not_checked_with_a_message() {
+    let harness = Harness::new();
+    let secret = harness.seal("signing_secret", TOKEN, &token_policy());
+    let error = harness
+        .broker
+        .verify(request(secret, MESSAGE, TOKEN.to_vec()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::BadRequest);
+    assert!(!format!("{error:?} {error}").contains("canary"));
+    assert_eq!(harness.audit.last().outcome, Outcome::Refused);
+}
+
+#[tokio::test]
+async fn a_value_sealed_empty_matches_no_token() {
+    let harness = Harness::new();
+    let secret = harness.seal("signing_secret", b"", &token_policy());
+    let valid = harness
+        .broker
+        .verify(request(secret, b"", Vec::new()))
+        .await
+        .unwrap();
+    assert!(!valid);
+}
+
+/// A signing secret is not a token: presenting it does not verify.
+#[tokio::test]
+async fn an_hmac_secret_is_not_compared_as_a_token() {
+    let harness = Harness::new();
+    let secret = harness.seal("signing_secret", SECRET, &webhook());
+    let valid = harness
+        .broker
+        .verify(request(secret, b"", SECRET.to_vec()))
+        .await
+        .unwrap();
+    assert!(!valid);
+}

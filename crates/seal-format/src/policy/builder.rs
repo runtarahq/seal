@@ -2,14 +2,18 @@
 //!
 //! Every builder validates what it returns, and accepts `https` endpoints only.
 //! A rule that needs plain HTTP or a private address has to be written out, so
-//! that the weakening flag is visible where it is used.
+//! that the weakening flag is visible where it is used. A builder sets another
+//! weakening option only where it is named for it or takes it as an argument.
+//!
+//! An endpoint's host may be a pattern for the names under a domain, such as
+//! `https://*.example.com/`, wherever a rule's host may be one.
 
 use std::collections::BTreeMap;
 
 use super::{
-    AzureService, Definition, Destination, HmacHash, Host, Inject, JwtAlg, JwtAudience, JwtClaims,
-    JwtHeader, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme, SealResponse,
-    SealedField, Verify,
+    AwsScope, AzureService, Definition, Destination, HmacHash, Host, Inject, JwtAlg, JwtAudience,
+    JwtClaims, JwtHeader, Method, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme,
+    SealResponse, SealedField, Verify,
 };
 use crate::error::FormatError;
 use crate::id::{FieldName, PolicyName};
@@ -161,6 +165,61 @@ pub fn webhook_hmac(hash: HmacHash) -> Result<Policy, FormatError> {
     })
 }
 
+/// A token that only checks messages: one a provider sends back as it is with each
+/// webhook, such as Telegram's `secret_token`. It can be sent nowhere, and a caller
+/// learns only whether a token is this one.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if the policy cannot be serialised.
+pub fn webhook_token() -> Result<Policy, FormatError> {
+    finish(Policy {
+        rules: Vec::new(),
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: Some(Verify::Equals),
+    })
+}
+
+/// A webhook token that is also sent to the provider when the webhook is registered,
+/// by an API that takes its own credential in the URL's path: Telegram's `setWebhook`
+/// takes the bot token as `/bot<token>` and the webhook's `secret_token` in the form.
+///
+/// The value verifies as [`webhook_token`]'s does. It may also be sent, by `POST`, in
+/// the form field `token_field` of `register_url`, with a value whose rule injects
+/// `path_prefix`, and only where the form's `url_field` is `webhook_url`: the provider
+/// sends the token to whatever URL is registered, so the rule holds it to this one.
+/// `register_url` is the URL the caller names, without the injected prefix.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if `register_url` is not a valid `https`
+/// URL, `path_prefix` is not whole path segments with one `{}`, or a field's name or
+/// the webhook's URL cannot be required of a form.
+pub fn registered_webhook_token(
+    register_url: &str,
+    path_prefix: &str,
+    token_field: &str,
+    url_field: &str,
+    webhook_url: &str,
+) -> Result<Policy, FormatError> {
+    let mut rule = Rule::new(
+        endpoint(register_url)?,
+        Inject::FormField {
+            name: token_field.to_owned(),
+        },
+    );
+    rule.methods = Some(vec![Method::Post]);
+    rule.allow_injected_path = Some(path_prefix.to_owned());
+    rule.require_form = BTreeMap::from([(url_field.to_owned(), vec![webhook_url.to_owned()])]);
+    finish(Policy {
+        rules: vec![rule],
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: Some(Verify::Equals),
+    })
+}
+
 /// A password sent with basic auth.
 ///
 /// # Errors
@@ -296,13 +355,46 @@ pub fn aws(
     session_token: Option<PartSource>,
     payload: Vec<PayloadMode>,
 ) -> Result<CredentialPolicies, FormatError> {
+    aws_scoped(
+        region.into(),
+        service.into(),
+        endpoint_url,
+        access_key_id,
+        session_token,
+        payload,
+    )
+}
+
+/// A secret access key used with AWS Signature Version 4, whose region or service may
+/// be named by the caller with each request: for one credential used with whatever
+/// service a request is for. A [`AwsScope::Named`] one is a plain field, which the rule
+/// then lists; with no values `allowed`, the credential's own permissions are all that
+/// bound the services it is used for.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if `endpoint_url` is not a valid `https`
+/// URL, or the region, service or payload modes are not valid.
+pub fn aws_scoped(
+    region: AwsScope,
+    service: AwsScope,
+    endpoint_url: &str,
+    access_key_id: PartSource,
+    session_token: Option<PartSource>,
+    payload: Vec<PayloadMode>,
+) -> Result<CredentialPolicies, FormatError> {
     let destination = endpoint(endpoint_url)?;
     let mut parts = Parts::new(&destination);
     let access_key_id = parts.add(access_key_id);
     let session_token = session_token.map(|source| parts.add(source));
+    for scope in [&region, &service] {
+        if let AwsScope::Named(named) = scope {
+            parts.plain.push(named.field.clone());
+        }
+    }
     parts.finish(Inject::AwsSigv4 {
-        region: region.to_owned(),
-        service: service.to_owned(),
+        region,
+        service,
         access_key_id,
         session_token,
         payload,
@@ -366,13 +458,33 @@ pub fn postgres(
     databases: Vec<String>,
     user: &str,
 ) -> Result<Policy, FormatError> {
+    postgres_with_tls(host, port, databases, user, PgTls::VerifyFull)
+}
+
+/// A Postgres password with only SCRAM allowed, for a server reached as `tls` says:
+/// verified against a CA of its own with [`PgTls::Ca`], or, where it cannot be
+/// verified, with [`PgTls::Unverified`] or [`PgTls::Plaintext`]. Those two give up the
+/// session to anyone on the path, though not the password, and plaintext also needs
+/// the deployment to allow it.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if the host, port, databases or CA are not
+/// valid.
+pub fn postgres_with_tls(
+    host: &str,
+    port: u16,
+    databases: Vec<String>,
+    user: &str,
+    tls: PgTls,
+) -> Result<Policy, FormatError> {
     finish(Policy::from_rule(Rule::new(
         Destination::Postgres {
             host: Host::new(host)?,
             port,
             databases,
             user: Part::Literal(user.to_owned()),
-            tls: PgTls::VerifyFull,
+            tls,
             allow_replication: false,
         },
         Inject::PgPassword {
@@ -644,6 +756,213 @@ mod tests {
             String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
             r#"{"verify":{"hmac":{"hash":"sha256"}}}"#
         );
+    }
+
+    #[test]
+    fn a_webhook_token_has_no_rules_and_only_verifies() {
+        let policy = webhook_token().unwrap();
+        assert!(policy.rules.is_empty() && !policy.shared);
+        assert_eq!(policy.canonical_json().unwrap(), br#"{"verify":"equals"}"#);
+    }
+
+    #[test]
+    fn an_endpoint_may_name_a_host_pattern() {
+        let policy = bearer("https://*.smba.trafficmanager.net/v3/").unwrap();
+        assert_eq!(
+            host_and_prefix(&policy.rules[0]),
+            (
+                "*.smba.trafficmanager.net".to_owned(),
+                Some("/v3/".to_owned())
+            )
+        );
+        for url in [
+            "https://*.com/",
+            "https://*/",
+            "https://api.*.example.com/",
+            "https://*api.example.com/",
+        ] {
+            assert!(bearer(url).is_err(), "{url}");
+        }
+        // Where one host is meant, a pattern is still refused.
+        let mut config = oauth(OAuthClientAuth::PrivateKeyJwt(jwt_options()));
+        config.token_url = "https://*.example.com/oauth/token".to_owned();
+        assert!(oauth_client(&config).is_err());
+    }
+
+    #[test]
+    fn a_registered_webhook_token_verifies_and_is_sent_only_to_register_its_own_webhook() {
+        let policy = registered_webhook_token(
+            "https://api.telegram.org/setWebhook",
+            "/bot{}",
+            "secret_token",
+            "url",
+            "https://app.example.com/telegram",
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
+            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path_prefix":"/setWebhook"},"methods":["POST"],"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
+        );
+        assert!(!policy.shared);
+        // It goes with the value `path_secret` makes for the same prefix.
+        let bot = path_secret("https://api.telegram.org", "/bot{}").unwrap();
+        assert_eq!(
+            bot.rules[0].inject,
+            Inject::Path {
+                prefix: policy.rules[0].allow_injected_path.clone().unwrap()
+            }
+        );
+
+        let with = |register: &str, prefix: &str, field: &str, webhook: &str| {
+            registered_webhook_token(register, prefix, field, "url", webhook)
+        };
+        let (register, webhook) = (
+            "https://api.telegram.org/setWebhook",
+            "https://app.example.com/telegram",
+        );
+        with(
+            "http://api.telegram.org/setWebhook",
+            "/bot{}",
+            "secret_token",
+            webhook,
+        )
+        .unwrap_err();
+        with(register, "/bot", "secret_token", webhook).unwrap_err();
+        with(register, "/bot{}/", "secret_token", webhook).unwrap_err();
+        with(register, "/bot{}", "", webhook).unwrap_err();
+        with(register, "/bot{}", "secret_token", "").unwrap_err();
+        // The field that names the webhook cannot be the one the token goes in.
+        registered_webhook_token(register, "/bot{}", "url", "url", webhook).unwrap_err();
+    }
+
+    #[test]
+    fn aws_scoped_lists_the_fields_the_caller_names_the_scope_in() {
+        let named = |field: &str, allowed: &[&str]| {
+            AwsScope::Named(crate::policy::NamedScope {
+                field: name(field),
+                allowed: allowed.iter().map(|value| (*value).to_owned()).collect(),
+            })
+        };
+        let policies = aws_scoped(
+            named("aws_region", &["eu-west-1", "us-east-1"]),
+            named("aws_service", &[]),
+            "https://*.amazonaws.com",
+            PartSource::Plain(name("access_key_id")),
+            Some(PartSource::Sealed(name("session_token"))),
+            vec![PayloadMode::Computed],
+        )
+        .unwrap();
+        let rule = &policies.secret.rules[0];
+        assert_eq!(
+            rule.plain,
+            [
+                name("access_key_id"),
+                name("aws_region"),
+                name("aws_service")
+            ]
+        );
+        assert_eq!(host_and_prefix(rule).0, "*.amazonaws.com");
+        assert!(policies.companions.contains_key(&name("session_token")));
+        let canonical = String::from_utf8(policies.secret.canonical_json().unwrap()).unwrap();
+        assert!(canonical.contains(
+            r#""region":{"field":"aws_region","allowed":["eu-west-1","us-east-1"]},"service":{"field":"aws_service"}"#
+        ));
+
+        // Only the service named: the region stays fixed, and one plain field is added.
+        let policies = aws_scoped(
+            "eu-west-1".into(),
+            named("aws_service", &["sqs", "sns"]),
+            "https://storage.example.com",
+            PartSource::Literal("AKIA".to_owned()),
+            None,
+            vec![PayloadMode::Computed],
+        )
+        .unwrap();
+        assert_eq!(policies.secret.rules[0].plain, [name("aws_service")]);
+
+        // Fixed, it is what `aws` makes.
+        let fixed = |make: fn() -> Result<CredentialPolicies, FormatError>| make().unwrap();
+        assert_eq!(
+            fixed(|| aws_scoped(
+                "eu-west-1".into(),
+                "s3".into(),
+                "https://s3.eu-west-1.amazonaws.com",
+                PartSource::Literal("AKIA".to_owned()),
+                None,
+                vec![PayloadMode::Computed],
+            )),
+            fixed(|| aws(
+                "eu-west-1",
+                "s3",
+                "https://s3.eu-west-1.amazonaws.com",
+                PartSource::Literal("AKIA".to_owned()),
+                None,
+                vec![PayloadMode::Computed],
+            ))
+        );
+
+        // What may be named is held to what a fixed one is, and to two fields.
+        for (region, service) in [
+            ("eu-west-1".into(), named("aws_service", &["S3"])),
+            (named("scope", &[]), named("scope", &[])),
+            ("EU".into(), named("aws_service", &[])),
+        ] {
+            aws_scoped(
+                region,
+                service,
+                "https://storage.example.com",
+                PartSource::Literal("AKIA".to_owned()),
+                None,
+                vec![PayloadMode::Computed],
+            )
+            .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn postgres_with_tls_says_how_the_server_is_reached_and_keeps_scram_only() {
+        let with = |tls: PgTls| {
+            postgres_with_tls(
+                "db.example.com",
+                5432,
+                vec!["app".to_owned()],
+                "app_user",
+                tls,
+            )
+        };
+        assert_eq!(
+            with(PgTls::VerifyFull).unwrap(),
+            postgres("db.example.com", 5432, vec!["app".to_owned()], "app_user").unwrap()
+        );
+        for (tls, written) in [
+            (PgTls::Unverified, r#""tls":"unverified""#),
+            (PgTls::Plaintext, r#""tls":"plaintext""#),
+            (
+                PgTls::Ca("-----BEGIN CERTIFICATE-----".to_owned()),
+                r#""tls":{"ca":"-----BEGIN CERTIFICATE-----"}"#,
+            ),
+        ] {
+            let policy = with(tls).unwrap();
+            let canonical = String::from_utf8(policy.canonical_json().unwrap()).unwrap();
+            assert!(canonical.contains(written), "{canonical}");
+            assert_eq!(
+                policy.rules[0].inject,
+                Inject::PgPassword {
+                    allow_md5: false,
+                    allow_cleartext_password: false,
+                    require_channel_binding: false,
+                }
+            );
+        }
+        with(PgTls::Ca("not pem".to_owned())).unwrap_err();
+        postgres_with_tls(
+            "*.example.com",
+            5432,
+            vec!["app".to_owned()],
+            "u",
+            PgTls::Unverified,
+        )
+        .unwrap_err();
     }
 
     #[test]

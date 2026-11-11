@@ -44,18 +44,47 @@ rule's secret. An injection names only the other parts of a credential, each as
 | `limits` | Tighter limits for this rule |
 | `allow_private_destination` | See [Weakening options](#weakening-options) |
 | `allow_plain_http` | See [Weakening options](#weakening-options) |
+| `allow_injected_path` | See [Weakening options](#weakening-options) |
 
 ## Destinations
 
 ### HTTP
 
-`scheme`, `host` and `port` are exact. `port` defaults by scheme.
+`scheme` and `port` are exact, and so is `host` unless it is a pattern. `port` defaults by
+scheme.
 
 - `host` is a DNS name or IP literal, already lowercase and IDNA-normalised, with no
-  wildcards or trailing dot. Write `xn--bcher-kva.example`, not `bücher.example`.
+  trailing dot. Write `xn--bcher-kva.example`, not `bücher.example`.
+- `host` may instead be a pattern, `*.` and a domain of at least two labels, for a
+  provider whose API is on many hosts. See [Host patterns](#host-patterns).
 - `path_prefix` starts with `/` and matches on segment boundaries. It may not have
   `.` or `..` segments, empty segments, or an encoded dot or separator (`%2e`, `%2f`,
   `%5c`).
+
+### Host patterns
+
+Some providers serve one API from many hosts, named per region or per tenant, and tell
+the application which to call. A pattern allows every name under one domain:
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "*.smba.trafficmanager.net" },
+  "inject": { "header": { "name": "Authorization", "format": "Bearer {}" } }
+}] }
+```
+
+It matches a host that ends with the domain on a label boundary, with one label or
+several before it: `emea.smba.trafficmanager.net` and `a.b.smba.trafficmanager.net`, but
+not `smba.trafficmanager.net` itself, which needs a rule of its own, and not
+`evilsmba.trafficmanager.net`. The `*` only leads, as a whole label; `*.com` and a
+pattern under an IP literal are refused. TLS still verifies the certificate against the
+host the request named.
+
+A pattern sends the secret to whoever can serve a name under the domain. Use one only
+for a domain whose every name is the provider's: not one where customers get names of
+their own, such as a hosting or storage domain, where anyone could register a name and
+ask for the credential. A Postgres destination, a `jwt_assertion` rule and a client
+certificate's `server_name` take one host and no pattern.
 
 ### Postgres
 
@@ -78,7 +107,7 @@ rule's secret. An injection names only the other parts of a credential, each as
 |---|---|
 | `databases` | The databases a session may use. At least one |
 | `user` | The user a session logs in as |
-| `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM |
+| `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM. `"unverified"` and `"plaintext"` are [weakening options](#weakening-options) |
 | `allow_replication` | Allows a replication session. Off by default |
 
 ## Injections
@@ -135,8 +164,28 @@ bounds what follows the injected prefix, not the whole path sent: with a prefix 
 
 The secret is percent-encoded, so it cannot add a segment or end the path, and one that
 would make a `.` or `..` segment is refused. A response header that repeats it as written
-in the path, such as a redirect's `Location`, is dropped. No other sealed value may be
-presented with one that has this injection, since it changes where the request goes.
+in the path, such as a redirect's `Location`, is dropped.
+
+A path injection changes where the request goes after every rule matched the caller's
+path, and anyone can seal a value with one. So another sealed value may be presented
+with it only if that value's own rule allows exactly this prefix, with
+`allow_injected_path`. Telegram's `setWebhook` takes the bot token in the path and the
+webhook's `secret_token` in the body:
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "api.telegram.org", "path_prefix": "/setWebhook" },
+  "methods": ["POST"],
+  "inject": { "form_field": { "name": "secret_token" } },
+  "allow_injected_path": "/bot{}",
+  "require_form": { "url": ["https://app.example.com/telegram"] }
+}], "verify": "equals" }
+```
+
+The rule's `path_prefix` still bounds what follows the injected prefix. What fills the
+prefix is whichever value is presented, which may be another bot's token, so the rule
+must be safe for any of them: here `require_form` holds the webhook to one URL, since
+Telegram sends the secret to whatever URL is registered.
 
 ### `form_field`
 
@@ -235,6 +284,37 @@ with virtual-hosted URLs: a copy could then read the others.
   } }
 }] }
 ```
+
+`region` and `service` are usually fixed, so that a signature is good for one service in
+one region. A credential used for whatever service each request is for, such as one an
+agent uses across an account, has them named by the caller instead: each is then a plain
+field the rule lists, with the values `allowed` if they can be listed.
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "*.amazonaws.com" },
+  "inject": { "aws_sigv4": {
+    "region": { "field": "aws_region", "allowed": ["eu-west-1", "us-east-1"] },
+    "service": { "field": "aws_service" },
+    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
+    "payload": ["computed"]
+  } },
+  "plain": ["aws_region", "aws_service"]
+}] }
+```
+
+The caller sends `aws_region` and `aws_service` as plain fields with each request,
+written as AWS writes them, such as `sqs` and `eu-west-1`; a request that leaves one
+out, or names one the rule does not allow, is refused before anything is sent. seal
+signs for what was named and does not check it against the host: a request signed for
+the wrong service is refused by AWS. Nothing in such a policy then holds the credential
+to a service, so its own IAM permissions are the limit, and they should be narrow. With
+a custom endpoint, keep `host` exact. A rule that allows presigning fixes its service.
+
+Customers serve names of their own under `amazonaws.com`, which a
+[host pattern](#host-patterns) is otherwise wrong for. SigV4 is the exception: the secret
+access key is never sent, only a signature that is good for the one host, path and body
+it was made for, so a host that is not AWS's learns nothing it can use elsewhere.
 
 `allow_presign` also lets the caller have a presigned URL for an object the rule allows,
 lasting at most `max_expiry_s`. It is a [weakening option](#weakening-options): the URL
@@ -557,6 +637,21 @@ compares the whole code in constant time and never returns one, so a caller can 
 codes but cannot make them, nor find one a byte at a time. The builder's
 `webhook_hmac(hash)` makes this policy.
 
+Some providers sign nothing: they send back, with each webhook, a token the application
+chose when it registered the webhook, such as Telegram's `secret_token` in
+`X-Telegram-Bot-Api-Secret-Token`. `equals` checks such a token:
+
+```json
+{ "verify": "equals" }
+```
+
+The caller presents the token that came with the webhook in place of the code, and no
+message: the token does not cover one, and seal refuses a call that sends one. seal
+compares the whole token in constant time, and a value sealed empty matches nothing. A
+caller can try tokens, at the rate its keyset allows, so the token must be long and
+random: seal a generated one, not one a person chose. The builder's `webhook_token()`
+makes this policy.
+
 A platform's own webhook secret, such as one Slack app's for every tenant, can also be
 `shared`:
 
@@ -596,10 +691,13 @@ Options that weaken a guarantee are named for it, and are off by default.
 |---|---|---|
 | `allow_private_destination` | A rule | Allows an internal address (loopback, RFC 1918, CGNAT, unique-local), if the deployment's configuration also permits it, and every value presented with this one sets it too. Never a link-local or metadata address |
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
+| `allow_injected_path` | A rule | Lets the value go with one that [injects into the path](#path) with exactly this prefix. The request is then sent under that prefix, filled by whichever such value is presented |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |
 | `allow_headers` | `aws_sigv4` | Lets the caller set ACL, grant or copy headers |
 | `allow_copy_from_any_bucket` | `aws_sigv4` | Lets a copy read any object on the rule's host, for a rule with no path prefix. Only for an endpoint addressed by path |
 | `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
+| `tls: "unverified"` | A Postgres destination | TLS with whatever certificate the server presents, as libpq's `sslmode=require`. Anyone on the path can pass as the server and read the session. SCRAM only |
+| `tls: "plaintext"` | A Postgres destination | No TLS, as libpq's `sslmode=disable`. Anyone on the path can read and change the session. SCRAM only, and only where the operator sets `honour_plaintext_postgres_rules` |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
 | `require_channel_binding` | `pg_password` | Not a weakening: refuses any login but SCRAM-SHA-256-PLUS. Cannot go with the two above |
@@ -617,8 +715,10 @@ Options that weaken a guarantee are named for it, and are off by default.
 ## The builder
 
 `seal_format::policy::builder` produces correct policies for the common cases, with companion
-rules generated. It accepts `https` endpoints only, so a weakening option has to be written out
-where it is used.
+rules generated. It accepts `https` endpoints only, and sets a weakening option only where a
+function is named for it or takes it as an argument, so that it is visible where it is used;
+plain HTTP and private addresses have to be written out. An endpoint's host may be a
+[pattern](#host-patterns), as in `https://*.example.com/`.
 
 | Function | Produces |
 |---|---|
@@ -628,10 +728,14 @@ where it is used.
 | `basic(api_base, username)` | A password for basic auth |
 | `oauth_client(config)` | Policies for an OAuth client secret or signing key, and for a password. Its tokens are limited to where they belong, and its refresh token's definition names itself |
 | `aws(region, service, endpoint, access_key_id, session_token, payload)` | A secret access key |
+| `aws_scoped(region, service, endpoint, access_key_id, session_token, payload)` | A secret access key whose region or service the caller may name with each request, in a plain field the rule then lists |
 | `azure(account, service, endpoint)` | An account key |
 | `client_cert(api_base, cert, chain)` | A client certificate's private key |
 | `webhook_hmac(hash)` | A webhook signing secret, which only verifies |
+| `webhook_token()` | A token a provider sends back with each webhook, which only verifies |
+| `registered_webhook_token(register_url, path_prefix, token_field, url_field, webhook_url)` | Such a token that is also sent when the webhook is registered, with a secret [in the path](#path), and only for that webhook's URL: Telegram's `setWebhook` |
 | `postgres(host, port, databases, user)` | A Postgres password, with SCRAM only and the server verified |
+| `postgres_with_tls(host, port, databases, user, tls)` | A Postgres password, with SCRAM only, for a server verified against its own CA or [not verified](postgres.md#servers-that-cannot-be-verified) |
 
 A part of a composite credential comes from a `PartSource`: `Literal` fixes it in the policy,
 `Plain` lists it in `plain`, and `Sealed` generates a companion policy for that field, returned

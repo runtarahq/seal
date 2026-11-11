@@ -235,6 +235,9 @@ fn a_policy_may_verify_instead_of_having_rules() {
         let canonical = policy.canonical_json().unwrap();
         assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
     }
+    let equals = parse(&json!({ "verify": "equals" })).unwrap();
+    assert_eq!(equals.verify, Some(Verify::Equals));
+    assert_eq!(equals.canonical_json().unwrap(), br#"{"verify":"equals"}"#);
     // And may do both, or be shared: a platform's webhook secret.
     parse(&json!({ "rules": [bearer_rule()], "verify": { "hmac": { "hash": "sha256" } } }))
         .unwrap();
@@ -243,6 +246,10 @@ fn a_policy_may_verify_instead_of_having_rules() {
     for verify in [
         json!({}),
         json!("hmac"),
+        json!("equal"),
+        json!("Equals"),
+        json!({ "equals": {} }),
+        json!({ "equals": { "hash": "sha256" } }),
         json!({ "hmac": {} }),
         json!({ "hmac": { "hash": "md5" } }),
         json!({ "hmac": { "hash": "SHA256" } }),
@@ -286,7 +293,6 @@ fn a_value_sealed_from_a_response_never_verifies() {
 fn refuses_hosts_that_are_not_normalised() {
     for host in [
         "API.example.com",
-        "*.example.com",
         "*",
         "example.com.",
         "bücher.example",
@@ -316,6 +322,100 @@ fn accepts_normalised_hosts_and_ip_literals() {
     ] {
         with_destination(https_host(host)).unwrap_or_else(|e| panic!("{host}: {e}"));
     }
+}
+
+#[test]
+fn a_host_may_be_a_pattern_for_the_names_under_a_domain() {
+    for host in [
+        "*.example.com",
+        "*.smba.trafficmanager.net",
+        "*.xn--bcher-kva.example",
+        "*.a.b.c.example.com",
+    ] {
+        let policy = with_destination(https_host(host)).unwrap_or_else(|e| panic!("{host}: {e}"));
+        let canonical = policy.canonical_json().unwrap();
+        assert_eq!(Policy::from_json(&canonical).unwrap(), policy, "{host}");
+    }
+    for host in [
+        // Everything under a top-level name, or under nothing.
+        "*.com",
+        "*.localhost",
+        "*.",
+        "*",
+        "*.*",
+        "*.*.example.com",
+        // A wildcard only leads, as a whole label.
+        "api.*.example.com",
+        "*api.example.com",
+        "api*.example.com",
+        "a.*",
+        "**.example.com",
+        // Names under an address mean nothing.
+        "*.127.0.0.1",
+        "*.0.1",
+        "*.[::1]",
+        // And the domain is held to what a host is.
+        "*.Example.com",
+        "*.example.com.",
+        "*.bücher.example",
+        "*..example.com",
+        "*.example.com:443",
+        "*.example.com/path",
+    ] {
+        assert!(with_destination(https_host(host)).is_err(), "{host:?}");
+    }
+}
+
+#[test]
+fn a_pattern_matches_whole_labels_before_its_domain_and_nothing_else() {
+    let pattern = Host::new("*.example.com").unwrap();
+    assert!(pattern.is_pattern());
+    for host in [
+        "api.example.com",
+        "a.b.example.com",
+        "xn--bcher-kva.example.com",
+    ] {
+        assert!(pattern.matches(host), "{host}");
+    }
+    for host in [
+        "example.com",
+        ".example.com",
+        "a..example.com",
+        "badexample.com",
+        "api.example.com.evil.net",
+        "api.example.co",
+        "api.example.comx",
+        "example.com.api",
+        "*.example.com",
+        "a.*.example.com",
+        "API.EXAMPLE.COM",
+        "127.0.0.1",
+        "[::1]",
+        "",
+    ] {
+        assert!(!pattern.matches(host), "{host}");
+    }
+    // One host is only itself.
+    let exact = Host::new("api.example.com").unwrap();
+    assert!(!exact.is_pattern());
+    assert!(exact.matches("api.example.com"));
+    assert!(!exact.matches("a.api.example.com"));
+    assert!(!exact.matches("example.com"));
+}
+
+#[test]
+fn a_pattern_is_refused_where_one_host_is_meant() {
+    postgres(|destination| destination["host"] = json!("*.example.com")).unwrap_err();
+    jwt(|_| {}).unwrap();
+    with_rule(|rule| {
+        rule["destination"] = token_endpoint();
+        rule["destination"]["host"] = json!("*.example.com");
+        rule["inject"] = json!({ "jwt_assertion": {
+            "alg": "RS256", "aud": "token_endpoint", "claims": { "iss": "client" },
+            "form_field": "assertion", "max_lifetime_s": 300
+        } });
+    })
+    .unwrap_err();
 }
 
 // Path prefixes.
@@ -489,6 +589,12 @@ fn presigning_is_off_unless_a_rule_allows_it_with_a_limit_and_its_methods() {
     );
     // A presigned STS call is an identity, not a download.
     s3_presign(|rule| rule["inject"]["aws_sigv4"]["service"] = json!("sts")).unwrap_err();
+    // Nor where the caller names the service: a URL is presigned for S3 and nothing else.
+    s3_presign(|rule| {
+        rule["inject"]["aws_sigv4"]["service"] = json!({ "field": "svc", "allowed": ["s3"] });
+        rule["plain"] = json!(["svc"]);
+    })
+    .unwrap_err();
 }
 
 #[test]
@@ -525,6 +631,52 @@ fn an_injected_path_is_whole_segments_with_one_place_for_the_secret() {
 }
 
 #[test]
+fn a_rule_may_allow_one_injected_path_prefix() {
+    let policy = with_rule(|rule| rule["allow_injected_path"] = json!("/bot{}")).unwrap();
+    assert_eq!(
+        policy.rules[0].allow_injected_path.as_deref(),
+        Some("/bot{}")
+    );
+    let canonical = policy.canonical_json().unwrap();
+    assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
+    // Absent by default, and then left out of the canonical form.
+    let plain = with_rule(|_| {}).unwrap();
+    assert!(plain.rules[0].allow_injected_path.is_none());
+    assert!(
+        !String::from_utf8(plain.canonical_json().unwrap())
+            .unwrap()
+            .contains("allow_injected_path")
+    );
+
+    // The prefix is held to what a path rule may have.
+    for prefix in ["", "/bot", "bot{}", "/bot{}/", "/{}{}", "/../{}", "/a?b={}"] {
+        with_rule(|rule| rule["allow_injected_path"] = json!(prefix)).unwrap_err();
+    }
+    for value in [json!(true), json!(["/bot{}"]), json!(null)] {
+        let parsed = with_rule(|rule| rule["allow_injected_path"] = value.clone());
+        assert!(
+            parsed.map_or(true, |policy| policy.rules[0].allow_injected_path.is_none()),
+            "{value}"
+        );
+    }
+    // A path rule fills the path itself, and Postgres has none.
+    with_rule(|rule| {
+        rule["inject"] = json!({ "path": { "prefix": "/bot{}" } });
+        rule["allow_injected_path"] = json!("/bot{}");
+    })
+    .unwrap_err();
+    parse(&json!({ "rules": [{
+        "destination": {
+            "scheme": "postgres", "host": "db.example.com", "port": 5432,
+            "databases": ["app"], "user": { "literal": "app_user" }
+        },
+        "inject": { "pg_password": {} },
+        "allow_injected_path": "/bot{}"
+    }] }))
+    .unwrap_err();
+}
+
+#[test]
 fn refuses_bad_parts_and_names() {
     with_inject(json!({ "basic": { "username": { "literal": "" } } })).unwrap_err();
     with_inject(json!({ "basic": { "username": { "field": ".." } } })).unwrap_err();
@@ -555,6 +707,125 @@ fn sigv4_needs_a_payload_mode_and_valid_scope() {
     sigv4(|i| i["payload"] = json!(["unsigned"])).unwrap_err();
     sigv4(|i| i["region"] = json!("EU")).unwrap_err();
     sigv4(|i| i["service"] = json!("")).unwrap_err();
+}
+
+#[test]
+fn a_sigv4_region_or_service_is_fixed_or_named_by_a_plain_field() {
+    let sigv4 = |region: Value, service: Value, plain: Value| {
+        with_rule(|rule| {
+            rule["inject"] = json!({ "aws_sigv4": {
+                "region": region, "service": service,
+                "access_key_id": { "literal": "AKIA" }, "payload": ["computed"]
+            } });
+            rule["plain"] = plain;
+        })
+    };
+    // Fixed, a policy is written as it always was.
+    let fixed = sigv4(json!("eu-west-1"), json!("s3"), json!([])).unwrap();
+    let canonical = String::from_utf8(fixed.canonical_json().unwrap()).unwrap();
+    assert!(canonical.contains(r#""region":"eu-west-1","service":"s3""#));
+
+    let named = sigv4(
+        json!({ "field": "aws_region", "allowed": ["eu-west-1", "us-east-1"] }),
+        json!({ "field": "aws_service" }),
+        json!(["aws_region", "aws_service"]),
+    )
+    .unwrap();
+    let Inject::AwsSigv4 {
+        region, service, ..
+    } = &named.rules[0].inject
+    else {
+        panic!("not SigV4")
+    };
+    assert_eq!((region.fixed(), service.fixed()), (None, None));
+    let canonical = named.canonical_json().unwrap();
+    assert!(String::from_utf8(canonical.clone()).unwrap().contains(
+        r#""region":{"field":"aws_region","allowed":["eu-west-1","us-east-1"]},"service":{"field":"aws_service"}"#
+    ));
+    assert_eq!(Policy::from_json(&canonical).unwrap(), named);
+    // One of them may be named and the other fixed.
+    sigv4(
+        json!("eu-west-1"),
+        json!({ "field": "svc" }),
+        json!(["svc"]),
+    )
+    .unwrap();
+
+    let both = json!(["aws_region", "aws_service"]);
+    for (region, service, plain) in [
+        // The caller names it, so the rule lists it as plain.
+        (json!("eu-west-1"), json!({ "field": "svc" }), json!([])),
+        (json!({ "field": "r" }), json!("s3"), json!(["svc"])),
+        // One field cannot be both.
+        (
+            json!({ "field": "x" }),
+            json!({ "field": "x" }),
+            json!(["x"]),
+        ),
+        // What may be named is held to what a fixed one is.
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": ["S3"] }),
+            both.clone(),
+        ),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": [""] }),
+            both.clone(),
+        ),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": ["s3", "s3"] }),
+            both.clone(),
+        ),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": vec!["s3"; 17].iter().enumerate().map(|(i, s)| format!("{s}{i}")).collect::<Vec<_>>() }),
+            both.clone(),
+        ),
+        // And there is one way to write each.
+        (json!("eu-west-1"), json!({ "literal": "s3" }), both.clone()),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "any": true }),
+            both.clone(),
+        ),
+        (json!("eu-west-1"), json!({ "field": ".." }), both.clone()),
+        (json!("eu-west-1"), json!({}), both.clone()),
+        (json!("eu-west-1"), json!(["s3"]), both.clone()),
+        (json!("eu-west-1"), json!(null), both.clone()),
+        (json!(1), json!("s3"), both.clone()),
+    ] {
+        let what = format!("{region} {service} {plain}");
+        assert!(sigv4(region, service, plain).is_err(), "{what}");
+    }
+}
+
+#[test]
+fn a_named_scope_allows_valid_values_among_those_listed() {
+    let scope = |allowed: &[&str]| NamedScope {
+        field: FieldName::new("aws_service").unwrap(),
+        allowed: allowed.iter().map(|value| (*value).to_owned()).collect(),
+    };
+    let any = scope(&[]);
+    for value in ["s3", "sqs", "execute-api", "bedrock-runtime", "eu-west-1"] {
+        assert!(any.allows(value), "{value}");
+    }
+    for value in [
+        "",
+        "S3",
+        "s3/aws4_request",
+        "s3 ",
+        "s3\n",
+        "s3.amazonaws.com",
+        "é",
+    ] {
+        assert!(!any.allows(value), "{value:?}");
+    }
+    assert!(!any.allows(&"a".repeat(257)));
+    let some = scope(&["sqs", "sns"]);
+    assert!(some.allows("sqs") && some.allows("sns"));
+    assert!(!some.allows("s3") && !some.allows("sq") && !some.allows("SQS"));
 }
 
 #[test]
@@ -871,6 +1142,83 @@ fn weakening_flags_default_to_off() {
     assert!(!allow_md5 && !allow_cleartext_password && !require_channel_binding);
 }
 
+/// To a server that is not verified, or over no TLS at all, only SCRAM will do: it
+/// proves the password without sending it.
+#[test]
+fn a_postgres_server_may_go_unverified_or_without_tls_with_scram_only() {
+    let with = |tls: Value, inject: Value| {
+        parse(&json!({ "rules": [{
+            "destination": {
+                "scheme": "postgres", "host": "db.example.com", "port": 5432,
+                "databases": ["app"], "user": { "literal": "app_user" }, "tls": tls
+            },
+            "inject": inject,
+        }] }))
+    };
+    let password = |options: Value| json!({ "pg_password": options });
+    for (tls, expected) in [
+        ("unverified", PgTls::Unverified),
+        ("plaintext", PgTls::Plaintext),
+    ] {
+        let policy = with(json!(tls), password(json!({}))).unwrap();
+        let Destination::Postgres { tls: parsed, .. } = &policy.rules[0].destination else {
+            panic!("not Postgres")
+        };
+        assert_eq!(*parsed, expected);
+        assert!(!parsed.verifies_the_server());
+        let canonical = policy.canonical_json().unwrap();
+        assert!(
+            String::from_utf8(canonical.clone())
+                .unwrap()
+                .contains(&format!(r#""tls":"{tls}""#))
+        );
+        assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
+
+        // The password, or an MD5 hash that stands in for it, would reach whoever answers.
+        with(json!(tls), password(json!({ "allow_md5": true }))).unwrap_err();
+        with(
+            json!(tls),
+            password(json!({ "allow_cleartext_password": true })),
+        )
+        .unwrap_err();
+        // A client certificate's rule says how the server is verified, so it is.
+        with(
+            json!(tls),
+            json!({ "client_cert": { "cert": { "literal": "-----BEGIN CERTIFICATE-----" } } }),
+        )
+        .unwrap_err();
+    }
+    // Channel binding ties a login to the TLS connection, which catches an impostor
+    // even where the certificate is not verified. Without TLS there is nothing to bind.
+    with(
+        json!("unverified"),
+        password(json!({ "require_channel_binding": true })),
+    )
+    .unwrap();
+    with(
+        json!("plaintext"),
+        password(json!({ "require_channel_binding": true })),
+    )
+    .unwrap_err();
+
+    // The verified modes are as they were.
+    assert!(PgTls::VerifyFull.verifies_the_server());
+    assert!(PgTls::Ca(String::new()).verifies_the_server());
+    with(json!("verify_full"), password(json!({ "allow_md5": true }))).unwrap();
+    for tls in [
+        "require",
+        "disable",
+        "prefer",
+        "allow",
+        "verify_ca",
+        "Unverified",
+        "",
+    ] {
+        with(json!(tls), password(json!({}))).unwrap_err();
+    }
+    with(json!({ "unverified": {} }), password(json!({}))).unwrap_err();
+}
+
 #[test]
 fn requiring_channel_binding_rules_out_the_methods_that_have_none() {
     let with = |options: Value| {
@@ -1038,7 +1386,7 @@ fn definitions_are_bounded_and_validated() {
     parse(&json!({ "rules": [bearer_rule()], "definitions": { "a": { "rules": [] } } }))
         .unwrap_err();
     let mut bad = bearer_rule();
-    bad["destination"]["host"] = json!("*.example.com");
+    bad["destination"]["host"] = json!("api.*.example.com");
     parse(&json!({ "rules": [bearer_rule()], "definitions": { "a": { "rules": [bad] } } }))
         .unwrap_err();
     let mut dangling = bearer_rule();

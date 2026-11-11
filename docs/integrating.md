@@ -30,14 +30,16 @@ flows, and [`operations.md`](operations.md) running seal itself.
 - **Manage each keyset's lifecycle.** Generate one when a tenant is created (an admin
   caller); rotate on schedule and on suspicion; wait `max_stale`, stop sealing to the
   old public key, reseal, then delete the old wrapped keys. When a tenant leaves,
-  destroy all of its wrapped keys, including copies in backups, or destroy the key that
-  wraps them. Once that has taken effect ([Destroying a
+  destroy all of its wrapped keys, with `destroy_keyset` from a caller allowed to and
+  then in the key source's backups, or destroy the key that wraps them. Once that has taken effect ([Destroying a
   keyset](operations.md#destroying-a-keyset)), its backups hold nothing usable. Running
   requests and Postgres sessions end on their own limits.
 - **Check webhooks through seal.** Seal a signing secret with `verify` and no rules,
   then call `verify` with the message as the provider signs it and the code decoded to
   bytes. Check the timestamp yourself, before or after: seal answers only whether the
-  code is right. Treat an error as a failed check.
+  code is right. Treat an error as a failed check. Where the provider sends back a
+  token instead of signing, as Telegram does, seal it with `"verify": "equals"` and
+  present the token as the code, with no message.
 - **Presign only what must leave.** A presigned URL is the one credential seal gives
   back, and only for a rule sealed with `allow_presign`. Use it to hand an object to a
   browser or another party; read and write objects of your own through `send`. Ask for

@@ -205,6 +205,16 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
             .code,
         ErrorCode::CallerDenied
     );
+    assert_eq!(
+        instance
+            .client
+            .destroy_keyset(&keyset)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::CallerDenied
+    );
     // What it tried is in the audit log, each attempt refused.
     let records = instance.setup.audit_records();
     let refused: Vec<(&str, &str)> = records
@@ -227,7 +237,102 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
             ("presign", "acme"),
             ("generate", "other"),
             ("public_keys", "other"),
+            ("destroy_keyset", "other"),
         ]
+    );
+}
+
+/// Making keysets and ending them are separate permissions: an admin caller cannot
+/// destroy one, and a caller that can is held to the keysets it may use.
+#[tokio::test]
+async fn destroying_a_keyset_needs_its_own_permission_and_the_keyset() {
+    let provider = MockProvider::plain().await;
+    let instance = start(Mode::Unix, Options::default(), &[&provider]).await;
+    let error = instance
+        .client
+        .destroy_keyset(&keyset())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
+    let record = instance.setup.audit_records().pop().unwrap();
+    assert_eq!(
+        (&record["op"], &record["keyset"], &record["code"]),
+        (
+            &json!("destroy_keyset"),
+            &json!("acme"),
+            &json!("CALLER_DENIED")
+        )
+    );
+    // The keyset is as it was.
+    let token = instance
+        .setup
+        .seal("token", b"SEALCANARY-token", &token_policy(&provider))
+        .await;
+    instance
+        .client
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
+        .await
+        .unwrap();
+
+    let uid = nix::unistd::getuid().as_raw();
+    let callers = format!(
+        "[[callers]]\nname = \"offboarding\"\nunix_uid = {uid}\nkeysets = [\"acme\"]\nadmin = true\ndestroy_keysets = true\n"
+    );
+    let options = Options {
+        callers: Some(callers),
+        ..Options::default()
+    };
+    let instance = start(Mode::Unix, options, &[&provider]).await;
+    let fresh = KeysetId::new("fresh").unwrap();
+    instance.client.generate_keyset(&fresh).await.unwrap();
+    let error = instance.client.destroy_keyset(&fresh).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
+    instance.client.public_keys(&fresh).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_destroyed_keyset_opens_nothing_and_the_call_is_recorded() {
+    let provider = MockProvider::plain().await;
+    let uid = nix::unistd::getuid().as_raw();
+    let callers = format!(
+        "[[callers]]\nname = \"offboarding\"\nunix_uid = {uid}\nkeysets = [\"*\"]\ndestroy_keysets = true\n"
+    );
+    let options = Options {
+        callers: Some(callers),
+        ..Options::default()
+    };
+    let instance = start(Mode::Unix, options, &[&provider]).await;
+    let token = instance
+        .setup
+        .seal("token", b"SEALCANARY-token", &token_policy(&provider))
+        .await;
+    let send = || {
+        instance
+            .client
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
+    };
+    send().await.unwrap();
+
+    instance.client.destroy_keyset(&keyset()).await.unwrap();
+    let record = instance.setup.audit_records().pop().unwrap();
+    assert_eq!(
+        (&record["op"], &record["keyset"], &record["outcome"]),
+        (&json!("destroy_keyset"), &json!("acme"), &json!("ok"))
+    );
+    assert_eq!(record["caller"], "offboarding");
+
+    assert_eq!(send().await.err().unwrap().code, ErrorCode::KeysetUnknown);
+    assert_eq!(provider.received().len(), 1);
+    assert_eq!(
+        instance
+            .client
+            .destroy_keyset(&keyset())
+            .await
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::KeysetUnknown
     );
 }
 
@@ -886,6 +991,50 @@ fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
     assert_eq!(current(&new_keys, &new_kek).unwrap(), before);
     assert!(current(&new_keys, &setup.kek).is_err());
     assert!(current(&setup.keys_dir, &new_kek).is_err());
+}
+
+#[test]
+fn destroy_keyset_deletes_one_keyset_once_its_name_is_confirmed() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let config = write_config(
+        &setup,
+        &setup.config_text(
+            Mode::Unix,
+            &Options::default(),
+            "[listen]\nunix = \"/tmp/x.sock\"\n",
+        ),
+    );
+    let destroy = |keyset: &str, confirm: &str| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(["destroy-keyset", "--config"])
+            .arg(&config)
+            .args(["--keyset", keyset, "--confirm", confirm])
+            .output()
+            .unwrap()
+    };
+    let (acme, platform) = (setup.keys_dir.join("acme"), setup.keys_dir.join("platform"));
+    assert!(acme.is_dir() && platform.is_dir());
+
+    // Without its name repeated, nothing is touched.
+    assert!(!destroy("acme", "yes").status.success());
+    assert!(!destroy("acme", "platform").status.success());
+    assert!(acme.is_dir());
+
+    let done = destroy("acme", "acme");
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(String::from_utf8_lossy(&done.stdout).starts_with("destroyed keyset acme"));
+    assert!(!acme.exists());
+    assert!(platform.is_dir(), "another keyset is left alone");
+
+    // There is nothing left to destroy, and no path to walk out of the directory by.
+    assert!(!destroy("acme", "acme").status.success());
+    assert!(!destroy("../kek", "../kek").status.success());
+    assert!(setup.kek.exists());
 }
 
 #[test]

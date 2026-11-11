@@ -30,7 +30,8 @@ working afterwards.
 |---|---|---|
 | Application, working normally | Seal values, and ask seal to use them | Read a secret |
 | Compromised application | Use any value it can present, for any request a value's policy allows | Read a secret, change a policy, reach a destination no policy allows, or hide its use |
-| Administrative caller | Generate and rotate keys | Read a private key, which never leaves seal unwrapped |
+| Administrative caller | Generate and rotate keys | Read a private key, which never leaves seal unwrapped. Destroy a keyset, which needs `destroy_keysets` |
+| Caller that may destroy keysets | Make every value of the keysets it may use unreadable, for good | Read a value, or touch a keyset it may not use |
 | Provider | Receive the credentials sealed for it | Receive another destination's credentials |
 | Database server | Receive a SCRAM proof or, where the rule allows, an MD5 hash or a password | Pass as the real server: TLS verifies its name, and SCRAM its knowledge of the password |
 | Network attacker | Observe and interfere with traffic | Read or redirect credentials, given correct TLS validation |
@@ -52,8 +53,8 @@ working afterwards.
    signs.
 4. **seal to provider.** seal resolves and checks the address, connects to the
    checked address, validates TLS and never follows redirects.
-5. **seal to a Postgres server.** As for a provider, then: TLS is required and verified
-   before anything is sent, and seal reads exactly the one-byte answer to its
+5. **seal to a Postgres server.** As for a provider, then: unless the rule weakens it,
+   TLS is required and verified before anything is sent, and seal reads exactly the one-byte answer to its
    `SSLRequest`, so nothing unprotected can be slipped in. SCRAM checks the server's
    signature, and channel binding ties the login to this TLS connection when the
    server offers it. A server that accepts the login without asking for the password
@@ -129,6 +130,37 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   the whole of it in constant time and refuses a shorter one, so the answers do not
   add up to a forgery. A compromised application can still accept a forged webhook by
   not asking; that was always its own decision.
+- **A Postgres rule can give up the server's identity, or TLS, but not the password.**
+  With `tls` set to `"unverified"` or `"plaintext"`, someone on the path to the server
+  can relay the login and then read or change the session, as with libpq's
+  `sslmode=require` and `disable`. The login is SCRAM only in those modes, so the
+  password and anything that could stand in for it stay with seal, and a server that
+  does not know the password is not logged in to. Channel binding, where the server
+  offers it, catches an impostor under `"unverified"`. `"plaintext"` also needs the
+  operator's `honour_plaintext_postgres_rules`. Both are the sealer's choice per value,
+  and the default verifies.
+- **A credential whose service the caller names is bounded by its own permissions.**
+  With a fixed `service` and `region`, a SigV4 signature is good for one service in one
+  region. Where the rule lets the caller name them, a compromised application can have a
+  request signed for any service the rule allows, at any host it allows, and the
+  credential's IAM policy is the only limit left. The secret access key still never
+  leaves seal, and every request is still audited with its host and path.
+- **A host pattern trusts a whole domain.** A rule for `*.example.com` sends its secret
+  to any name under `example.com` that a compromised application asks for, so whoever
+  can serve one such name with a valid certificate, by registering it or taking over a
+  dangling one, receives the secret. seal matches on label boundaries and refuses a
+  pattern for a top-level name, but cannot know who may register names under a domain:
+  the sealer chooses the domain, and an exact host remains the default.
+- **A value that allows an injected path goes wherever that prefix leads.** With
+  `allow_injected_path`, a value is sent under a path prefix filled by another sealed
+  value, and anyone with the public key can seal one. A compromised application can
+  therefore send it under a prefix of its choosing, such as another Telegram bot's. The
+  sealer sets the option only where the rule is safe for any filling, and holds the rest
+  of the request with `path_prefix`, `methods` and `require_form`.
+- **A caller can guess a token.** With `"verify": "equals"`, each answer says whether
+  one guess is the secret. seal compares the whole token in constant time, so an answer
+  says nothing of where a guess went wrong, and the keyset's rate limit bounds the
+  guesses. That is enough for a generated token and not for a short or chosen one.
 - **A caller can read data with a credential it can use.** seal limits where a
   credential goes, not what the provider returns for an allowed request, nor what an
   allowed request does there: it may, for example, set S3 metadata or storage class.

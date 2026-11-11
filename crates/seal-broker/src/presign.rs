@@ -93,6 +93,7 @@ pub(crate) fn presigned_url(
                 .as_ref()
                 .map(|token| sources.part(token))
                 .transpose()?;
+            let (region, service) = (sources.scope(region)?, sources.scope(service)?);
             let signer = secret.expose(|secret_key| {
                 sigv4::Signer::new(sigv4::SignerParts {
                     secret: secret_key,

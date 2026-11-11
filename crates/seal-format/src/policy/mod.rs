@@ -41,7 +41,8 @@ pub struct Policy {
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
     /// Lets a caller ask whether a message's authentication code was made with this
-    /// secret, such as a webhook's signature. The answer is only yes or no.
+    /// secret, such as a webhook's signature, or whether a token is this secret. The
+    /// answer is only yes or no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<Verify>,
 }
@@ -113,6 +114,9 @@ pub enum Verify {
         /// The hash.
         hash: HmacHash,
     },
+    /// The secret is a token the provider sends back as it is, and the caller presents
+    /// the one that came with a message.
+    Equals,
 }
 
 /// The hash of an HMAC.
@@ -166,6 +170,12 @@ pub struct Rule {
     /// before anything is sent. HTTP only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub require_form: BTreeMap<String, Vec<String>>,
+    /// Lets this value go with one whose rule injects into the path with exactly this
+    /// prefix, such as `/bot{}`. The request is then sent under that prefix, outside
+    /// the path this rule matched: whoever holds a value for that prefix chooses what
+    /// fills it. HTTP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_injected_path: Option<String>,
 }
 
 impl Rule {
@@ -182,6 +192,7 @@ impl Rule {
             allow_private_destination: false,
             allow_plain_http: false,
             require_form: BTreeMap::new(),
+            allow_injected_path: None,
         }
     }
 }
@@ -274,7 +285,7 @@ impl Destination {
     }
 }
 
-/// How a Postgres server's certificate is verified.
+/// How the connection to a Postgres server is protected, and its certificate verified.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PgTls {
@@ -283,6 +294,21 @@ pub enum PgTls {
     VerifyFull,
     /// Against this CA, in PEM, with the host name.
     Ca(String),
+    /// TLS with whatever certificate the server presents, as libpq's
+    /// `sslmode=require`: anyone on the path can pass as the server. The login is then
+    /// SCRAM only, so the password itself is never sent.
+    Unverified,
+    /// No TLS, as libpq's `sslmode=disable`: anyone on the path can read and change
+    /// the session. SCRAM only, and only where the deployment allows it.
+    Plaintext,
+}
+
+impl PgTls {
+    /// Whether the server is who the policy names: its certificate is verified.
+    #[must_use]
+    pub fn verifies_the_server(&self) -> bool {
+        matches!(self, Self::VerifyFull | Self::Ca(_))
+    }
 }
 
 /// The destination's flat JSON form, where `scheme` selects the variant.
@@ -393,29 +419,46 @@ impl From<Destination> for RawDestination {
     }
 }
 
-/// A host name or IP literal, already lowercase and IDNA-normalised, with no
-/// wildcards. A host that would change when normalised is refused, not rewritten.
+/// A host name or IP literal, already lowercase and IDNA-normalised, or a pattern for
+/// the names under a domain, such as `*.example.com`. A host that would change when
+/// normalised is refused, not rewritten.
+///
+/// A pattern is `*.` and a domain of at least two labels. It matches every name that
+/// ends with that domain on a label boundary, however many labels come before, and not
+/// the domain itself. A `*` anywhere else is refused.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Host(String);
 
 impl Host {
-    /// Validates a host.
+    /// Validates a host or a pattern.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidPolicy`] if the host is not normalised.
+    /// Returns [`FormatError::InvalidPolicy`] if the host is not normalised, or the
+    /// pattern is not `*.` and a domain of at least two labels.
     pub fn new(value: impl Into<String>) -> Result<Self, FormatError> {
         let value = value.into();
-        let parsed = url::Host::parse(&value)
-            .map_err(|_| FormatError::InvalidPolicy("host is not valid"))?;
-        if parsed.to_string() != value {
+        // What must be a host as it stands: the whole value, or a pattern's domain.
+        let name = value.strip_prefix("*.").unwrap_or(&value);
+        let parsed =
+            url::Host::parse(name).map_err(|_| FormatError::InvalidPolicy("host is not valid"))?;
+        if parsed.to_string() != name {
             return Err(FormatError::InvalidPolicy("host is not normalised"));
         }
-        if value.contains('*') || value.ends_with('.') {
+        if name.contains('*') || name.ends_with('.') {
             return Err(FormatError::InvalidPolicy(
                 "host has a wildcard or trailing dot",
             ));
+        }
+        if name.len() != value.len() {
+            // Names under an address mean nothing, and `*.com` would be everything.
+            let labels_are_whole = name.split('.').all(|label| !label.is_empty());
+            if !matches!(parsed, url::Host::Domain(_)) || !name.contains('.') || !labels_are_whole {
+                return Err(FormatError::InvalidPolicy(
+                    "a host pattern needs a domain of at least two labels",
+                ));
+            }
         }
         Ok(Self(value))
     }
@@ -424,6 +467,26 @@ impl Host {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this is a pattern for the names under a domain, not one host.
+    #[must_use]
+    pub fn is_pattern(&self) -> bool {
+        self.0.starts_with("*.")
+    }
+
+    /// Whether a host, written as a request names it and already normalised, is this
+    /// host or is matched by this pattern.
+    #[must_use]
+    pub fn matches(&self, host: &str) -> bool {
+        match self.0.strip_prefix('*') {
+            // What is left starts with the dot, so the match is on a label boundary.
+            Some(domain) => host.strip_suffix(domain).is_some_and(|labels| {
+                // A request names a host, never a pattern of its own.
+                !labels.is_empty() && !labels.ends_with('.') && !labels.contains('*')
+            }),
+            None => self.0 == host,
+        }
     }
 }
 
@@ -466,7 +529,8 @@ pub enum Inject {
         name: String,
     },
     /// In the URL's path, before the caller's path, through a template such as
-    /// `/bot{}`. No other value may be presented with it.
+    /// `/bot{}`. Another value may be presented with it only if its own rule allows
+    /// this prefix with `allow_injected_path`.
     Path {
         /// What is put before the caller's path, with exactly one `{}` for the secret.
         prefix: String,
@@ -498,9 +562,9 @@ pub enum Inject {
     /// As the secret access key in AWS Signature Version 4.
     AwsSigv4 {
         /// The AWS region.
-        region: String,
+        region: AwsScope,
         /// The AWS service.
-        service: String,
+        service: AwsScope,
         /// The access key id.
         access_key_id: Part,
         /// The session token of temporary credentials.
@@ -554,10 +618,10 @@ pub enum Inject {
     },
     /// As a Postgres password.
     PgPassword {
-        /// Also allows MD5 authentication, over TLS.
+        /// Also allows MD5 authentication, over TLS to a verified server.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_md5: bool,
-        /// Also allows cleartext passwords, over TLS.
+        /// Also allows cleartext passwords, over TLS to a verified server.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_cleartext_password: bool,
         /// Refuses a login that is not bound to its TLS connection: only
@@ -643,6 +707,57 @@ pub enum Part {
     Field(FieldName),
     /// A value fixed in the policy.
     Literal(String),
+}
+
+/// A SigV4 region or service: fixed by the policy, or named by the caller with each
+/// request. A fixed one is written as a string, as it always was.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AwsScope {
+    /// Fixed by the policy.
+    Fixed(String),
+    /// Named by the caller, in a plain field.
+    Named(NamedScope),
+}
+
+impl AwsScope {
+    /// The value, if the policy fixes it.
+    #[must_use]
+    pub fn fixed(&self) -> Option<&str> {
+        match self {
+            Self::Fixed(value) => Some(value),
+            Self::Named(_) => None,
+        }
+    }
+}
+
+impl From<&str> for AwsScope {
+    fn from(value: &str) -> Self {
+        Self::Fixed(value.to_owned())
+    }
+}
+
+/// A SigV4 region or service the caller names with each request: for a credential used
+/// with whatever service a request is for. The signature is then good for any region or
+/// service named, so only the credential's own permissions bound its use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedScope {
+    /// The plain field that names it, which the rule must list in `plain`.
+    pub field: FieldName,
+    /// The values the caller may name; any valid one if empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+}
+
+impl NamedScope {
+    /// Whether the caller may name this value: one written as AWS writes regions and
+    /// services, and among those allowed if the policy lists any.
+    #[must_use]
+    pub fn allows(&self, value: &str) -> bool {
+        validate::is_aws_scope(value)
+            && (self.allowed.is_empty() || self.allowed.iter().any(|allowed| allowed == value))
+    }
 }
 
 /// A way of hashing a SigV4 payload.

@@ -47,9 +47,9 @@ fn from_broker(error: &BrokerError) -> SealError {
 fn from_keys(error: seal_keys::KeyError) -> SealError {
     let code = match error {
         seal_keys::KeyError::UnknownKeyset => ErrorCode::KeysetUnknown,
-        seal_keys::KeyError::AlreadyExists | seal_keys::KeyError::TooManyKeys => {
-            ErrorCode::Conflict
-        }
+        seal_keys::KeyError::AlreadyExists
+        | seal_keys::KeyError::TooManyKeys
+        | seal_keys::KeyError::Unsupported => ErrorCode::Conflict,
         seal_keys::KeyError::Invalid(_) => ErrorCode::BadRequest,
         _ => ErrorCode::KeysUnavailable,
     };
@@ -242,6 +242,10 @@ impl SealClient for InProcessClient {
                 created: key.created,
             })
             .collect())
+    }
+
+    async fn destroy_keyset(&self, keyset: &KeysetId) -> Result<(), SealError> {
+        self.keyring()?.destroy(keyset).await.map_err(from_keys)
     }
 }
 

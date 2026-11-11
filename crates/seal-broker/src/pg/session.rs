@@ -8,14 +8,19 @@
 //! server over a new connection, so any seal instance can forward any cancel.
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rustls::RootCertStore;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use seal_format::policy::PgTls;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -186,6 +191,7 @@ impl PgSession {
         };
         let startup = self.check_startup(&startup, progress).map_err(Some)?;
 
+        self.plaintext_is_allowed().map_err(Some)?;
         progress.contacted = true;
         let (mut server, end_point, _permit) = self.open_server().await.map_err(Some)?;
         write(&mut server, &startup.encode()).await.map_err(|()| {
@@ -334,7 +340,21 @@ impl PgSession {
         })
     }
 
+    /// A rule may ask for no TLS; the deployment has the last word, before any lookup
+    /// or connection.
+    fn plaintext_is_allowed(&self) -> Result<(), Refusal> {
+        if self.tls == PgTls::Plaintext && !self.client.allows_plaintext_postgres() {
+            return Err(Refusal::new(
+                ErrorCode::DestinationRefused,
+                "08001",
+                "this deployment does not allow Postgres without TLS",
+            ));
+        }
+        Ok(())
+    }
+
     async fn cancel(&self, packet: &[u8], progress: &mut Progress) -> Result<(), Refusal> {
+        self.plaintext_is_allowed()?;
         progress.contacted = true;
         let (mut server, _, _permit) = self.open_server().await?;
         progress.caller_to_server = packet.len() as u64;
@@ -347,14 +367,16 @@ impl PgSession {
         Ok(())
     }
 
-    /// Connects to a checked address, asks for TLS, and verifies the server. Returns
-    /// the stream and the channel binding data from the server's certificate.
+    /// Connects to a checked address, and protects the connection as the rule says:
+    /// asks for TLS and verifies the server, asks for TLS and takes the server as it
+    /// comes, or uses no TLS where the deployment allows that. Returns the stream and
+    /// the channel binding data from the server's certificate, if there is one.
     #[allow(clippy::type_complexity)]
     async fn open_server(
         &self,
     ) -> Result<
         (
-            TlsStream<tokio::net::TcpStream>,
+            ServerStream,
             Option<Vec<u8>>,
             tokio::sync::OwnedSemaphorePermit,
         ),
@@ -379,6 +401,9 @@ impl PgSession {
         })?
         .map_err(unreachable)?;
         let (mut stream, permit) = self.connect_any(&addresses).await.map_err(unreachable)?;
+        if self.tls == PgTls::Plaintext {
+            return Ok((ServerStream::Plain(stream), None, permit));
+        }
 
         // Ask for TLS, and read exactly the one byte of the answer: anything sent before
         // the handshake would not be protected by it.
@@ -427,7 +452,7 @@ impl PgSession {
             .and_then(|chain| chain.first())
             .and_then(|certificate| login::tls_server_end_point(certificate.as_ref()));
         // The connection's permit lives as long as the session holds it.
-        Ok((stream, end_point, permit))
+        Ok((ServerStream::Tls(Box::new(stream)), end_point, permit))
     }
 
     async fn connect_any(
@@ -452,6 +477,8 @@ impl PgSession {
     fn tls_connector(&self) -> Result<(TlsConnector, ServerName<'static>), BrokerError> {
         let failed = |detail| BrokerError::new(ErrorCode::BadRequest, detail);
         let mut roots = match &self.tls {
+            // Unverified takes no roots; a session without TLS never gets here.
+            PgTls::Unverified | PgTls::Plaintext => RootCertStore::empty(),
             PgTls::VerifyFull => (*self.client.roots()).clone(),
             PgTls::Ca(pem) => {
                 let mut roots = RootCertStore::empty();
@@ -481,10 +508,16 @@ impl PgSession {
             }
         }
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = rustls::ClientConfig::builder_with_provider(provider)
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
             .with_safe_default_protocol_versions()
-            .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not configure TLS"))?
-            .with_root_certificates(roots);
+            .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not configure TLS"))?;
+        let builder = if self.tls == PgTls::Unverified {
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
+        } else {
+            builder.with_root_certificates(roots)
+        };
         let mut config = match &self.client_cert {
             Some(material) => builder
                 .with_client_auth_cert(material.chain.clone(), material.key.clone_key())
@@ -501,6 +534,104 @@ impl PgSession {
         let name = ServerName::try_from(name)
             .map_err(|_| failed("the host is not a valid server name"))?;
         Ok((TlsConnector::from(Arc::new(config)), name))
+    }
+}
+
+/// The connection to the server: over TLS, or bare where the rule and the deployment
+/// both allow it.
+enum ServerStream {
+    Tls(Box<TlsStream<tokio::net::TcpStream>>),
+    Plain(tokio::net::TcpStream),
+}
+
+impl AsyncRead for ServerStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_read(context, buffer),
+            Self::Plain(stream) => Pin::new(stream).poll_read(context, buffer),
+        }
+    }
+}
+
+impl AsyncWrite for ServerStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_write(context, bytes),
+            Self::Plain(stream) => Pin::new(stream).poll_write(context, bytes),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_flush(context),
+            Self::Plain(stream) => Pin::new(stream).poll_flush(context),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(context),
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(context),
+        }
+    }
+}
+
+/// Accepts whatever certificate the server presents, for a rule whose `tls` is
+/// `unverified`. The handshake's signature is still checked against that certificate,
+/// so the peer holds its key: that is what SCRAM's channel binding then ties a login to.
+#[derive(Debug)]
+struct AnyCertificate(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            certificate,
+            signature,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            certificate,
+            signature,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 

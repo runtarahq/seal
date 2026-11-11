@@ -250,6 +250,30 @@ impl Keyring {
         Ok(created)
     }
 
+    /// Deletes every key of a keyset from the source, so that nothing sealed to it can be
+    /// opened again. This cannot be undone.
+    ///
+    /// This instance stops using the keyset at once; others within `max_stale`.
+    /// Copies of the wrapped keys elsewhere, such as backups of the source, still open
+    /// its values for as long as the wrapping key exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyError::UnknownKeyset`] if the keyset has no keys, and
+    /// [`KeyError::Unsupported`] if the source cannot delete.
+    pub async fn destroy(&self, keyset: &KeysetId) -> Result<(), KeyError> {
+        let existing = self.inner.fetch(keyset).await?;
+        if existing.is_empty() {
+            return Err(KeyError::UnknownKeyset);
+        }
+        self.inner.source.delete_keyset(keyset).await?;
+        let mut state = self.inner.lock();
+        state.loaded.remove(keyset);
+        self.inner
+            .remember_unknown(&mut state, keyset, Instant::now());
+        Ok(())
+    }
+
     /// A keyset's public keys, newest last, freshly read from the source.
     ///
     /// Each one has been checked against its private key, which means unwrapping it:

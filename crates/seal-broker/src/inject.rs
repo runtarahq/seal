@@ -16,7 +16,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
-use seal_format::policy::{Inject, Part};
+use seal_format::policy::{AwsScope, Inject, Part};
 use seal_format::{FieldName, Secret};
 use zeroize::Zeroizing;
 
@@ -161,6 +161,31 @@ pub struct Sources<'a> {
 }
 
 impl Sources<'_> {
+    /// A SigV4 region or service: the policy's, or the one the caller named, which
+    /// must be written as AWS writes them and be one the policy allows.
+    pub(crate) fn scope<'a>(&'a self, scope: &'a AwsScope) -> Result<&'a str, BrokerError> {
+        let named = match scope {
+            AwsScope::Fixed(value) => return Ok(value),
+            AwsScope::Named(named) => named,
+        };
+        let value = self.plain.get(&named.field).ok_or_else(|| {
+            BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "the request does not name its region or service",
+                &named.field,
+            )
+        })?;
+        if named.allows(value) {
+            Ok(value)
+        } else {
+            Err(BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "the rule does not allow this region or service",
+                &named.field,
+            ))
+        }
+    }
+
     /// A part's bytes, wiped when dropped.
     pub(crate) fn part(&self, part: &Part) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
         match part {
@@ -371,6 +396,7 @@ pub fn build_head(
                     .as_ref()
                     .map(|token| sources.part(token))
                     .transpose()?;
+                let (region, service) = (sources.scope(region)?, sources.scope(service)?);
                 let signer = secret.expose(|secret_key| {
                     sigv4::Signer::new(sigv4::SignerParts {
                         secret: secret_key,

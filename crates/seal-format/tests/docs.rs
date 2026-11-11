@@ -98,6 +98,8 @@ const OPTIONS: &[&str] = &[
     "allow_presign",
     "max_expiry_s",
     "allow_copy_from_any_bucket",
+    "allow_injected_path",
+    "allowed",
 ];
 
 fn policy_doc() -> String {
@@ -184,6 +186,9 @@ fn every_enumerated_value_is_documented() {
         "form",
         "xml",
         "verify_full",
+        "unverified",
+        "plaintext",
+        "equals",
         "token_endpoint",
         "sha1",
         "sha256",

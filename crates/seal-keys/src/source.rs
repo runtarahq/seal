@@ -67,6 +67,14 @@ pub trait KeySource: Send + Sync {
         let _ = key;
         Err(KeyError::Unsupported)
     }
+
+    /// Deletes every wrapped key of a keyset, after which nothing sealed to it can be
+    /// opened from this source. Copies elsewhere, such as backups, are not touched. A
+    /// source that cannot delete returns [`KeyError::Unsupported`].
+    async fn delete_keyset(&self, keyset: &KeysetId) -> Result<(), KeyError> {
+        let _ = keyset;
+        Err(KeyError::Unsupported)
+    }
 }
 
 /// Stores wrapped keys as `<dir>/<keyset>/<kid>.json`.
@@ -193,6 +201,23 @@ fn store_key(dir: &Path, key: &WrappedKey) -> Result<(), KeyError> {
     }
 }
 
+/// Removes a keyset's directory and everything in it. Stopped part way, it leaves fewer
+/// keys and can be run again.
+fn delete_keyset_dir(root: &Path, dir: &Path) -> Result<(), KeyError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(KeyError::Unavailable),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| KeyError::Unavailable)?;
+        // Only files are ever written here; anything else is not seal's to remove.
+        std::fs::remove_file(entry.path()).map_err(|_| KeyError::Unavailable)?;
+    }
+    std::fs::remove_dir(dir).map_err(|_| KeyError::Unavailable)?;
+    sync_dir(root).map_err(|_| KeyError::Unavailable)
+}
+
 #[async_trait]
 impl KeySource for DirKeySource {
     async fn wrapped_keys(&self, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
@@ -205,6 +230,13 @@ impl KeySource for DirKeySource {
     async fn store(&self, key: &WrappedKey) -> Result<(), KeyError> {
         let (dir, key) = (self.keyset_dir(&key.keyset), key.clone());
         tokio::task::spawn_blocking(move || store_key(&dir, &key))
+            .await
+            .map_err(|_| KeyError::Unavailable)?
+    }
+
+    async fn delete_keyset(&self, keyset: &KeysetId) -> Result<(), KeyError> {
+        let (root, dir) = (self.root.clone(), self.keyset_dir(keyset));
+        tokio::task::spawn_blocking(move || delete_keyset_dir(&root, &dir))
             .await
             .map_err(|_| KeyError::Unavailable)?
     }
@@ -294,6 +326,31 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers.len(), 2, "no temporary files are left");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_keyset_removes_its_keys_and_no_other() {
+        let root = tempfile::tempdir().unwrap();
+        let source = DirKeySource::new(root.path(), 16);
+        let (acme, other) = (
+            KeysetId::new("acme").unwrap(),
+            KeysetId::new("other").unwrap(),
+        );
+        source.store(&wrapped("acme", "k1")).await.unwrap();
+        source.store(&wrapped("acme", "k2")).await.unwrap();
+        source.store(&wrapped("other", "k1")).await.unwrap();
+
+        source.delete_keyset(&acme).await.unwrap();
+        assert!(source.wrapped_keys(&acme).await.unwrap().is_empty());
+        assert!(!root.path().join("acme").exists());
+        assert_eq!(source.keysets().unwrap(), std::slice::from_ref(&other));
+        assert_eq!(source.wrapped_keys(&other).await.unwrap().len(), 1);
+
+        // Again, or for a keyset that never was, there is nothing to do.
+        source.delete_keyset(&acme).await.unwrap();
+        // And the name can be used afresh.
+        source.store(&wrapped("acme", "k3")).await.unwrap();
+        assert_eq!(source.wrapped_keys(&acme).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

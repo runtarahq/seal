@@ -9,7 +9,7 @@ use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method as HttpMethod, Request, StatusCode};
 use http_body_util::BodyExt;
-use seal_format::policy::{Method, RuleLimits};
+use seal_format::policy::{Method, RuleLimits, Verify};
 use seal_format::{Binding, Envelope, FieldName, ItemId, KeysetId, Secret, seal as seal_value};
 use seal_keys::{KeyError, Keys};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -435,6 +435,9 @@ impl Broker {
         let limits = self.limits.tightened_by(&plan.limits);
         let mut record = record.clone();
         record.outcome = Outcome::Cancelled;
+        // Validation already refuses such a policy: the password, or an MD5 hash that
+        // stands in for it, goes only to a server that has been verified.
+        let verified = terms.tls.verifies_the_server();
         Ok(PgSession {
             host,
             port,
@@ -442,14 +445,16 @@ impl Broker {
             databases: terms.databases,
             allow_replication: terms.allow_replication,
             tls: terms.tls,
-            allow_md5: terms
-                .password
-                .as_ref()
-                .is_some_and(|password| password.allow_md5),
-            allow_cleartext: terms
-                .password
-                .as_ref()
-                .is_some_and(|password| password.allow_cleartext),
+            allow_md5: verified
+                && terms
+                    .password
+                    .as_ref()
+                    .is_some_and(|password| password.allow_md5),
+            allow_cleartext: verified
+                && terms
+                    .password
+                    .as_ref()
+                    .is_some_and(|password| password.allow_cleartext),
             require_channel_binding: terms
                 .password
                 .as_ref()
@@ -613,7 +618,7 @@ impl Broker {
         let (secrets, policies, _) = self.open_all(keyset, item, sealed).await?;
         let verify = policies.get(field).and_then(|policy| policy.verify);
         drop(policies);
-        let Some(seal_format::policy::Verify::Hmac { hash }) = verify else {
+        let Some(verify) = verify else {
             return Err(BrokerError::for_field(
                 ErrorCode::PolicyDenied,
                 "this value's policy does not allow verification",
@@ -636,7 +641,21 @@ impl Broker {
         let secret = secrets.get(field).ok_or_else(|| {
             BrokerError::for_field(ErrorCode::Internal, "a matched secret is missing", field)
         })?;
-        Ok(secret.expose(|key| crate::verify::hmac_matches(hash, key, &message, mac)))
+        match verify {
+            Verify::Hmac { hash } => {
+                Ok(secret.expose(|key| crate::verify::hmac_matches(hash, key, &message, mac)))
+            }
+            // A token is compared with the one presented, and covers no message: one
+            // sent with it would be taken for checked.
+            Verify::Equals if !message.is_empty() => Err(BrokerError::for_field(
+                ErrorCode::BadRequest,
+                "a token is checked without a message",
+                field,
+            )),
+            Verify::Equals => secret
+                .expose(|token| crate::verify::token_matches(token, mac))
+                .ok_or_else(|| BrokerError::new(ErrorCode::Internal, "the random source failed")),
+        }
     }
 
     /// Sends a request using the sealed values it presents. Every call leaves one audit

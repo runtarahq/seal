@@ -62,6 +62,7 @@ configuration file that its group or others can write.
 | `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
 | `admin` | Whether it may generate keysets, rotate and list public keys. Default `false` |
+| `destroy_keysets` | Whether it may [destroy](#destroying-a-keyset) the keysets it may use, which cannot be undone. Separate from `admin`. Default `false` |
 
 A `cert_subject` is the certificate's whole subject, attribute by attribute and in the
 certificate's order, such as `CN=app,O=Example`. Attribute names and the spaces around
@@ -101,6 +102,7 @@ least twice `max_keys_per_keyset`.
 | `deny_cidrs` | `[]` | Always refused |
 | `allow_private_cidrs` | `[]` | Allowed whatever their class |
 | `honour_private_rules` | `false` | Whether a rule's `allow_private_destination` has any effect |
+| `honour_plaintext_postgres_rules` | `false` | Whether a Postgres rule whose `tls` is `"plaintext"` may connect with no TLS. Otherwise such a session is refused |
 | `extra_ca_files` | `[]` | CAs to trust toward providers, besides the public roots |
 
 ### `[pools]`, `[limits]`, `[audit]`, `[metrics]`
@@ -269,6 +271,20 @@ seal reseal --config /etc/seal/seal.toml --keyset acme --rewrite-policies \
 Delete every wrapped key of the keyset from the key source, including any copies in
 backups, or destroy the wrapping key. Once that has taken effect, within `max_stale` or
 `max_unwrap_age`, every value sealed to those keys, in every backup, is unreadable.
+
+For a directory key source, seal deletes the keyset's wrapped keys itself:
+
+```sh
+seal destroy-keyset --config /etc/seal/seal.toml --keyset acme --confirm acme
+```
+
+Or call `DestroyKeyset` as a caller with `destroy_keysets = true` that may use the
+keyset. `admin` does not allow it: give the permission to the one service that offboards
+tenants, and list its keysets if they can be listed, since `["*"]` lets it end them all.
+The instance that takes the call stops using the keyset at once, the others within
+`max_stale`. This cannot be undone, and it does not reach backups of the key source: a
+copy of the wrapped keys still opens the keyset's values while the wrapping key exists.
+A key service deletes the keys it holds itself; seal answers `CONFLICT` there.
 
 ## Audit
 

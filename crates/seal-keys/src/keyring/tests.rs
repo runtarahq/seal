@@ -56,6 +56,21 @@ impl KeySource for MemorySource {
         list.push(key.clone());
         Ok(())
     }
+
+    async fn delete_keyset(&self, keyset: &KeysetId) -> Result<(), KeyError> {
+        self.keys.lock().unwrap().remove(keyset);
+        Ok(())
+    }
+}
+
+/// A source that only reads, as one served over HTTP is.
+struct ReadOnlySource(Arc<MemorySource>);
+
+#[async_trait]
+impl KeySource for ReadOnlySource {
+    async fn wrapped_keys(&self, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
+        self.0.wrapped_keys(keyset).await
+    }
 }
 
 /// A wrapping key that can be revoked.
@@ -495,6 +510,65 @@ async fn generate_and_rotate_check_what_exists() {
         keyring.generate(&keyset("acme")).await,
         Err(KeyError::AlreadyExists)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_keyset_is_unknown_at_once_and_only_it() {
+    let setup = Setup::new();
+    let keyring = setup.keyring(config());
+    assert_eq!(
+        keyring.destroy(&keyset("acme")).await,
+        Err(KeyError::UnknownKeyset)
+    );
+    keyring.generate(&keyset("acme")).await.unwrap();
+    keyring.rotate(&keyset("acme")).await.unwrap();
+    keyring.generate(&keyset("other")).await.unwrap();
+    keyring.current_public_key(&keyset("acme")).await.unwrap();
+
+    keyring.destroy(&keyset("acme")).await.unwrap();
+    assert!(
+        setup
+            .source
+            .keys
+            .lock()
+            .unwrap()
+            .get(&keyset("acme"))
+            .is_none()
+    );
+    assert_eq!(
+        keyring.current_public_key(&keyset("acme")).await.err(),
+        Some(KeyError::UnknownKeyset)
+    );
+    assert_eq!(
+        keyring.destroy(&keyset("acme")).await,
+        Err(KeyError::UnknownKeyset)
+    );
+    keyring.current_public_key(&keyset("other")).await.unwrap();
+
+    // The name can be given to a new keyset, with new keys.
+    keyring.generate(&keyset("acme")).await.unwrap();
+    keyring.current_public_key(&keyset("acme")).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_source_that_cannot_delete_keeps_the_keyset() {
+    let setup = Setup::new();
+    setup
+        .keyring(config())
+        .generate(&keyset("acme"))
+        .await
+        .unwrap();
+    let read_only = Keyring::new(
+        Arc::new(ReadOnlySource(Arc::clone(&setup.source))) as Arc<dyn KeySource>,
+        Arc::clone(&setup.wrap) as Arc<dyn KeyWrap>,
+        config(),
+    )
+    .unwrap();
+    assert_eq!(
+        read_only.destroy(&keyset("acme")).await,
+        Err(KeyError::Unsupported)
+    );
+    read_only.current_public_key(&keyset("acme")).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]

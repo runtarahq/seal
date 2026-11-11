@@ -297,7 +297,7 @@ fn a_value_with_bad_contents_does_not_open() {
     let (private, public) = PrivateKey::generate();
     let good = String::from_utf8(policy().canonical_json().unwrap()).unwrap();
     let invalid_policy = r#"{"rules":[]}"#;
-    let wildcard_host = good.replace("api.example.com", "*.example.com");
+    let wildcard_host = good.replace("api.example.com", "api.*.example.com");
     assert_ne!(good, wildcard_host);
     let cases = [
         format!("{{\"policy\":{invalid_policy},\"secret\":{{\"b64\":\"aGk\"}}}}"),
