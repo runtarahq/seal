@@ -5,6 +5,7 @@
 //! and only a code of the hash's full length can match, compared in constant time.
 
 use ring::hmac;
+use ring::rand::SystemRandom;
 use seal_format::policy::HmacHash;
 
 /// Whether `mac` is the HMAC of `message` under `key`.
@@ -17,6 +18,22 @@ pub fn hmac_matches(hash: HmacHash, key: &[u8], message: &[u8], mac: &[u8]) -> b
     };
     // `ring` compares the whole code in constant time, and refuses another length.
     hmac::verify(&hmac::Key::new(algorithm, key), message, mac).is_ok()
+}
+
+/// Whether `presented` is `secret`, for a token a provider sends back as it is. `None`
+/// if the system's random source fails.
+///
+/// Both are hashed under a key made for this one comparison, and the codes compared in
+/// constant time, so the time taken says nothing of where they differ. An empty secret
+/// matches nothing: a value sealed empty must not accept a message with no token.
+#[must_use]
+pub fn token_matches(secret: &[u8], presented: &[u8]) -> Option<bool> {
+    if secret.is_empty() {
+        return Some(false);
+    }
+    let key = hmac::Key::generate(hmac::HMAC_SHA256, &SystemRandom::new()).ok()?;
+    let expected = hmac::sign(&key, secret);
+    Some(hmac::verify(&key, presented, expected.as_ref()).is_ok())
 }
 
 #[cfg(test)]
@@ -72,5 +89,26 @@ mod tests {
         assert!(!hmac_matches(HmacHash::Sha256, b"Jefe", message, &padded));
         // Nor does a code made with another hash.
         assert!(!hmac_matches(HmacHash::Sha512, b"Jefe", message, &mac));
+    }
+
+    #[test]
+    fn only_the_whole_token_matches() {
+        let secret = b"telegram-secret_token-1";
+        assert_eq!(token_matches(secret, secret), Some(true));
+        for presented in [
+            &b""[..],
+            b"telegram-secret_token-",
+            b"telegram-secret_token-12",
+            b"telegram-secret_token-2",
+            b"Telegram-secret_token-1",
+        ] {
+            assert_eq!(token_matches(secret, presented), Some(false));
+        }
+    }
+
+    #[test]
+    fn an_empty_secret_matches_nothing() {
+        assert_eq!(token_matches(b"", b""), Some(false));
+        assert_eq!(token_matches(b"", b"a"), Some(false));
     }
 }
