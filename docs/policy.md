@@ -285,6 +285,37 @@ with virtual-hosted URLs: a copy could then read the others.
 }] }
 ```
 
+`region` and `service` are usually fixed, so that a signature is good for one service in
+one region. A credential used for whatever service each request is for, such as one an
+agent uses across an account, has them named by the caller instead: each is then a plain
+field the rule lists, with the values `allowed` if they can be listed.
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "*.amazonaws.com" },
+  "inject": { "aws_sigv4": {
+    "region": { "field": "aws_region", "allowed": ["eu-west-1", "us-east-1"] },
+    "service": { "field": "aws_service" },
+    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
+    "payload": ["computed"]
+  } },
+  "plain": ["aws_region", "aws_service"]
+}] }
+```
+
+The caller sends `aws_region` and `aws_service` as plain fields with each request,
+written as AWS writes them, such as `sqs` and `eu-west-1`; a request that leaves one
+out, or names one the rule does not allow, is refused before anything is sent. seal
+signs for what was named and does not check it against the host: a request signed for
+the wrong service is refused by AWS. Nothing in such a policy then holds the credential
+to a service, so its own IAM permissions are the limit, and they should be narrow. With
+a custom endpoint, keep `host` exact. A rule that allows presigning fixes its service.
+
+Customers serve names of their own under `amazonaws.com`, which a
+[host pattern](#host-patterns) is otherwise wrong for. SigV4 is the exception: the secret
+access key is never sent, only a signature that is good for the one host, path and body
+it was made for, so a host that is not AWS's learns nothing it can use elsewhere.
+
 `allow_presign` also lets the caller have a presigned URL for an object the rule allows,
 lasting at most `max_expiry_s`. It is a [weakening option](#weakening-options): the URL
 works without seal until it expires. The rule must name its `methods`, from `GET`,

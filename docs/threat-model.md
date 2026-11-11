@@ -130,6 +130,12 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   the whole of it in constant time and refuses a shorter one, so the answers do not
   add up to a forgery. A compromised application can still accept a forged webhook by
   not asking; that was always its own decision.
+- **A credential whose service the caller names is bounded by its own permissions.**
+  With a fixed `service` and `region`, a SigV4 signature is good for one service in one
+  region. Where the rule lets the caller name them, a compromised application can have a
+  request signed for any service the rule allows, at any host it allows, and the
+  credential's IAM policy is the only limit left. The secret access key still never
+  leaves seal, and every request is still audited with its host and path.
 - **A host pattern trusts a whole domain.** A rule for `*.example.com` sends its secret
   to any name under `example.com` that a compromised application asks for, so whoever
   can serve one such name with a valid certificate, by registering it or taking over a
