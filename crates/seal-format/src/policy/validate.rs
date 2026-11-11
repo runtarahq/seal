@@ -177,12 +177,14 @@ fn destination(destination: &Destination) -> Result<(), FormatError> {
             path_prefix.as_deref().map_or(Ok(()), self::path_prefix)
         }
         Destination::Postgres {
+            host,
             port,
             databases,
             user,
             tls,
             ..
         } => {
+            require(!host.is_pattern(), "a Postgres host cannot be a pattern")?;
             require(*port != 0, "port is zero")?;
             require(!databases.is_empty(), "a database list is empty")?;
             require(databases.len() <= MAX_DATABASES, "too many databases")?;
@@ -275,10 +277,18 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         Inject::Path { prefix } => injected_path(prefix),
         Inject::JsonField { pointer } => json_pointer(pointer),
         Inject::ClientCert {
-            cert, chain, ca, ..
+            cert,
+            chain,
+            ca,
+            server_name,
         } => {
             pem_part(cert)?;
             chain.as_ref().map_or(Ok(()), pem_part)?;
+            // A certificate is verified against one name.
+            require(
+                server_name.as_ref().is_none_or(|name| !name.is_pattern()),
+                "a server name cannot be a pattern",
+            )?;
             ca.as_deref().map_or(Ok(()), pem)
         }
         Inject::AwsSigv4 {
@@ -408,11 +418,16 @@ fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
         (
             Destination::Http {
                 scheme,
+                host,
                 path_prefix,
                 ..
             },
             inject,
         ) => {
+            if matches!(inject, Inject::JwtAssertion { .. }) {
+                // The assertion names its audience, which is one endpoint.
+                require(!host.is_pattern(), "a JWT rule's host cannot be a pattern")?;
+            }
             if let Inject::AwsSigv4 {
                 allow_headers,
                 allow_copy_from_any_bucket,

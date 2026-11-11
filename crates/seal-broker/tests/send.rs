@@ -347,6 +347,50 @@ async fn a_secret_in_the_path_reaches_the_provider_and_is_not_recorded_or_reflec
     assert_eq!(provider.received().len(), 1);
 }
 
+/// A rule for the names under a domain, as a provider with regional hosts needs: the
+/// credential goes to any of them, to the host the caller named, and nowhere else.
+#[tokio::test]
+async fn a_host_pattern_sends_to_the_names_under_its_domain_only() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let mut rule = plain_rule(&provider, &bearer());
+    rule["destination"]["host"] = json!(format!("*.{HOST}"));
+    let token = harness.seal("token", b"PATTERN-canary", &rule_policy(&rule));
+    let to = |host: &str| format!("http://{host}:{}/quiet", provider.port());
+
+    for host in [format!("emea.{HOST}"), format!("a.b.{HOST}")] {
+        let response = harness.get(&to(&host), &[("token", &token)]).await.unwrap();
+        read_body(response).await.unwrap();
+        let received = provider.received();
+        let last = received.last().unwrap();
+        assert_eq!(last.header("authorization"), Some("Bearer PATTERN-canary"));
+        assert_eq!(
+            last.header("host"),
+            Some(format!("{host}:{}", provider.port()).as_str())
+        );
+        assert_eq!(harness.audit.last().host.as_deref(), Some(host.as_str()));
+    }
+
+    let (lookups, sent) = (harness.lookups(), provider.received().len());
+    for host in [
+        HOST.to_owned(),
+        format!("evil{HOST}"),
+        format!("emea.{HOST}.evil.test"),
+        "evil.test".to_owned(),
+        "127.0.0.1".to_owned(),
+    ] {
+        let error = harness
+            .get(&to(&host), &[("token", &token)])
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), ErrorCode::PolicyDenied, "{host}");
+    }
+    // Refused before any lookup, and nothing was sent.
+    assert_eq!(harness.lookups(), lookups);
+    assert_eq!(provider.received().len(), sent);
+}
+
 /// Telegram's `setWebhook`: the bot token in the path, and the webhook's secret token
 /// in the form, which its rule allows under that prefix and pins to one webhook URL.
 #[tokio::test]

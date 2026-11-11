@@ -404,29 +404,46 @@ impl From<Destination> for RawDestination {
     }
 }
 
-/// A host name or IP literal, already lowercase and IDNA-normalised, with no
-/// wildcards. A host that would change when normalised is refused, not rewritten.
+/// A host name or IP literal, already lowercase and IDNA-normalised, or a pattern for
+/// the names under a domain, such as `*.example.com`. A host that would change when
+/// normalised is refused, not rewritten.
+///
+/// A pattern is `*.` and a domain of at least two labels. It matches every name that
+/// ends with that domain on a label boundary, however many labels come before, and not
+/// the domain itself. A `*` anywhere else is refused.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Host(String);
 
 impl Host {
-    /// Validates a host.
+    /// Validates a host or a pattern.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidPolicy`] if the host is not normalised.
+    /// Returns [`FormatError::InvalidPolicy`] if the host is not normalised, or the
+    /// pattern is not `*.` and a domain of at least two labels.
     pub fn new(value: impl Into<String>) -> Result<Self, FormatError> {
         let value = value.into();
-        let parsed = url::Host::parse(&value)
-            .map_err(|_| FormatError::InvalidPolicy("host is not valid"))?;
-        if parsed.to_string() != value {
+        // What must be a host as it stands: the whole value, or a pattern's domain.
+        let name = value.strip_prefix("*.").unwrap_or(&value);
+        let parsed =
+            url::Host::parse(name).map_err(|_| FormatError::InvalidPolicy("host is not valid"))?;
+        if parsed.to_string() != name {
             return Err(FormatError::InvalidPolicy("host is not normalised"));
         }
-        if value.contains('*') || value.ends_with('.') {
+        if name.contains('*') || name.ends_with('.') {
             return Err(FormatError::InvalidPolicy(
                 "host has a wildcard or trailing dot",
             ));
+        }
+        if name.len() != value.len() {
+            // Names under an address mean nothing, and `*.com` would be everything.
+            let labels_are_whole = name.split('.').all(|label| !label.is_empty());
+            if !matches!(parsed, url::Host::Domain(_)) || !name.contains('.') || !labels_are_whole {
+                return Err(FormatError::InvalidPolicy(
+                    "a host pattern needs a domain of at least two labels",
+                ));
+            }
         }
         Ok(Self(value))
     }
@@ -435,6 +452,26 @@ impl Host {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this is a pattern for the names under a domain, not one host.
+    #[must_use]
+    pub fn is_pattern(&self) -> bool {
+        self.0.starts_with("*.")
+    }
+
+    /// Whether a host, written as a request names it and already normalised, is this
+    /// host or is matched by this pattern.
+    #[must_use]
+    pub fn matches(&self, host: &str) -> bool {
+        match self.0.strip_prefix('*') {
+            // What is left starts with the dot, so the match is on a label boundary.
+            Some(domain) => host.strip_suffix(domain).is_some_and(|labels| {
+                // A request names a host, never a pattern of its own.
+                !labels.is_empty() && !labels.ends_with('.') && !labels.contains('*')
+            }),
+            None => self.0 == host,
+        }
     }
 }
 

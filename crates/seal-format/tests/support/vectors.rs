@@ -142,6 +142,13 @@ fn valid_policies() -> Vec<(&'static str, Policy)> {
             "Postgres",
             builder::postgres("db.example.com", 5432, vec!["app".to_owned()], "app_user").unwrap(),
         ),
+        (
+            "host pattern",
+            Policy::from_json(
+                br#"{"rules":[{"destination":{"scheme":"https","host":"*.example.com"},"inject":{"header":{"name":"Authorization","format":"Bearer {}"}}}]}"#,
+            )
+            .unwrap(),
+        ),
     ]
 }
 
@@ -163,9 +170,9 @@ fn invalid_policies() -> Vec<(&'static str, Value)> {
             json!({ "rules": [{ "destination": https, "inject": bearer, "extra": 1 }] }),
         ),
         (
-            "wildcard host",
+            "wildcard inside a host",
             rule(
-                json!({ "scheme": "https", "host": "*.example.com" }),
+                json!({ "scheme": "https", "host": "api.*.example.com" }),
                 bearer.clone(),
             ),
         ),

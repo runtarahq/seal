@@ -101,8 +101,8 @@ impl Target {
         })
     }
 
-    /// Whether this target is within a destination: the same scheme, host and port,
-    /// and within any path prefix.
+    /// Whether this target is within a destination: the same scheme and port, the same
+    /// host or one its pattern matches, and within any path prefix.
     #[must_use]
     pub fn matches(&self, destination: &Destination) -> bool {
         let Destination::Http {
@@ -115,7 +115,7 @@ impl Target {
             return false;
         };
         *scheme == self.scheme
-            && host.as_str() == self.host
+            && host.matches(&self.host)
             && destination.effective_port() == self.port
             && path_prefix
                 .as_deref()
@@ -326,6 +326,43 @@ mod tests {
         ));
         assert!(!matches("https://evilapi.example.com/", &destination));
         assert!(!matches("https://sub.api.example.com/", &destination));
+    }
+
+    #[test]
+    fn a_host_pattern_matches_the_names_under_its_domain_and_no_others() {
+        let pattern = destination(Scheme::Https, "*.example.com", None, Some("/v3/"));
+        for url in [
+            "https://api.example.com/v3/a",
+            "https://eu.api.example.com/v3/a",
+            "https://xn--bcher-kva.example.com:443/v3/",
+        ] {
+            assert!(matches(url, &pattern), "{url}");
+        }
+        for url in [
+            // The domain itself, and names that only look like it.
+            "https://example.com/v3/a",
+            "https://badexample.com/v3/a",
+            "https://api.example.com.evil.net/v3/a",
+            "https://example.com.evil.net/v3/a",
+            "https://api.example.co/v3/a",
+            "https://api.example.com@evil.net/v3/a",
+            "https://evil.net/api.example.com/v3/a",
+            "https://evil.net/v3/a?h=api.example.com",
+            // Spelled another way, which the parser refuses or keeps apart.
+            "https://API.example.com/v3/a",
+            "https://api.example.com./v3/a",
+            "https://*.example.com/v3/a",
+            "https://api%2eexample.com/v3/a",
+            // An address is under no domain.
+            "https://127.0.0.1/v3/a",
+            "https://[::1]/v3/a",
+            // The rest of the destination still holds.
+            "http://api.example.com/v3/a",
+            "https://api.example.com:8443/v3/a",
+            "https://api.example.com/v2/a",
+        ] {
+            assert!(!matches(url, &pattern), "{url}");
+        }
     }
 
     #[test]

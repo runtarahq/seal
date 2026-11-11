@@ -293,7 +293,6 @@ fn a_value_sealed_from_a_response_never_verifies() {
 fn refuses_hosts_that_are_not_normalised() {
     for host in [
         "API.example.com",
-        "*.example.com",
         "*",
         "example.com.",
         "bücher.example",
@@ -323,6 +322,100 @@ fn accepts_normalised_hosts_and_ip_literals() {
     ] {
         with_destination(https_host(host)).unwrap_or_else(|e| panic!("{host}: {e}"));
     }
+}
+
+#[test]
+fn a_host_may_be_a_pattern_for_the_names_under_a_domain() {
+    for host in [
+        "*.example.com",
+        "*.smba.trafficmanager.net",
+        "*.xn--bcher-kva.example",
+        "*.a.b.c.example.com",
+    ] {
+        let policy = with_destination(https_host(host)).unwrap_or_else(|e| panic!("{host}: {e}"));
+        let canonical = policy.canonical_json().unwrap();
+        assert_eq!(Policy::from_json(&canonical).unwrap(), policy, "{host}");
+    }
+    for host in [
+        // Everything under a top-level name, or under nothing.
+        "*.com",
+        "*.localhost",
+        "*.",
+        "*",
+        "*.*",
+        "*.*.example.com",
+        // A wildcard only leads, as a whole label.
+        "api.*.example.com",
+        "*api.example.com",
+        "api*.example.com",
+        "a.*",
+        "**.example.com",
+        // Names under an address mean nothing.
+        "*.127.0.0.1",
+        "*.0.1",
+        "*.[::1]",
+        // And the domain is held to what a host is.
+        "*.Example.com",
+        "*.example.com.",
+        "*.bücher.example",
+        "*..example.com",
+        "*.example.com:443",
+        "*.example.com/path",
+    ] {
+        assert!(with_destination(https_host(host)).is_err(), "{host:?}");
+    }
+}
+
+#[test]
+fn a_pattern_matches_whole_labels_before_its_domain_and_nothing_else() {
+    let pattern = Host::new("*.example.com").unwrap();
+    assert!(pattern.is_pattern());
+    for host in [
+        "api.example.com",
+        "a.b.example.com",
+        "xn--bcher-kva.example.com",
+    ] {
+        assert!(pattern.matches(host), "{host}");
+    }
+    for host in [
+        "example.com",
+        ".example.com",
+        "a..example.com",
+        "badexample.com",
+        "api.example.com.evil.net",
+        "api.example.co",
+        "api.example.comx",
+        "example.com.api",
+        "*.example.com",
+        "a.*.example.com",
+        "API.EXAMPLE.COM",
+        "127.0.0.1",
+        "[::1]",
+        "",
+    ] {
+        assert!(!pattern.matches(host), "{host}");
+    }
+    // One host is only itself.
+    let exact = Host::new("api.example.com").unwrap();
+    assert!(!exact.is_pattern());
+    assert!(exact.matches("api.example.com"));
+    assert!(!exact.matches("a.api.example.com"));
+    assert!(!exact.matches("example.com"));
+}
+
+#[test]
+fn a_pattern_is_refused_where_one_host_is_meant() {
+    postgres(|destination| destination["host"] = json!("*.example.com")).unwrap_err();
+    jwt(|_| {}).unwrap();
+    with_rule(|rule| {
+        rule["destination"] = token_endpoint();
+        rule["destination"]["host"] = json!("*.example.com");
+        rule["inject"] = json!({ "jwt_assertion": {
+            "alg": "RS256", "aud": "token_endpoint", "claims": { "iss": "client" },
+            "form_field": "assertion", "max_lifetime_s": 300
+        } });
+    })
+    .unwrap_err();
 }
 
 // Path prefixes.
@@ -1091,7 +1184,7 @@ fn definitions_are_bounded_and_validated() {
     parse(&json!({ "rules": [bearer_rule()], "definitions": { "a": { "rules": [] } } }))
         .unwrap_err();
     let mut bad = bearer_rule();
-    bad["destination"]["host"] = json!("*.example.com");
+    bad["destination"]["host"] = json!("api.*.example.com");
     parse(&json!({ "rules": [bearer_rule()], "definitions": { "a": { "rules": [bad] } } }))
         .unwrap_err();
     let mut dangling = bearer_rule();
