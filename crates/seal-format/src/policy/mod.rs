@@ -41,7 +41,8 @@ pub struct Policy {
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
     /// Lets a caller ask whether a message's authentication code was made with this
-    /// secret, such as a webhook's signature. The answer is only yes or no.
+    /// secret, such as a webhook's signature, or whether a token is this secret. The
+    /// answer is only yes or no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<Verify>,
 }
@@ -113,6 +114,9 @@ pub enum Verify {
         /// The hash.
         hash: HmacHash,
     },
+    /// The secret is a token the provider sends back as it is, and the caller presents
+    /// the one that came with a message.
+    Equals,
 }
 
 /// The hash of an HMAC.

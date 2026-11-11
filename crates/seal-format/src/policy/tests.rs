@@ -235,6 +235,9 @@ fn a_policy_may_verify_instead_of_having_rules() {
         let canonical = policy.canonical_json().unwrap();
         assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
     }
+    let equals = parse(&json!({ "verify": "equals" })).unwrap();
+    assert_eq!(equals.verify, Some(Verify::Equals));
+    assert_eq!(equals.canonical_json().unwrap(), br#"{"verify":"equals"}"#);
     // And may do both, or be shared: a platform's webhook secret.
     parse(&json!({ "rules": [bearer_rule()], "verify": { "hmac": { "hash": "sha256" } } }))
         .unwrap();
@@ -243,6 +246,10 @@ fn a_policy_may_verify_instead_of_having_rules() {
     for verify in [
         json!({}),
         json!("hmac"),
+        json!("equal"),
+        json!("Equals"),
+        json!({ "equals": {} }),
+        json!({ "equals": { "hash": "sha256" } }),
         json!({ "hmac": {} }),
         json!({ "hmac": { "hash": "md5" } }),
         json!({ "hmac": { "hash": "SHA256" } }),
