@@ -343,7 +343,7 @@ mod tests {
         source.delete_keyset(&acme).await.unwrap();
         assert!(source.wrapped_keys(&acme).await.unwrap().is_empty());
         assert!(!root.path().join("acme").exists());
-        assert_eq!(source.keysets().unwrap(), [other.clone()]);
+        assert_eq!(source.keysets().unwrap(), std::slice::from_ref(&other));
         assert_eq!(source.wrapped_keys(&other).await.unwrap().len(), 1);
 
         // Again, or for a keyset that never was, there is nothing to do.
