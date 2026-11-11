@@ -53,14 +53,14 @@ the same code.
 
 | Code | Meaning | Retry? |
 |---|---|---|
-| `CALLER_DENIED` | The caller may not use this keyset, or make an admin call | No |
+| `CALLER_DENIED` | The caller may not use this keyset, make an admin call, or destroy this keyset | No |
 | `BAD_REQUEST` | The request is malformed | No |
 | `OPEN_FAILED` | A sealed value did not open: wrong item, field or key | No |
 | `KEYSET_UNKNOWN` | The keyset has no keys | No |
 | `KEYS_UNAVAILABLE` | The keys could not be loaded | Yes |
 | `POLICY_DENIED` | No rule allows this request, or the value may not verify: a bug or an attack | No |
 | `DESTINATION_REFUSED` | The destination's address is refused | No |
-| `CONFLICT` | Rules conflict, or the caller set something an injection sets | No |
+| `CONFLICT` | Rules conflict, or the caller set something an injection sets. For a keyset call: it already exists, has as many keys as it may, or the key source cannot delete | No |
 | `BODY_TOO_LARGE` | A body that has to be buffered, or a message to verify, is over the cap | No |
 | `RESPONSE_TOO_LARGE` | A response that has to be sealed is over the cap; nothing of it is returned | No |
 | `RESPONSE_UNPARSEABLE` | A response that has to be sealed could not be parsed, or a response repeats a credential seal sent | No |
@@ -108,6 +108,11 @@ for this request or this long.
 call is audited. `GenerateKeyset` and `Rotate` return the wrapped key, which the
 application stores if seal's key source is read-only. No private key leaves seal
 unwrapped.
+
+`DestroyKeyset` deletes every key of a keyset from the key source, and cannot be undone.
+It needs a caller with `destroy_keysets = true` that may use the keyset; `admin` is
+neither needed nor enough. It is audited as `destroy_keyset`. `KEYSET_UNKNOWN` means
+there was nothing to delete, and `CONFLICT` that the key source cannot delete.
 
 ## `Info`
 

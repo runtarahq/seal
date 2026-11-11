@@ -30,8 +30,8 @@ flows, and [`operations.md`](operations.md) running seal itself.
 - **Manage each keyset's lifecycle.** Generate one when a tenant is created (an admin
   caller); rotate on schedule and on suspicion; wait `max_stale`, stop sealing to the
   old public key, reseal, then delete the old wrapped keys. When a tenant leaves,
-  destroy all of its wrapped keys, including copies in backups, or destroy the key that
-  wraps them. Once that has taken effect ([Destroying a
+  destroy all of its wrapped keys, with `destroy_keyset` from a caller allowed to and
+  then in the key source's backups, or destroy the key that wraps them. Once that has taken effect ([Destroying a
   keyset](operations.md#destroying-a-keyset)), its backups hold nothing usable. Running
   requests and Postgres sessions end on their own limits.
 - **Check webhooks through seal.** Seal a signing secret with `verify` and no rules,

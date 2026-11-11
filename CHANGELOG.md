@@ -74,6 +74,9 @@ The first release.
   `postgres` feature.
 - Key management: keysets, rotation, wrapped keys, key sources, and administrative
   calls for callers marked `admin`.
+- Destroying a keyset when a tenant leaves: `seal destroy-keyset`, or the `DestroyKeyset`
+  call for a caller marked `destroy_keysets` that may use the keyset. `admin` does not
+  allow it. See [`docs/operations.md`](docs/operations.md#destroying-a-keyset).
 - `seal reseal` moves stored values to a keyset's current key, and with
   `--rewrite-policies` gives them new policies, so that a change of destination does not
   mean entering every secret again. Only whoever runs seal can do this.

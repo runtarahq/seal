@@ -30,7 +30,8 @@ working afterwards.
 |---|---|---|
 | Application, working normally | Seal values, and ask seal to use them | Read a secret |
 | Compromised application | Use any value it can present, for any request a value's policy allows | Read a secret, change a policy, reach a destination no policy allows, or hide its use |
-| Administrative caller | Generate and rotate keys | Read a private key, which never leaves seal unwrapped |
+| Administrative caller | Generate and rotate keys | Read a private key, which never leaves seal unwrapped. Destroy a keyset, which needs `destroy_keysets` |
+| Caller that may destroy keysets | Make every value of the keysets it may use unreadable, for good | Read a value, or touch a keyset it may not use |
 | Provider | Receive the credentials sealed for it | Receive another destination's credentials |
 | Database server | Receive a SCRAM proof or, where the rule allows, an MD5 hash or a password | Pass as the real server: TLS verifies its name, and SCRAM its knowledge of the password |
 | Network attacker | Observe and interfere with traffic | Read or redirect credentials, given correct TLS validation |
