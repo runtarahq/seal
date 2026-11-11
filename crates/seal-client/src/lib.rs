@@ -424,6 +424,13 @@ pub trait SealClient: Send + Sync {
 
     /// Administrative: a keyset's public keys, oldest first.
     async fn public_keys(&self, keyset: &KeysetId) -> Result<Vec<PublicKeyInfo>, SealError>;
+
+    /// Deletes every key of a keyset from the key source, when a tenant leaves. This
+    /// cannot be undone: nothing sealed to the keyset opens again, from here or from a
+    /// backup of the values. Over gRPC the caller must be allowed to destroy keysets
+    /// and to use this one. Other instances stop using it within `max_stale`, and
+    /// copies of the wrapped keys in backups of the key source are not touched.
+    async fn destroy_keyset(&self, keyset: &KeysetId) -> Result<(), SealError>;
 }
 
 #[cfg(test)]

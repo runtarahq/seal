@@ -204,6 +204,10 @@ pub struct CallerConfig {
     /// Whether it may make and rotate keys.
     #[serde(default)]
     pub admin: bool,
+    /// Whether it may destroy the keysets it may use, which cannot be undone. Separate
+    /// from `admin`, so that a caller that makes keysets cannot also end them.
+    #[serde(default)]
+    pub destroy_keysets: bool,
 }
 
 /// Where wrapped keys come from and what unwraps them.

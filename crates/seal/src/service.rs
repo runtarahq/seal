@@ -177,6 +177,39 @@ impl Service {
             .map_err(|_| refusal(ErrorCode::Internal, "could not write the audit record"))
     }
 
+    /// Deletes a keyset's keys, for a caller that may destroy keysets and may use this
+    /// one. Every attempt leaves an audit record.
+    async fn destroy(&self, request: Request<KeysetRequest>) -> Result<Response<Empty>, Status> {
+        let caller = self.caller(&request)?;
+        let name = request.into_inner().keyset;
+        let keyset = KeysetId::new(name.clone()).ok();
+        let allowed =
+            caller.destroy_keysets && keyset.as_ref().is_none_or(|keyset| caller.may_use(keyset));
+        if !allowed {
+            if !self.per_caller.allow(&caller.name) {
+                return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
+            }
+            // Only a keyset that is an identifier goes in the record.
+            let recorded = keyset.map(|keyset| keyset.to_string()).unwrap_or_default();
+            return Err(self.denied(
+                "destroy_keyset",
+                &caller,
+                &recorded,
+                "the caller may not destroy this keyset",
+            ));
+        }
+        let keyset = keyset.ok_or_else(|| bad("the keyset is not valid"))?;
+        let result = self.keyring.destroy(&keyset).await;
+        self.audit_admin(
+            "destroy_keyset",
+            &caller,
+            &name,
+            result.as_ref().err().map(|error| key_code(*error)),
+        )?;
+        result.map_err(key_status)?;
+        Ok(Response::new(Empty {}))
+    }
+
     async fn keyset_operation(
         &self,
         op: &'static str,
@@ -240,7 +273,10 @@ fn broker_status(error: &BrokerError) -> Status {
 fn key_code(error: KeyError) -> ErrorCode {
     match error {
         KeyError::UnknownKeyset => ErrorCode::KeysetUnknown,
-        KeyError::AlreadyExists | KeyError::TooManyKeys => ErrorCode::Conflict,
+        // A key source that cannot delete: the deployment's, not the moment's.
+        KeyError::AlreadyExists | KeyError::TooManyKeys | KeyError::Unsupported => {
+            ErrorCode::Conflict
+        }
         KeyError::Invalid(_) => ErrorCode::BadRequest,
         _ => ErrorCode::KeysUnavailable,
     }
@@ -820,6 +856,13 @@ impl Seal for Service {
                 })
                 .collect(),
         }))
+    }
+
+    async fn destroy_keyset(
+        &self,
+        request: Request<KeysetRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.destroy(request).await
     }
 
     async fn info(&self, request: Request<Empty>) -> Result<Response<InfoReply>, Status> {

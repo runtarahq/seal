@@ -44,6 +44,8 @@ pub struct Caller {
     keysets: Vec<KeysetId>,
     /// Whether it may make and rotate keys.
     pub admin: bool,
+    /// Whether it may destroy the keysets it may use.
+    pub destroy_keysets: bool,
 }
 
 impl Caller {
@@ -82,6 +84,7 @@ impl CallerMap {
                         .filter_map(|keyset| KeysetId::new(keyset.clone()).ok())
                         .collect(),
                     admin: config.admin,
+                    destroy_keysets: config.destroy_keysets,
                 };
                 Some((identity, caller))
             })
@@ -231,6 +234,7 @@ mod tests {
             cert_san: None,
             keysets: keysets.iter().map(|keyset| (*keyset).to_owned()).collect(),
             admin,
+            destroy_keysets: false,
         }
     }
 

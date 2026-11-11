@@ -506,6 +506,12 @@ impl SealClient for ScanningClient {
         self.keep(&result);
         result
     }
+
+    async fn destroy_keyset(&self, keyset: &KeysetId) -> Result<(), SealError> {
+        let result = self.inner.destroy_keyset(keyset).await;
+        self.keep(&result);
+        result
+    }
 }
 
 impl Instance {
