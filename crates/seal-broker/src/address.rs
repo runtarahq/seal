@@ -190,6 +190,8 @@ pub struct NetworkPolicy {
     pub allow_private_cidrs: Vec<Cidr>,
     /// Whether a rule's `allow_private_destination` has any effect. Off by default.
     pub honour_private_rules: bool,
+    /// Whether a Postgres rule may connect with no TLS at all. Off by default.
+    pub honour_plaintext_postgres_rules: bool,
 }
 
 impl NetworkPolicy {
@@ -448,6 +450,7 @@ mod tests {
             ],
             allow_private_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
             honour_private_rules: true,
+            ..NetworkPolicy::default()
         };
         assert!(!policy.permits(ip("8.8.8.8"), true));
         assert!(!policy.permits(ip("::ffff:8.8.8.8"), true));

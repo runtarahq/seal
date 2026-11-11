@@ -435,6 +435,9 @@ impl Broker {
         let limits = self.limits.tightened_by(&plan.limits);
         let mut record = record.clone();
         record.outcome = Outcome::Cancelled;
+        // Validation already refuses such a policy: the password, or an MD5 hash that
+        // stands in for it, goes only to a server that has been verified.
+        let verified = terms.tls.verifies_the_server();
         Ok(PgSession {
             host,
             port,
@@ -442,14 +445,16 @@ impl Broker {
             databases: terms.databases,
             allow_replication: terms.allow_replication,
             tls: terms.tls,
-            allow_md5: terms
-                .password
-                .as_ref()
-                .is_some_and(|password| password.allow_md5),
-            allow_cleartext: terms
-                .password
-                .as_ref()
-                .is_some_and(|password| password.allow_cleartext),
+            allow_md5: verified
+                && terms
+                    .password
+                    .as_ref()
+                    .is_some_and(|password| password.allow_md5),
+            allow_cleartext: verified
+                && terms
+                    .password
+                    .as_ref()
+                    .is_some_and(|password| password.allow_cleartext),
             require_channel_binding: terms
                 .password
                 .as_ref()

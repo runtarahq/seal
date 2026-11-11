@@ -28,6 +28,17 @@ pub struct MockPostgres {
     task: JoinHandle<()>,
 }
 
+/// How the server takes a connection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Transport {
+    /// Answers an `SSLRequest` with `S` and speaks TLS.
+    Tls,
+    /// Answers an `SSLRequest` with `N` and closes.
+    DeclinesTls,
+    /// Expects no `SSLRequest`: the startup comes first, in the clear.
+    Plain,
+}
+
 /// What the server does with a login.
 #[derive(Clone)]
 enum Login {
@@ -53,7 +64,23 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start(host: &str, tls: bool) -> Self {
-        Self::start_inner(host, tls, Login::AtOnce).await
+        let transport = if tls {
+            Transport::Tls
+        } else {
+            Transport::DeclinesTls
+        };
+        Self::start_inner(host, transport, Login::AtOnce).await
+    }
+
+    /// Starts a server that speaks no TLS at all, as one with `ssl = off` does: it
+    /// reads the startup as the first bytes, then logs a client in with SCRAM-SHA-256
+    /// for this password.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it cannot listen or make certificates.
+    pub async fn start_plaintext_scram(host: &str, password: &[u8]) -> Self {
+        Self::start_inner(host, Transport::Plain, Login::Scram(password.to_vec())).await
     }
 
     /// Starts a server with a certificate for `host` that logs a client in with
@@ -63,7 +90,7 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start_scram(host: &str, password: &[u8]) -> Self {
-        Self::start_inner(host, true, Login::Scram(password.to_vec())).await
+        Self::start_inner(host, Transport::Tls, Login::Scram(password.to_vec())).await
     }
 
     /// Starts a server with a certificate for `host` that completes TLS, reads the
@@ -73,10 +100,10 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start_silent(host: &str) -> Self {
-        Self::start_inner(host, true, Login::Never).await
+        Self::start_inner(host, Transport::Tls, Login::Never).await
     }
 
-    async fn start_inner(host: &str, tls: bool, login: Login) -> Self {
+    async fn start_inner(host: &str, transport: Transport, login: Login) -> Self {
         let pki = TestPki::new("db CA");
         let issued = pki.server(&[host]);
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -100,7 +127,7 @@ impl MockPostgres {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let (acceptor, recorded) = (acceptor.clone(), Arc::clone(&recorded));
-                tokio::spawn(serve(stream, acceptor, recorded, tls, login.clone()));
+                tokio::spawn(serve(stream, acceptor, recorded, transport, login.clone()));
             }
         });
         Self {
@@ -146,23 +173,36 @@ async fn serve(
     mut stream: tokio::net::TcpStream,
     acceptor: TlsAcceptor,
     recorded: Arc<Mutex<Vec<Vec<u8>>>>,
-    tls: bool,
+    transport: Transport,
     login: Login,
 ) {
+    if transport == Transport::Plain {
+        return session(stream, recorded, login).await;
+    }
     let mut request = [0; 8];
     if stream.read_exact(&mut request).await.is_err() || request != SSL_REQUEST {
         return;
     }
-    if !tls {
+    if transport == Transport::DeclinesTls {
         let _ = stream.write_all(b"N").await;
         return;
     }
     if stream.write_all(b"S").await.is_err() {
         return;
     }
-    let Ok(mut stream) = acceptor.accept(stream).await else {
+    let Ok(stream) = acceptor.accept(stream).await else {
         return;
     };
+    session(stream, recorded, login).await;
+}
+
+/// What follows once the connection is as protected as it will be: the startup, the
+/// login, and then an echo.
+async fn session<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    recorded: Arc<Mutex<Vec<Vec<u8>>>>,
+    login: Login,
+) {
     let Ok(length) = stream.read_u32().await else {
         return;
     };

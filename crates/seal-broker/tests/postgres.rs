@@ -408,3 +408,147 @@ async fn the_user_can_be_a_plain_field_the_rule_lists() {
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::PolicyDenied);
 }
+
+// Servers that are not verified, or reached without TLS.
+
+fn tls_policy(server: &MockPostgres, tls: &str) -> Policy {
+    let mut destination = destination(server, None);
+    destination["tls"] = json!(tls);
+    rule_policy(&json!({
+        "destination": destination,
+        "allow_private_destination": true,
+        "inject": { "pg_password": {} },
+    }))
+}
+
+fn allowing_plaintext() -> Harness {
+    let mut options = Options::default();
+    options.network.honour_private_rules = true;
+    options.network.honour_plaintext_postgres_rules = true;
+    Harness::with(options)
+}
+
+/// Logs in and checks the session relays, returning the audited login method.
+async fn logs_in(harness: &Harness, server: &MockPostgres, password: &Envelope) -> &'static str {
+    let (mut caller, task) = session(
+        harness,
+        connect_request(server, password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    assert_eq!(read_message(&mut caller).await.tag, b'R');
+    assert_eq!(read_message(&mut caller).await.tag, b'Z');
+    caller.write_all(b"hello server").await.unwrap();
+    let mut echo = [0; 12];
+    caller.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"hello server");
+    drop(caller);
+    task.await.unwrap().unwrap();
+    harness.audit.last().pg_auth.unwrap()
+}
+
+/// Expects the session to be refused during its login, and returns why.
+async fn refused(harness: &Harness, server: &MockPostgres, password: &Envelope) -> ErrorCode {
+    let (mut caller, task) = session(
+        harness,
+        connect_request(server, password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    assert_eq!(read_message(&mut caller).await.tag, b'E');
+    task.await.unwrap().unwrap_err().code()
+}
+
+/// As libpq's `sslmode=require`: TLS, with a certificate from a CA nothing here trusts.
+#[tokio::test]
+async fn an_unverified_server_is_logged_in_to_over_tls_with_scram() {
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
+    let harness = harness();
+    // The same server, verified, is refused: its CA is not one of the roots.
+    let verified = harness.seal("password", b"pw", &tls_policy(&server, "verify_full"));
+    assert_eq!(
+        refused(&harness, &server, &verified).await,
+        ErrorCode::UpstreamTls
+    );
+
+    let password = harness.seal("password", b"pw", &tls_policy(&server, "unverified"));
+    assert_eq!(logs_in(&harness, &server, &password).await, "scram-sha-256");
+    assert_eq!(server.startup_param(0, "user").as_deref(), Some("app_user"));
+}
+
+/// Unverified is still TLS: a server without it is not fallen back to, and one that
+/// asks for no password has proved nothing, so there is no login to pass on.
+#[tokio::test]
+async fn an_unverified_server_must_still_offer_tls_and_know_the_password() {
+    let harness = harness();
+    let no_tls = MockPostgres::start(HOST, false).await;
+    let password = harness.seal("password", b"pw", &tls_policy(&no_tls, "unverified"));
+    assert_eq!(
+        refused(&harness, &no_tls, &password).await,
+        ErrorCode::UpstreamTls
+    );
+
+    let trusting = MockPostgres::start(HOST, true).await;
+    let password = harness.seal("password", b"pw", &tls_policy(&trusting, "unverified"));
+    assert_eq!(
+        refused(&harness, &trusting, &password).await,
+        ErrorCode::PgAuthFailed
+    );
+
+    // The mock hangs up on a wrong password, where a real server says so.
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
+    let wrong = harness.seal("password", b"not it", &tls_policy(&server, "unverified"));
+    refused(&harness, &server, &wrong).await;
+    assert_eq!(harness.audit.last().pg_auth, None);
+}
+
+/// As libpq's `sslmode=disable`, where the deployment allows it.
+#[tokio::test]
+async fn a_server_without_tls_is_logged_in_to_with_scram_where_the_deployment_allows() {
+    let server = MockPostgres::start_plaintext_scram(HOST, b"pw").await;
+    let harness = allowing_plaintext();
+    let password = harness.seal("password", b"pw", &tls_policy(&server, "plaintext"));
+    assert_eq!(logs_in(&harness, &server, &password).await, "scram-sha-256");
+    assert_eq!(server.startup_param(0, "database").as_deref(), Some("app"));
+
+    // The mock hangs up on a wrong password, where a real server says so.
+    let wrong = harness.seal("password", b"not it", &tls_policy(&server, "plaintext"));
+    refused(&harness, &server, &wrong).await;
+    assert_eq!(harness.audit.last().pg_auth, None);
+}
+
+/// The rule asks; the deployment decides. Off by default, and refused before DNS.
+#[tokio::test]
+async fn a_rule_for_no_tls_is_refused_unless_the_deployment_allows_it() {
+    let server = MockPostgres::start_plaintext_scram(HOST, b"pw").await;
+    let harness = harness();
+    let password = harness.seal("password", b"pw", &tls_policy(&server, "plaintext"));
+    assert_eq!(
+        refused(&harness, &server, &password).await,
+        ErrorCode::DestinationRefused
+    );
+    assert_eq!((harness.lookups(), harness.connects()), (0, 0));
+    assert!(server.packets().is_empty());
+    let record = harness.audit.last();
+    assert_eq!(record.code, Some("DESTINATION_REFUSED"));
+    assert_eq!(record.outcome, seal_broker::audit::Outcome::Refused);
+}
+
+/// A rule that verifies is never served over less: a server that only speaks in the
+/// clear is refused even where the deployment allows plaintext rules.
+#[tokio::test]
+async fn allowing_plaintext_rules_does_not_weaken_the_others() {
+    let server = MockPostgres::start_plaintext_scram(HOST, b"pw").await;
+    let harness = allowing_plaintext();
+    for tls in ["verify_full", "unverified"] {
+        let password = harness.seal("password", b"pw", &tls_policy(&server, tls));
+        let code = refused(&harness, &server, &password).await;
+        assert!(
+            matches!(
+                code,
+                ErrorCode::UpstreamTls | ErrorCode::UpstreamConnect | ErrorCode::UpstreamTimeout
+            ),
+            "{tls}: {code:?}"
+        );
+    }
+}

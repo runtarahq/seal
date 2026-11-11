@@ -528,6 +528,12 @@ impl HttpClient {
         self.pool.config.per_stream_buffer as usize
     }
 
+    /// Whether this deployment lets a Postgres rule connect with no TLS.
+    #[must_use]
+    pub fn allows_plaintext_postgres(&self) -> bool {
+        self.network.honour_plaintext_postgres_rules
+    }
+
     /// The roots providers are verified against: the public ones and any configured.
     #[must_use]
     pub fn roots(&self) -> Arc<RootCertStore> {
