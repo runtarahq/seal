@@ -130,6 +130,12 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   the whole of it in constant time and refuses a shorter one, so the answers do not
   add up to a forgery. A compromised application can still accept a forged webhook by
   not asking; that was always its own decision.
+- **A host pattern trusts a whole domain.** A rule for `*.example.com` sends its secret
+  to any name under `example.com` that a compromised application asks for, so whoever
+  can serve one such name with a valid certificate, by registering it or taking over a
+  dangling one, receives the secret. seal matches on label boundaries and refuses a
+  pattern for a top-level name, but cannot know who may register names under a domain:
+  the sealer chooses the domain, and an exact host remains the default.
 - **A value that allows an injected path goes wherever that prefix leads.** With
   `allow_injected_path`, a value is sent under a path prefix filled by another sealed
   value, and anyone with the public key can seal one. A compromised application can

@@ -23,6 +23,9 @@ The first release.
 - Policies name the destinations, methods and paths a value may be used for. The matcher
   treats every policy as untrusted, and checks every address it connects to. See
   [`docs/policy.md`](docs/policy.md).
+- A rule's host may be a pattern, `*.` and a domain, for a provider whose API is on
+  regional or per-tenant hosts. It matches the names under that domain on a label
+  boundary. See [`docs/policy.md`](docs/policy.md#host-patterns).
 - A value may go with one injected into the path where its own rule allows that prefix
   with `allow_injected_path`, as Telegram's `setWebhook` needs for the bot token and the
   webhook's secret.

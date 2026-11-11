@@ -50,13 +50,41 @@ rule's secret. An injection names only the other parts of a credential, each as
 
 ### HTTP
 
-`scheme`, `host` and `port` are exact. `port` defaults by scheme.
+`scheme` and `port` are exact, and so is `host` unless it is a pattern. `port` defaults by
+scheme.
 
 - `host` is a DNS name or IP literal, already lowercase and IDNA-normalised, with no
-  wildcards or trailing dot. Write `xn--bcher-kva.example`, not `bücher.example`.
+  trailing dot. Write `xn--bcher-kva.example`, not `bücher.example`.
+- `host` may instead be a pattern, `*.` and a domain of at least two labels, for a
+  provider whose API is on many hosts. See [Host patterns](#host-patterns).
 - `path_prefix` starts with `/` and matches on segment boundaries. It may not have
   `.` or `..` segments, empty segments, or an encoded dot or separator (`%2e`, `%2f`,
   `%5c`).
+
+### Host patterns
+
+Some providers serve one API from many hosts, named per region or per tenant, and tell
+the application which to call. A pattern allows every name under one domain:
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "*.smba.trafficmanager.net" },
+  "inject": { "header": { "name": "Authorization", "format": "Bearer {}" } }
+}] }
+```
+
+It matches a host that ends with the domain on a label boundary, with one label or
+several before it: `emea.smba.trafficmanager.net` and `a.b.smba.trafficmanager.net`, but
+not `smba.trafficmanager.net` itself, which needs a rule of its own, and not
+`evilsmba.trafficmanager.net`. The `*` only leads, as a whole label; `*.com` and a
+pattern under an IP literal are refused. TLS still verifies the certificate against the
+host the request named.
+
+A pattern sends the secret to whoever can serve a name under the domain. Use one only
+for a domain whose every name is the provider's: not one where customers get names of
+their own, such as a hosting or storage domain, where anyone could register a name and
+ask for the credential. A Postgres destination, a `jwt_assertion` rule and a client
+certificate's `server_name` take one host and no pattern.
 
 ### Postgres
 
