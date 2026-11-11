@@ -128,7 +128,8 @@ message VerifyHead {
   string sealed = 4;
   // The item the value is bound to, if not the request's: a shared value.
   string value_item = 5;
-  // The code that came with the message, as bytes.
+  // The code that came with the message, as bytes. For a policy that verifies with
+  // `equals`, the token that came with it, and no message follows.
   bytes mac = 6;
 }
 

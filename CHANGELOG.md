@@ -50,6 +50,9 @@ The first release.
 - `verify`: a signing secret sealed with a `verify` policy checks a message's HMAC
   (SHA-1, SHA-256 or SHA-512) and can be sent nowhere. seal answers yes or no and never
   returns a code. See [`docs/policy.md`](docs/policy.md#verification).
+- `"verify": "equals"`, for a provider that sends back a token with each webhook instead
+  of signing it, such as Telegram's `secret_token`: seal says whether a presented token
+  is the sealed one.
 
 ### Postgres
 

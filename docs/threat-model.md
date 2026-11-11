@@ -129,6 +129,10 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   the whole of it in constant time and refuses a shorter one, so the answers do not
   add up to a forgery. A compromised application can still accept a forged webhook by
   not asking; that was always its own decision.
+- **A caller can guess a token.** With `"verify": "equals"`, each answer says whether
+  one guess is the secret. seal compares the whole token in constant time, so an answer
+  says nothing of where a guess went wrong, and the keyset's rate limit bounds the
+  guesses. That is enough for a generated token and not for a short or chosen one.
 - **A caller can read data with a credential it can use.** seal limits where a
   credential goes, not what the provider returns for an allowed request, nor what an
   allowed request does there: it may, for example, set S3 metadata or storage class.

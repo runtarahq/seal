@@ -87,6 +87,10 @@ cap, and replies `valid`. A code that does not match is `valid = false`, not an 
 `POLICY_DENIED` means the value may not verify at all. seal never returns a code, and
 only one of the hash's full length can match.
 
+For a value whose policy has `"verify": "equals"`, `mac` is the token that came with the
+webhook and there is no message: the caller sends the head, then `end`. A call that
+sends a message is refused with `BAD_REQUEST`.
+
 ## `Presign`
 
 `rpc Presign(PresignRequest) returns (PresignReply)` returns a presigned S3 URL, or a Blob

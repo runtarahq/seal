@@ -557,6 +557,21 @@ compares the whole code in constant time and never returns one, so a caller can 
 codes but cannot make them, nor find one a byte at a time. The builder's
 `webhook_hmac(hash)` makes this policy.
 
+Some providers sign nothing: they send back, with each webhook, a token the application
+chose when it registered the webhook, such as Telegram's `secret_token` in
+`X-Telegram-Bot-Api-Secret-Token`. `equals` checks such a token:
+
+```json
+{ "verify": "equals" }
+```
+
+The caller presents the token that came with the webhook in place of the code, and no
+message: the token does not cover one, and seal refuses a call that sends one. seal
+compares the whole token in constant time, and a value sealed empty matches nothing. A
+caller can try tokens, at the rate its keyset allows, so the token must be long and
+random: seal a generated one, not one a person chose. The builder's `webhook_token()`
+makes this policy.
+
 A platform's own webhook secret, such as one Slack app's for every tenant, can also be
 `shared`:
 
@@ -631,6 +646,7 @@ where it is used.
 | `azure(account, service, endpoint)` | An account key |
 | `client_cert(api_base, cert, chain)` | A client certificate's private key |
 | `webhook_hmac(hash)` | A webhook signing secret, which only verifies |
+| `webhook_token()` | A token a provider sends back with each webhook, which only verifies |
 | `postgres(host, port, databases, user)` | A Postgres password, with SCRAM only and the server verified |
 
 A part of a composite credential comes from a `PartSource`: `Literal` fixes it in the policy,

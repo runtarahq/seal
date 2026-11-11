@@ -161,6 +161,22 @@ pub fn webhook_hmac(hash: HmacHash) -> Result<Policy, FormatError> {
     })
 }
 
+/// A token that only checks messages: one a provider sends back as it is with each
+/// webhook, such as Telegram's `secret_token`. It can be sent nowhere, and a caller
+/// learns only whether a token is this one.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidPolicy`] if the policy cannot be serialised.
+pub fn webhook_token() -> Result<Policy, FormatError> {
+    finish(Policy {
+        rules: Vec::new(),
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: Some(Verify::Equals),
+    })
+}
+
 /// A password sent with basic auth.
 ///
 /// # Errors
@@ -644,6 +660,13 @@ mod tests {
             String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
             r#"{"verify":{"hmac":{"hash":"sha256"}}}"#
         );
+    }
+
+    #[test]
+    fn a_webhook_token_has_no_rules_and_only_verifies() {
+        let policy = webhook_token().unwrap();
+        assert!(policy.rules.is_empty() && !policy.shared);
+        assert_eq!(policy.canonical_json().unwrap(), br#"{"verify":"equals"}"#);
     }
 
     #[test]
