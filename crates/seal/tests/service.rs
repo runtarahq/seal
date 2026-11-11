@@ -994,6 +994,50 @@ fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
 }
 
 #[test]
+fn destroy_keyset_deletes_one_keyset_once_its_name_is_confirmed() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let config = write_config(
+        &setup,
+        &setup.config_text(
+            Mode::Unix,
+            &Options::default(),
+            "[listen]\nunix = \"/tmp/x.sock\"\n",
+        ),
+    );
+    let destroy = |keyset: &str, confirm: &str| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(["destroy-keyset", "--config"])
+            .arg(&config)
+            .args(["--keyset", keyset, "--confirm", confirm])
+            .output()
+            .unwrap()
+    };
+    let (acme, platform) = (setup.keys_dir.join("acme"), setup.keys_dir.join("platform"));
+    assert!(acme.is_dir() && platform.is_dir());
+
+    // Without its name repeated, nothing is touched.
+    assert!(!destroy("acme", "yes").status.success());
+    assert!(!destroy("acme", "platform").status.success());
+    assert!(acme.is_dir());
+
+    let done = destroy("acme", "acme");
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(String::from_utf8_lossy(&done.stdout).starts_with("destroyed keyset acme"));
+    assert!(!acme.exists());
+    assert!(platform.is_dir(), "another keyset is left alone");
+
+    // There is nothing left to destroy, and no path to walk out of the directory by.
+    assert!(!destroy("acme", "acme").status.success());
+    assert!(!destroy("../kek", "../kek").status.success());
+    assert!(setup.kek.exists());
+}
+
+#[test]
 fn keygen_makes_wrapping_keys_and_keysets_and_version_prints() {
     let directory = tempfile::tempdir().unwrap();
     let kek = directory.path().join("kek");

@@ -61,6 +61,17 @@ enum Command {
         #[arg(long)]
         rewrite_policies: bool,
     },
+    /// Deletes every key of a keyset from the configured key source, when a tenant
+    /// leaves. This cannot be undone: nothing sealed to the keyset opens again.
+    DestroyKeyset {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        keyset: String,
+        /// The keyset's name again, to confirm it.
+        #[arg(long)]
+        confirm: String,
+    },
     /// Rotates the wrapping key: wraps every key in the configured key directory
     /// again, under a new wrapping key, into a new directory. Nothing configured is
     /// changed; point the configuration at the new directory and wrapping key, and
@@ -145,6 +156,20 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Command::Keygen { .. } => {
             Err("keygen needs --config and --keyset, or --wrapping-key".to_owned())
+        }
+        Command::DestroyKeyset {
+            config,
+            keyset: name,
+            confirm,
+        } => {
+            if confirm != name {
+                return Err("--confirm must repeat the keyset's name".to_owned());
+            }
+            let config = Config::load(&config).map_err(|error| error.to_string())?;
+            let keyset = keyset(&name)?;
+            runtime()?.block_on(seal::cli::destroy_keyset(&config, &keyset))?;
+            println!("destroyed keyset {keyset}; running instances stop using it within max_stale");
+            Ok(ExitCode::SUCCESS)
         }
         Command::Reseal {
             config,
