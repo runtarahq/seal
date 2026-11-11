@@ -51,6 +51,9 @@ pub struct AuditRecord {
     pub code: Option<&'static str>,
     /// How a Postgres session logged in, such as `scram-sha-256-plus`.
     pub pg_auth: Option<&'static str>,
+    /// How a Postgres session to the server was protected: `verified`, `unverified`
+    /// (TLS, to a server that did not prove who it is) or `none`.
+    pub pg_tls: Option<&'static str>,
     /// For `verify`: whether the code matched.
     pub verified: Option<bool>,
     /// For `presign`: how long the URL lasts, in seconds.
@@ -195,6 +198,7 @@ mod tests {
             outcome: Outcome::Ok,
             code: None,
             pg_auth: None,
+            pg_tls: None,
             verified: None,
             expires_s: None,
         }
@@ -227,6 +231,7 @@ mod tests {
                 "outcome",
                 "path",
                 "pg_auth",
+                "pg_tls",
                 "rules",
                 "shared",
                 "status",

@@ -70,10 +70,12 @@ on the user and on TLS, and a session may use only the databases both allow.
 
 1. seal connects to an address it has checked, like any destination. A private address
    needs `allow_private_destination` and an operator who honours it.
-2. It sends `SSLRequest`, and refuses a server that does not offer TLS. It reads exactly
-   the one-byte answer before the handshake, so nothing unprotected can be slipped in.
+2. It sends `SSLRequest`, and refuses a server that does not offer TLS, unless the rule
+   says `"tls": "allow_plain"`. It reads exactly the one-byte answer before the
+   handshake, so nothing unprotected can be slipped in.
 3. TLS verifies the server against the configured roots, or the rule's CA, and the host
    name, with ALPN `postgresql`. A client certificate goes here, if one was presented.
+   A rule with `"tls": "allow_unverified"` or `"allow_plain"` accepts any certificate.
 4. seal sends the startup, then logs in with what the server asks for:
 
    | The server asks for | seal | Allowed |
@@ -95,7 +97,27 @@ on the user and on TLS, and a session may use only the databases both allow.
 5. On success seal sends the application `AuthenticationOk`. From then on it relays.
 
 The audit record names how each session logged in, in `pg_auth`: `scram-sha-256-plus`,
-`scram-sha-256`, `md5`, `cleartext`, `cert` or `trust`.
+`scram-sha-256`, `md5`, `cleartext`, `cert` or `trust`. It names how the session to the
+server was protected in `pg_tls`: `verified`, `unverified` or `none`.
+
+### A server that cannot be verified, or has no TLS
+
+Both are weakening options, for a database that an application already reaches that
+way. What the password is exposed to then depends on who may be listening, so seal
+narrows how it logs in:
+
+| The rule's `tls` | The session | Logs in with |
+|---|---|---|
+| `verify_full`, or a CA | Encrypted, to the server the rule names | Whatever the rule allows |
+| `allow_unverified` | Encrypted, to whoever answers for the host | SCRAM, and MD5 with `allow_md5`. Never a cleartext password |
+| `allow_plain`, and the server has no TLS | Readable on the network | SCRAM only |
+
+SCRAM does not disclose the password, and checks that the server knows it, so a server
+that only answers for the host cannot complete the login. It can still relay one to the
+real server and read the session: use these options where the network between seal and
+the database is trusted, and prefer a CA in the rule where the server has a certificate.
+With `allow_plain`, someone who can change the traffic can also remove the server's offer
+of TLS.
 
 ## Errors
 

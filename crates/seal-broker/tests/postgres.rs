@@ -265,6 +265,132 @@ async fn the_server_must_offer_tls_and_prove_its_name() {
     );
 }
 
+/// A policy for `server` with this `tls` and these `pg_password` options.
+fn weakened_policy(server: &MockPostgres, tls: &str, password: Value) -> Policy {
+    let mut destination = destination(server, None);
+    destination["tls"] = json!(tls);
+    rule_policy(&json!({
+        "destination": destination,
+        "allow_private_destination": true,
+        "inject": { "pg_password": password },
+    }))
+}
+
+/// Logs in as `app_user` to `app`, and returns the first message the caller gets
+/// and how the session ended.
+async fn log_in(
+    harness: &Harness,
+    server: &MockPostgres,
+    policy: &Policy,
+) -> (wire::Message, Result<(), seal_broker::BrokerError>) {
+    let password = harness.seal("password", b"pw", policy);
+    let (mut caller, task) = session(
+        harness,
+        connect_request(server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    let first = read_message(&mut caller).await;
+    drop(caller);
+    (first, task.await.unwrap())
+}
+
+#[tokio::test]
+async fn a_rule_may_allow_a_server_whose_certificate_cannot_be_verified() {
+    // Its certificate is from a CA nothing trusts.
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
+    let harness = harness();
+
+    let (first, ended) = log_in(
+        &harness,
+        &server,
+        &weakened_policy(&server, "allow_unverified", json!({})),
+    )
+    .await;
+    assert_eq!(first.tag, b'R');
+    ended.unwrap();
+    let record = harness.audit.last();
+    // Encrypted, to a server that did not have to prove who it is; the record says so.
+    assert_eq!(record.pg_tls, Some("unverified"));
+    assert_eq!(record.pg_auth, Some("scram-sha-256"));
+
+    // Unverified still means TLS: a server without it is refused.
+    let plain = MockPostgres::start_scram_without_tls(HOST, b"pw").await;
+    let (first, ended) = log_in(
+        &harness,
+        &plain,
+        &weakened_policy(&plain, "allow_unverified", json!({})),
+    )
+    .await;
+    assert_eq!(wire::error_sqlstate(&first.body).as_deref(), Some("08001"));
+    assert_eq!(ended.unwrap_err().code(), ErrorCode::UpstreamTls);
+
+    // A rule that verifies records that it did.
+    let verified = MockPostgres::start_scram(HOST, b"pw").await;
+    let (_, ended) = log_in(&harness, &verified, &password_policy(&verified)).await;
+    ended.unwrap();
+    assert_eq!(harness.audit.last().pg_tls, Some("verified"));
+}
+
+#[tokio::test]
+async fn a_rule_may_allow_a_server_with_no_tls() {
+    let server = MockPostgres::start_scram_without_tls(HOST, b"pw").await;
+    let harness = harness();
+    let password = harness.seal(
+        "password",
+        b"pw",
+        &weakened_policy(&server, "allow_plain", json!({})),
+    );
+    let (mut caller, task) = session(
+        &harness,
+        connect_request(&server, &password),
+        &startup(&[("user", "app_user"), ("database", "app")]),
+    )
+    .await;
+    assert_eq!(read_message(&mut caller).await.tag, b'R');
+    assert_eq!(read_message(&mut caller).await.tag, b'Z');
+    // The session is relayed as any other.
+    caller.write_all(b"hello server").await.unwrap();
+    let mut echo = [0; 12];
+    caller.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"hello server");
+    drop(caller);
+    task.await.unwrap().unwrap();
+    let record = harness.audit.last();
+    assert_eq!(record.pg_tls, Some("none"));
+    // The password is not sent in the clear: SCRAM proves it without disclosing it.
+    assert_eq!(record.pg_auth, Some("scram-sha-256"));
+
+    // Where the server does offer TLS, the session uses it.
+    let with_tls = MockPostgres::start_scram(HOST, b"pw").await;
+    let (first, ended) = log_in(
+        &harness,
+        &with_tls,
+        &weakened_policy(&with_tls, "allow_plain", json!({})),
+    )
+    .await;
+    assert_eq!(first.tag, b'R');
+    ended.unwrap();
+    assert_eq!(harness.audit.last().pg_tls, Some("unverified"));
+}
+
+#[tokio::test]
+async fn a_password_is_not_sent_as_md5_over_a_session_in_the_clear() {
+    // The rule allows MD5, but the server has no TLS: the hash would cross the
+    // network readable.
+    let server = MockPostgres::start_md5_without_tls(HOST).await;
+    let harness = harness();
+    let policy = weakened_policy(&server, "allow_plain", json!({ "allow_md5": true }));
+    let (first, ended) = log_in(&harness, &server, &policy).await;
+    assert_eq!(first.tag, b'E');
+    assert_eq!(wire::error_sqlstate(&first.body).as_deref(), Some("28000"));
+    assert_eq!(ended.unwrap_err().code(), ErrorCode::PgAuthFailed);
+    let record = harness.audit.last();
+    assert_eq!((record.pg_tls, record.pg_auth), (Some("none"), None));
+    // Only the startup reached the server: no password message followed it.
+    assert_eq!(server.packets().len(), 1);
+}
+
 #[tokio::test]
 async fn a_server_that_asks_for_no_password_is_not_logged_in_to() {
     // It passes TLS, and accepts the login without proving it knows the password.

@@ -182,7 +182,7 @@ fn destination(destination: &Destination) -> Result<(), FormatError> {
             }
             part(user)?;
             match tls {
-                PgTls::VerifyFull => Ok(()),
+                PgTls::VerifyFull | PgTls::AllowUnverified | PgTls::AllowPlain => Ok(()),
                 PgTls::Ca(ca) => pem(ca),
             }
         }
@@ -383,7 +383,37 @@ fn presign_names_its_methods(rule: &Rule) -> Result<(), FormatError> {
     )
 }
 
+/// What a Postgres rule may do with a server it does not verify, or a session that may
+/// be in the clear. A cleartext password would be handed to whoever answers, so it
+/// needs a verified server. Channel binding and a client certificate need TLS.
+fn login_fits_server_verification(rule: &Rule) -> Result<(), FormatError> {
+    let Destination::Postgres { tls, .. } = &rule.destination else {
+        return Ok(());
+    };
+    match &rule.inject {
+        Inject::PgPassword {
+            allow_cleartext_password,
+            require_channel_binding,
+            ..
+        } => {
+            require(
+                !*allow_cleartext_password || tls.verifies(),
+                "a cleartext password needs a verified server",
+            )?;
+            require(
+                !*require_channel_binding || *tls != PgTls::AllowPlain,
+                "channel binding needs TLS",
+            )
+        }
+        Inject::ClientCert { .. } => {
+            require(*tls != PgTls::AllowPlain, "a client certificate needs TLS")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
+    login_fits_server_verification(rule)?;
     match (&rule.destination, &rule.inject) {
         (Destination::Postgres { .. }, Inject::PgPassword { .. } | Inject::ClientCert { .. })
         | (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion {}) => Ok(()),

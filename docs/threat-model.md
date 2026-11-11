@@ -166,6 +166,11 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **Channel binding is the server's choice unless the rule requires it.** A server
   that offers only `SCRAM-SHA-256` gets a login without binding, unless the rule sets
   `require_channel_binding`. The audit record's `pg_auth` says which it was.
+- **A Postgres rule may give up verifying the server.** With `tls: "allow_unverified"` or
+  `"allow_plain"`, whoever can answer for the database's host can read the session, and
+  with `allow_plain` whoever can change the traffic can make it unencrypted. seal then
+  sends no cleartext password, and no MD5 response without TLS, and the audit record's
+  `pg_tls` says how each session was protected.
 - **OAuth callbacks reach the application.** seal is never a public endpoint, so the
   authorization code passes through the application. It is not enough alone:
   redeeming it needs the sealed client secret and the flow's PKCE verifier.

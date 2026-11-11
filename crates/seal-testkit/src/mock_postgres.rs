@@ -35,6 +35,8 @@ enum Login {
     AtOnce,
     /// Runs SCRAM-SHA-256 for this password.
     Scram(Vec<u8>),
+    /// Asks for an MD5 password, and accepts whatever comes.
+    Md5,
     /// Never answers.
     Never,
 }
@@ -53,7 +55,26 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start(host: &str, tls: bool) -> Self {
-        Self::start_inner(host, tls, Login::AtOnce).await
+        Self::start_inner(host, tls, false, Login::AtOnce).await
+    }
+
+    /// Starts a server with no TLS: it declines the request for it, and then logs a
+    /// client in over the same connection with SCRAM-SHA-256, for this password.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it cannot listen or make certificates.
+    pub async fn start_scram_without_tls(host: &str, password: &[u8]) -> Self {
+        Self::start_inner(host, false, true, Login::Scram(password.to_vec())).await
+    }
+
+    /// Starts a server with no TLS that asks for an MD5 password.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it cannot listen or make certificates.
+    pub async fn start_md5_without_tls(host: &str) -> Self {
+        Self::start_inner(host, false, true, Login::Md5).await
     }
 
     /// Starts a server with a certificate for `host` that logs a client in with
@@ -63,7 +84,7 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start_scram(host: &str, password: &[u8]) -> Self {
-        Self::start_inner(host, true, Login::Scram(password.to_vec())).await
+        Self::start_inner(host, true, false, Login::Scram(password.to_vec())).await
     }
 
     /// Starts a server with a certificate for `host` that completes TLS, reads the
@@ -73,10 +94,12 @@ impl MockPostgres {
     ///
     /// Panics if it cannot listen or make certificates.
     pub async fn start_silent(host: &str) -> Self {
-        Self::start_inner(host, true, Login::Never).await
+        Self::start_inner(host, true, false, Login::Never).await
     }
 
-    async fn start_inner(host: &str, tls: bool, login: Login) -> Self {
+    /// `serves_plain` is for a server without `tls`: it goes on with the session in
+    /// the clear, as a server with no TLS does, where otherwise it hangs up.
+    async fn start_inner(host: &str, tls: bool, serves_plain: bool, login: Login) -> Self {
         let pki = TestPki::new("db CA");
         let issued = pki.server(&[host]);
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -100,7 +123,14 @@ impl MockPostgres {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let (acceptor, recorded) = (acceptor.clone(), Arc::clone(&recorded));
-                tokio::spawn(serve(stream, acceptor, recorded, tls, login.clone()));
+                tokio::spawn(serve(
+                    stream,
+                    acceptor,
+                    recorded,
+                    tls,
+                    serves_plain,
+                    login.clone(),
+                ));
             }
         });
         Self {
@@ -147,6 +177,7 @@ async fn serve(
     acceptor: TlsAcceptor,
     recorded: Arc<Mutex<Vec<Vec<u8>>>>,
     tls: bool,
+    serves_plain: bool,
     login: Login,
 ) {
     let mut request = [0; 8];
@@ -154,15 +185,26 @@ async fn serve(
         return;
     }
     if !tls {
-        let _ = stream.write_all(b"N").await;
+        if stream.write_all(b"N").await.is_ok() && serves_plain {
+            session(stream, recorded, login).await;
+        }
         return;
     }
     if stream.write_all(b"S").await.is_err() {
         return;
     }
-    let Ok(mut stream) = acceptor.accept(stream).await else {
+    let Ok(stream) = acceptor.accept(stream).await else {
         return;
     };
+    session(stream, recorded, login).await;
+}
+
+/// A session from the startup message on, over TLS or in the clear.
+async fn session<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    recorded: Arc<Mutex<Vec<Vec<u8>>>>,
+    login: Login,
+) {
     let Ok(length) = stream.read_u32().await else {
         return;
     };
@@ -182,6 +224,13 @@ async fn serve(
         Login::AtOnce => {}
         Login::Scram(password) => {
             if scram(&mut stream, &password).await.is_none() {
+                return;
+            }
+        }
+        Login::Md5 => {
+            if stream.write_all(&authentication(5, b"salt")).await.is_err()
+                || password_message(&mut stream).await.is_none()
+            {
                 return;
             }
         }

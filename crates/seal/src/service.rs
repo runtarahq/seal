@@ -169,6 +169,7 @@ impl Service {
             },
             code: error.map(ErrorCode::as_str),
             pg_auth: None,
+            pg_tls: None,
             verified: None,
             expires_s: None,
         };

@@ -558,6 +558,49 @@ fn sigv4_needs_a_payload_mode_and_valid_scope() {
 }
 
 #[test]
+fn a_postgres_rule_may_weaken_how_the_server_is_verified_within_limits() {
+    let postgres = |tls: Value, inject: Value| {
+        parse(&json!({ "rules": [{
+            "destination": {
+                "scheme": "postgres", "host": "db.example.com", "port": 5432,
+                "databases": ["app"], "user": { "literal": "app_user" }, "tls": tls,
+            },
+            "inject": inject,
+        }] }))
+    };
+    for tls in ["allow_unverified", "allow_plain"] {
+        let policy = postgres(json!(tls), json!({ "pg_password": {} })).unwrap();
+        // It round-trips under its own name.
+        let written = serde_json::to_value(&policy).unwrap();
+        assert_eq!(written["rules"][0]["destination"]["tls"], tls);
+        assert_eq!(parse(&written).unwrap(), policy);
+        // MD5 may be allowed: the broker uses it over TLS only.
+        postgres(json!(tls), json!({ "pg_password": { "allow_md5": true } })).unwrap();
+        // A cleartext password would be handed to whoever answers.
+        postgres(
+            json!(tls),
+            json!({ "pg_password": { "allow_cleartext_password": true } }),
+        )
+        .unwrap_err();
+    }
+    postgres(
+        json!("verify_full"),
+        json!({ "pg_password": { "allow_cleartext_password": true } }),
+    )
+    .unwrap();
+
+    // Channel binding and a client certificate need TLS, verified or not.
+    let binding = json!({ "pg_password": { "require_channel_binding": true } });
+    let certificate =
+        json!({ "client_cert": { "cert": { "literal": "-----BEGIN CERTIFICATE-----" } } });
+    for inject in [binding, certificate] {
+        postgres(json!("allow_unverified"), inject.clone()).unwrap();
+        postgres(json!("allow_plain"), inject).unwrap_err();
+    }
+    postgres(json!("no_such_mode"), json!({ "pg_password": {} })).unwrap_err();
+}
+
+#[test]
 fn sigv4_rules_allow_only_opt_in_amz_headers() {
     let sigv4 = |headers: Value, prefix: Option<&str>| {
         with_rule(|rule| {

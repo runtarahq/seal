@@ -78,8 +78,43 @@ rule's secret. An injection names only the other parts of a credential, each as
 |---|---|
 | `databases` | The databases a session may use. At least one |
 | `user` | The user a session logs in as |
-| `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM |
+| `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM. `"allow_unverified"` and `"allow_plain"` are [weakening options](#weakening-options), below |
 | `allow_replication` | Allows a replication session. Off by default |
+
+A server whose certificate cannot be verified, or that has no TLS at all, needs the rule
+to say so. With `"tls": "allow_unverified"` the session is encrypted, to a server that
+has not proved who it is. With `"tls": "allow_plain"` it is in the clear if the server
+does not offer TLS, and as `allow_unverified` if it does. Neither may allow a cleartext
+password, and `allow_plain` may not be combined with channel binding or a client
+certificate. [`postgres.md`](postgres.md#the-login) has what each exposes.
+
+```json
+{
+  "rules": [{
+    "destination": {
+      "scheme": "postgres", "host": "db.internal.example", "port": 5432,
+      "databases": ["app"],
+      "user": { "literal": "app_user" },
+      "tls": "allow_unverified"
+    },
+    "inject": { "pg_password": { "allow_md5": true } }
+  }]
+}
+```
+
+```json
+{
+  "rules": [{
+    "destination": {
+      "scheme": "postgres", "host": "db.internal.example", "port": 5432,
+      "databases": ["app"],
+      "user": { "literal": "app_user" },
+      "tls": "allow_plain"
+    },
+    "inject": { "pg_password": {} }
+  }]
+}
+```
 
 ## Injections
 
@@ -604,6 +639,8 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
 | `require_channel_binding` | `pg_password` | Not a weakening: refuses any login but SCRAM-SHA-256-PLUS. Cannot go with the two above |
 | `allow_replication` | A Postgres destination | Allows a replication session |
+| `tls: "allow_unverified"` | A Postgres destination | Does not verify the server's certificate. The session is encrypted, but whoever can answer for the host can take it, read it, and see an MD5 response. Never a cleartext password |
+| `tls: "allow_plain"` | A Postgres destination | As `allow_unverified`, and with no TLS at all if the server offers none: the session is then readable on the network. Only SCRAM logs in without TLS |
 
 ```json
 { "rules": [{

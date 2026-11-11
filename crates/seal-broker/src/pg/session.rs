@@ -101,6 +101,7 @@ struct Progress {
     caller_to_server: u64,
     server_to_caller: u64,
     pg_auth: Option<&'static str>,
+    pg_tls: Option<&'static str>,
     database: Option<String>,
     cancel: bool,
     /// Why a relay ended, if not cleanly.
@@ -139,6 +140,7 @@ impl PgSession {
             }
             record.path = progress.database.clone();
             record.pg_auth = progress.pg_auth;
+            record.pg_tls = progress.pg_tls;
             record.bytes_in = progress.caller_to_server;
             record.bytes_out = progress.server_to_caller;
             record.ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -187,7 +189,9 @@ impl PgSession {
         let startup = self.check_startup(&startup, progress).map_err(Some)?;
 
         progress.contacted = true;
-        let (mut server, end_point, _permit) = self.open_server().await.map_err(Some)?;
+        let (mut server, end_point, _permit, protection) =
+            self.open_server().await.map_err(Some)?;
+        progress.pg_tls = Some(protection.as_str());
         write(&mut server, &startup.encode()).await.map_err(|()| {
             Some(Refusal::new(
                 ErrorCode::UpstreamReset,
@@ -199,8 +203,11 @@ impl PgSession {
         let credentials = Credentials {
             user: &self.user,
             password: password.as_deref().map(Vec::as_slice),
-            allow_md5: self.allow_md5,
-            allow_cleartext: self.allow_cleartext,
+            // What a password is exposed to depends on who may be listening. MD5
+            // needs an encrypted session. A cleartext password is handed to whoever
+            // answers, so it needs a server that proved who it is.
+            allow_md5: self.allow_md5 && protection != Protection::None,
+            allow_cleartext: self.allow_cleartext && protection == Protection::Verified,
             require_channel_binding: self.require_channel_binding,
             client_cert: self.client_cert.is_some(),
             end_point,
@@ -336,7 +343,7 @@ impl PgSession {
 
     async fn cancel(&self, packet: &[u8], progress: &mut Progress) -> Result<(), Refusal> {
         progress.contacted = true;
-        let (mut server, _, _permit) = self.open_server().await?;
+        let (mut server, _, _permit, _) = self.open_server().await?;
         progress.caller_to_server = packet.len() as u64;
         write(&mut server, packet)
             .await
@@ -347,16 +354,18 @@ impl PgSession {
         Ok(())
     }
 
-    /// Connects to a checked address, asks for TLS, and verifies the server. Returns
-    /// the stream and the channel binding data from the server's certificate.
+    /// Connects to a checked address, asks for TLS, and verifies the server, unless the
+    /// rule says it cannot be verified. Returns the stream, the channel binding data
+    /// from the server's certificate, and how the session is protected.
     #[allow(clippy::type_complexity)]
     async fn open_server(
         &self,
     ) -> Result<
         (
-            TlsStream<tokio::net::TcpStream>,
+            ServerStream,
             Option<Vec<u8>>,
             tokio::sync::OwnedSemaphorePermit,
+            Protection,
         ),
         Refusal,
     > {
@@ -404,13 +413,30 @@ impl PgSession {
                     "the server closed",
                 ))
             })?;
-        if answer != b'S' {
-            return Err(unreachable(BrokerError::new(
-                ErrorCode::UpstreamTls,
-                "the server does not offer TLS",
-            )));
+        match answer {
+            b'S' => {}
+            // The rule allows a session in the clear with a server that has no TLS.
+            // A client certificate has nowhere to be presented.
+            b'N' if self.tls == PgTls::AllowPlain && self.client_cert.is_none() => {
+                return Ok((ServerStream::Plain(stream), None, permit, Protection::None));
+            }
+            _ => {
+                return Err(unreachable(BrokerError::new(
+                    ErrorCode::UpstreamTls,
+                    "the server does not offer TLS",
+                )));
+            }
         }
-        let (connector, name) = self.tls_connector().map_err(unreachable)?;
+        let protection = if self.tls.verifies() {
+            Protection::Verified
+        } else {
+            Protection::Unverified
+        };
+        let (connector, name) = match protection {
+            Protection::Verified => self.tls_connector(),
+            _ => self.unverified_connector(),
+        }
+        .map_err(unreachable)?;
         let stream = tokio::time::timeout(self.connect_timeout, connector.connect(name, stream))
             .await
             .map_err(|_| {
@@ -427,7 +453,46 @@ impl PgSession {
             .and_then(|chain| chain.first())
             .and_then(|certificate| login::tls_server_end_point(certificate.as_ref()));
         // The connection's permit lives as long as the session holds it.
-        Ok((stream, end_point, permit))
+        Ok((
+            ServerStream::Tls(Box::new(stream)),
+            end_point,
+            permit,
+            protection,
+        ))
+    }
+
+    /// A TLS configuration that accepts any certificate: for a rule that says the
+    /// server's cannot be verified. The handshake's signatures are still checked, so
+    /// the session is with whoever holds that certificate's key.
+    fn unverified_connector(&self) -> Result<(TlsConnector, ServerName<'static>), BrokerError> {
+        let failed = |detail| BrokerError::new(ErrorCode::BadRequest, detail);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|_| BrokerError::new(ErrorCode::Internal, "could not configure TLS"))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)));
+        let mut config = match &self.client_cert {
+            Some(material) => builder
+                .with_client_auth_cert(material.chain.clone(), material.key.clone_key())
+                .map_err(|_| {
+                    BrokerError::for_field(
+                        ErrorCode::BadRequest,
+                        "the client certificate and key cannot be used for TLS",
+                        &material.field,
+                    )
+                })?,
+            None => builder.with_no_client_auth(),
+        };
+        config.alpn_protocols = vec![b"postgresql".to_vec()];
+        let name = self
+            .host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned();
+        let name = ServerName::try_from(name)
+            .map_err(|_| failed("the host is not a valid server name"))?;
+        Ok((TlsConnector::from(Arc::new(config)), name))
     }
 
     async fn connect_any(
@@ -452,7 +517,10 @@ impl PgSession {
     fn tls_connector(&self) -> Result<(TlsConnector, ServerName<'static>), BrokerError> {
         let failed = |detail| BrokerError::new(ErrorCode::BadRequest, detail);
         let mut roots = match &self.tls {
-            PgTls::VerifyFull => (*self.client.roots()).clone(),
+            // Not reached for a rule that does not verify: see `unverified_connector`.
+            PgTls::VerifyFull | PgTls::AllowUnverified | PgTls::AllowPlain => {
+                (*self.client.roots()).clone()
+            }
             PgTls::Ca(pem) => {
                 let mut roots = RootCertStore::empty();
                 for certificate in CertificateDer::pem_slice_iter(pem.as_bytes()) {
@@ -511,4 +579,127 @@ async fn write<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Result<()
 
 fn valid_state(state: &str) -> bool {
     state.len() == 5 && state.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// How a session to the server is protected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Protection {
+    /// TLS, to a server whose certificate was verified against its name.
+    Verified,
+    /// TLS, to a server that did not have to prove who it is.
+    Unverified,
+    /// None: the session is in the clear.
+    None,
+}
+
+impl Protection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Unverified => "unverified",
+            Self::None => "none",
+        }
+    }
+}
+
+/// The connection to the server: over TLS, or in the clear where the rule allows it.
+enum ServerStream {
+    Tls(Box<TlsStream<tokio::net::TcpStream>>),
+    Plain(tokio::net::TcpStream),
+}
+
+impl AsyncRead for ServerStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ServerStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Accepts any server certificate, for a rule whose server cannot be verified. The
+/// handshake's own signatures are checked as usual.
+#[derive(Debug)]
+struct AnyCertificate(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }

@@ -136,6 +136,7 @@ mod tests {
             outcome: Outcome::Ok,
             code: None,
             pg_auth: None,
+            pg_tls: None,
             verified: None,
             expires_s: None,
         }

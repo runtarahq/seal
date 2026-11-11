@@ -283,6 +283,21 @@ pub enum PgTls {
     VerifyFull,
     /// Against this CA, in PEM, with the host name.
     Ca(String),
+    /// Not at all: the session is encrypted, to a server that has not proved who it
+    /// is. For a server whose certificate cannot be verified.
+    AllowUnverified,
+    /// Not at all, and the session is in the clear if the server does not offer TLS.
+    /// For a server that has none.
+    AllowPlain,
+}
+
+impl PgTls {
+    /// Whether the server's certificate is verified, so that the session is with the
+    /// server the rule names.
+    #[must_use]
+    pub fn verifies(&self) -> bool {
+        matches!(self, Self::VerifyFull | Self::Ca(_))
+    }
 }
 
 /// The destination's flat JSON form, where `scheme` selects the variant.

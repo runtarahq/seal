@@ -38,6 +38,10 @@ The first release.
 - Signing: AWS Signature Version 4, Azure Storage Shared Key, JWT assertions (RS256,
   PS256, ES256), and client certificates toward providers. See
   [`docs/signing.md`](docs/signing.md).
+- A Postgres rule may say its server cannot be verified (`tls: "allow_unverified"`) or
+  has no TLS (`"allow_plain"`): weakening options, for a database an application already
+  reaches that way. seal then sends no cleartext password, and logs in without TLS with
+  SCRAM only. The audit record's `pg_tls` says how each session was protected.
 - A SigV4 request may name its operation in `X-Amz-Target`, as SQS, DynamoDB and other
   services that take JSON need. A rule for a whole S3 endpoint addressed by path may set
   `allow_copy_from_any_bucket`, so that a copy can read any object on its host.
