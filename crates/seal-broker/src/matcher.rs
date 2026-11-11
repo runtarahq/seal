@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use seal_format::policy::{Inject, Method, Part, Rule, RuleLimits, SealResponse};
+use seal_format::policy::{AwsScope, Inject, Method, Part, Rule, RuleLimits, SealResponse};
 use seal_format::{FieldName, Policy};
 
 use crate::error::{BrokerError, ErrorCode};
@@ -133,6 +133,16 @@ pub fn decide(
             let Part::Field(name) = part else { continue };
             resolve_part(field, name, rule, &matched, head, &mut used_as_companion)?;
         }
+        // A region or service the caller names comes with the request, in the plain.
+        for name in named_scopes(&rule.inject) {
+            if !(rule.plain.contains(name) && head.plain.contains(name)) {
+                return Err(BrokerError::for_field(
+                    ErrorCode::PolicyDenied,
+                    "the request does not name its region or service",
+                    name,
+                ));
+            }
+        }
         listed_plain.extend(rule.plain.iter());
     }
 
@@ -236,6 +246,24 @@ fn rule_parts(rule: &Rule) -> Vec<&Part> {
         parts.push(user);
     }
     parts
+}
+
+/// The plain fields a SigV4 rule's region and service are named by, if the caller names
+/// them.
+fn named_scopes(inject: &Inject) -> Vec<&FieldName> {
+    let Inject::AwsSigv4 {
+        region, service, ..
+    } = inject
+    else {
+        return Vec::new();
+    };
+    [region, service]
+        .into_iter()
+        .filter_map(|scope| match scope {
+            AwsScope::Named(named) => Some(&named.field),
+            AwsScope::Fixed(_) => None,
+        })
+        .collect()
 }
 
 /// The other parts of a credential that an injection names.

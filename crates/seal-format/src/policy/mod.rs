@@ -547,9 +547,9 @@ pub enum Inject {
     /// As the secret access key in AWS Signature Version 4.
     AwsSigv4 {
         /// The AWS region.
-        region: String,
+        region: AwsScope,
         /// The AWS service.
-        service: String,
+        service: AwsScope,
         /// The access key id.
         access_key_id: Part,
         /// The session token of temporary credentials.
@@ -692,6 +692,57 @@ pub enum Part {
     Field(FieldName),
     /// A value fixed in the policy.
     Literal(String),
+}
+
+/// A SigV4 region or service: fixed by the policy, or named by the caller with each
+/// request. A fixed one is written as a string, as it always was.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AwsScope {
+    /// Fixed by the policy.
+    Fixed(String),
+    /// Named by the caller, in a plain field.
+    Named(NamedScope),
+}
+
+impl AwsScope {
+    /// The value, if the policy fixes it.
+    #[must_use]
+    pub fn fixed(&self) -> Option<&str> {
+        match self {
+            Self::Fixed(value) => Some(value),
+            Self::Named(_) => None,
+        }
+    }
+}
+
+impl From<&str> for AwsScope {
+    fn from(value: &str) -> Self {
+        Self::Fixed(value.to_owned())
+    }
+}
+
+/// A SigV4 region or service the caller names with each request: for a credential used
+/// with whatever service a request is for. The signature is then good for any region or
+/// service named, so only the credential's own permissions bound its use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedScope {
+    /// The plain field that names it, which the rule must list in `plain`.
+    pub field: FieldName,
+    /// The values the caller may name; any valid one if empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+}
+
+impl NamedScope {
+    /// Whether the caller may name this value: one written as AWS writes regions and
+    /// services, and among those allowed if the policy lists any.
+    #[must_use]
+    pub fn allows(&self, value: &str) -> bool {
+        validate::is_aws_scope(value)
+            && (self.allowed.is_empty() || self.allowed.iter().any(|allowed| allowed == value))
+    }
 }
 
 /// A way of hashing a SigV4 payload.

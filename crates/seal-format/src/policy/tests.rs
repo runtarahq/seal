@@ -589,6 +589,12 @@ fn presigning_is_off_unless_a_rule_allows_it_with_a_limit_and_its_methods() {
     );
     // A presigned STS call is an identity, not a download.
     s3_presign(|rule| rule["inject"]["aws_sigv4"]["service"] = json!("sts")).unwrap_err();
+    // Nor where the caller names the service: a URL is presigned for S3 and nothing else.
+    s3_presign(|rule| {
+        rule["inject"]["aws_sigv4"]["service"] = json!({ "field": "svc", "allowed": ["s3"] });
+        rule["plain"] = json!(["svc"]);
+    })
+    .unwrap_err();
 }
 
 #[test]
@@ -701,6 +707,125 @@ fn sigv4_needs_a_payload_mode_and_valid_scope() {
     sigv4(|i| i["payload"] = json!(["unsigned"])).unwrap_err();
     sigv4(|i| i["region"] = json!("EU")).unwrap_err();
     sigv4(|i| i["service"] = json!("")).unwrap_err();
+}
+
+#[test]
+fn a_sigv4_region_or_service_is_fixed_or_named_by_a_plain_field() {
+    let sigv4 = |region: Value, service: Value, plain: Value| {
+        with_rule(|rule| {
+            rule["inject"] = json!({ "aws_sigv4": {
+                "region": region, "service": service,
+                "access_key_id": { "literal": "AKIA" }, "payload": ["computed"]
+            } });
+            rule["plain"] = plain;
+        })
+    };
+    // Fixed, a policy is written as it always was.
+    let fixed = sigv4(json!("eu-west-1"), json!("s3"), json!([])).unwrap();
+    let canonical = String::from_utf8(fixed.canonical_json().unwrap()).unwrap();
+    assert!(canonical.contains(r#""region":"eu-west-1","service":"s3""#));
+
+    let named = sigv4(
+        json!({ "field": "aws_region", "allowed": ["eu-west-1", "us-east-1"] }),
+        json!({ "field": "aws_service" }),
+        json!(["aws_region", "aws_service"]),
+    )
+    .unwrap();
+    let Inject::AwsSigv4 {
+        region, service, ..
+    } = &named.rules[0].inject
+    else {
+        panic!("not SigV4")
+    };
+    assert_eq!((region.fixed(), service.fixed()), (None, None));
+    let canonical = named.canonical_json().unwrap();
+    assert!(String::from_utf8(canonical.clone()).unwrap().contains(
+        r#""region":{"field":"aws_region","allowed":["eu-west-1","us-east-1"]},"service":{"field":"aws_service"}"#
+    ));
+    assert_eq!(Policy::from_json(&canonical).unwrap(), named);
+    // One of them may be named and the other fixed.
+    sigv4(
+        json!("eu-west-1"),
+        json!({ "field": "svc" }),
+        json!(["svc"]),
+    )
+    .unwrap();
+
+    let both = json!(["aws_region", "aws_service"]);
+    for (region, service, plain) in [
+        // The caller names it, so the rule lists it as plain.
+        (json!("eu-west-1"), json!({ "field": "svc" }), json!([])),
+        (json!({ "field": "r" }), json!("s3"), json!(["svc"])),
+        // One field cannot be both.
+        (
+            json!({ "field": "x" }),
+            json!({ "field": "x" }),
+            json!(["x"]),
+        ),
+        // What may be named is held to what a fixed one is.
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": ["S3"] }),
+            both.clone(),
+        ),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": [""] }),
+            both.clone(),
+        ),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": ["s3", "s3"] }),
+            both.clone(),
+        ),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "allowed": vec!["s3"; 17].iter().enumerate().map(|(i, s)| format!("{s}{i}")).collect::<Vec<_>>() }),
+            both.clone(),
+        ),
+        // And there is one way to write each.
+        (json!("eu-west-1"), json!({ "literal": "s3" }), both.clone()),
+        (
+            json!("eu-west-1"),
+            json!({ "field": "aws_service", "any": true }),
+            both.clone(),
+        ),
+        (json!("eu-west-1"), json!({ "field": ".." }), both.clone()),
+        (json!("eu-west-1"), json!({}), both.clone()),
+        (json!("eu-west-1"), json!(["s3"]), both.clone()),
+        (json!("eu-west-1"), json!(null), both.clone()),
+        (json!(1), json!("s3"), both.clone()),
+    ] {
+        let what = format!("{region} {service} {plain}");
+        assert!(sigv4(region, service, plain).is_err(), "{what}");
+    }
+}
+
+#[test]
+fn a_named_scope_allows_valid_values_among_those_listed() {
+    let scope = |allowed: &[&str]| NamedScope {
+        field: FieldName::new("aws_service").unwrap(),
+        allowed: allowed.iter().map(|value| (*value).to_owned()).collect(),
+    };
+    let any = scope(&[]);
+    for value in ["s3", "sqs", "execute-api", "bedrock-runtime", "eu-west-1"] {
+        assert!(any.allows(value), "{value}");
+    }
+    for value in [
+        "",
+        "S3",
+        "s3/aws4_request",
+        "s3 ",
+        "s3\n",
+        "s3.amazonaws.com",
+        "é",
+    ] {
+        assert!(!any.allows(value), "{value:?}");
+    }
+    assert!(!any.allows(&"a".repeat(257)));
+    let some = scope(&["sqs", "sns"]);
+    assert!(some.allows("sqs") && some.allows("sns"));
+    assert!(!some.allows("s3") && !some.allows("sq") && !some.allows("SQS"));
 }
 
 #[test]

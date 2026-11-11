@@ -2,9 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::id::FieldName;
+
 use super::{
-    Definition, Destination, Inject, JwtAudience, JwtClaims, JwtHeader, MAX_POLICY_BYTES, Part,
-    PgTls, Policy, ResponseFormat, Rule, RuleLimits, Scheme, SealResponse,
+    AwsScope, Definition, Destination, Inject, JwtAudience, JwtClaims, JwtHeader, MAX_POLICY_BYTES,
+    Part, PgTls, Policy, ResponseFormat, Rule, RuleLimits, Scheme, SealResponse,
 };
 use crate::error::FormatError;
 use crate::id::PolicyName;
@@ -111,6 +113,13 @@ fn rule(rule: &Rule, definitions: &BTreeMap<PolicyName, Definition>) -> Result<(
         )?;
     }
     required_form(rule)?;
+    // The caller names them, so they are never a sealed value's to supply.
+    for field in named_scope_fields(&rule.inject) {
+        require(
+            rule.plain.contains(field),
+            "a named region or service must be a plain field the rule lists",
+        )?;
+    }
     if let Some(prefix) = &rule.allow_injected_path {
         require(
             matches!(rule.destination, Destination::Http { .. }),
@@ -304,7 +313,10 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
         } => {
             if let Some(terms) = allow_presign {
                 presign(terms)?;
-                require(service == "s3", "only S3 URLs can be presigned")?;
+                require(
+                    service.fixed() == Some("s3"),
+                    "only S3 URLs can be presigned",
+                )?;
             }
             require(
                 !*allow_copy_from_any_bucket
@@ -325,6 +337,12 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             }
             aws_scope(region)?;
             aws_scope(service)?;
+            if let (AwsScope::Named(region), AwsScope::Named(service)) = (region, service) {
+                require(
+                    region.field != service.field,
+                    "the region and the service are named by different fields",
+                )?;
+            }
             part(access_key_id)?;
             session_token.as_ref().map_or(Ok(()), part)?;
             require(
@@ -624,15 +642,54 @@ fn xml_path(path: &str) -> Result<(), FormatError> {
     )
 }
 
-fn aws_scope(value: &str) -> Result<(), FormatError> {
-    require(
-        !value.is_empty()
-            && value.len() <= MAX_NAME_BYTES
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
-        "AWS region or service is not valid",
-    )
+fn aws_scope(scope: &AwsScope) -> Result<(), FormatError> {
+    match scope {
+        AwsScope::Fixed(value) => aws_scope_value(value),
+        AwsScope::Named(named) => {
+            require(
+                named.allowed.len() <= MAX_ALLOWED_VALUES,
+                "too many allowed regions or services",
+            )?;
+            for (index, value) in named.allowed.iter().enumerate() {
+                aws_scope_value(value)?;
+                require(
+                    !named.allowed[..index].contains(value),
+                    "an allowed region or service repeats",
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The plain fields a SigV4 rule's region and service are named by.
+fn named_scope_fields(inject: &Inject) -> Vec<&FieldName> {
+    let Inject::AwsSigv4 {
+        region, service, ..
+    } = inject
+    else {
+        return Vec::new();
+    };
+    [region, service]
+        .into_iter()
+        .filter_map(|scope| match scope {
+            AwsScope::Named(named) => Some(&named.field),
+            AwsScope::Fixed(_) => None,
+        })
+        .collect()
+}
+
+fn aws_scope_value(value: &str) -> Result<(), FormatError> {
+    require(is_aws_scope(value), "AWS region or service is not valid")
+}
+
+/// Whether a value is written as AWS writes regions and services.
+pub(super) fn is_aws_scope(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_NAME_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn pem(value: &str) -> Result<(), FormatError> {

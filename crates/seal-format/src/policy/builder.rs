@@ -317,8 +317,8 @@ pub fn aws(
     let access_key_id = parts.add(access_key_id);
     let session_token = session_token.map(|source| parts.add(source));
     parts.finish(Inject::AwsSigv4 {
-        region: region.to_owned(),
-        service: service.to_owned(),
+        region: region.into(),
+        service: service.into(),
         access_key_id,
         session_token,
         payload,
