@@ -336,6 +336,55 @@ fn a_path_injection_cannot_be_combined_with_another_value() {
     }
 }
 
+/// A value's own rule may allow one prefix, and then goes with a value that injects it.
+#[test]
+fn a_value_goes_with_a_path_injection_only_where_its_rule_allows_that_prefix() {
+    let path = |prefix: &str| one_rule(&json!({ "path": { "prefix": prefix } }));
+    let allowing = |prefix: &str| {
+        let mut rule = rule(&json!({ "form_field": { "name": "secret_token" } }));
+        rule["allow_injected_path"] = json!(prefix);
+        policy(&json!({ "rules": [rule] }))
+    };
+
+    let plan = Request::to(API)
+        .decide(&fields(&[
+            ("secret", allowing("/bot{}")),
+            ("token", path("/bot{}")),
+        ]))
+        .unwrap();
+    assert_eq!(plan.injections.len(), 2);
+    // Alone, it is an ordinary value.
+    Request::to(API)
+        .decide(&fields(&[("secret", allowing("/bot{}"))]))
+        .unwrap();
+
+    // Another prefix is another place, however alike.
+    for prefix in ["/admin{}", "/bot{}/x", "/Bot{}", "/v1/bot{}"] {
+        let policies = fields(&[("secret", allowing("/bot{}")), ("token", path(prefix))]);
+        assert_eq!(
+            refusal(Request::to(API).decide(&policies)),
+            ErrorCode::Conflict,
+            "{prefix}"
+        );
+    }
+    // Every other value must allow it, not only one of them.
+    let policies = fields(&[
+        ("genuine", bearer()),
+        ("secret", allowing("/bot{}")),
+        ("token", path("/bot{}")),
+    ]);
+    assert_eq!(
+        refusal(Request::to(API).decide(&policies)),
+        ErrorCode::Conflict
+    );
+    // And two values still cannot both fill the path.
+    let policies = fields(&[("a", path("/bot{}")), ("b", path("/bot{}"))]);
+    assert_eq!(
+        refusal(Request::to(API).decide(&policies)),
+        ErrorCode::Conflict
+    );
+}
+
 #[test]
 fn two_rules_injecting_into_the_same_place_conflict() {
     let same = |first: Value, second: Value| {

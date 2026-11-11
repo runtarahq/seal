@@ -532,6 +532,52 @@ fn an_injected_path_is_whole_segments_with_one_place_for_the_secret() {
 }
 
 #[test]
+fn a_rule_may_allow_one_injected_path_prefix() {
+    let policy = with_rule(|rule| rule["allow_injected_path"] = json!("/bot{}")).unwrap();
+    assert_eq!(
+        policy.rules[0].allow_injected_path.as_deref(),
+        Some("/bot{}")
+    );
+    let canonical = policy.canonical_json().unwrap();
+    assert_eq!(Policy::from_json(&canonical).unwrap(), policy);
+    // Absent by default, and then left out of the canonical form.
+    let plain = with_rule(|_| {}).unwrap();
+    assert!(plain.rules[0].allow_injected_path.is_none());
+    assert!(
+        !String::from_utf8(plain.canonical_json().unwrap())
+            .unwrap()
+            .contains("allow_injected_path")
+    );
+
+    // The prefix is held to what a path rule may have.
+    for prefix in ["", "/bot", "bot{}", "/bot{}/", "/{}{}", "/../{}", "/a?b={}"] {
+        with_rule(|rule| rule["allow_injected_path"] = json!(prefix)).unwrap_err();
+    }
+    for value in [json!(true), json!(["/bot{}"]), json!(null)] {
+        let parsed = with_rule(|rule| rule["allow_injected_path"] = value.clone());
+        assert!(
+            parsed.map_or(true, |policy| policy.rules[0].allow_injected_path.is_none()),
+            "{value}"
+        );
+    }
+    // A path rule fills the path itself, and Postgres has none.
+    with_rule(|rule| {
+        rule["inject"] = json!({ "path": { "prefix": "/bot{}" } });
+        rule["allow_injected_path"] = json!("/bot{}");
+    })
+    .unwrap_err();
+    parse(&json!({ "rules": [{
+        "destination": {
+            "scheme": "postgres", "host": "db.example.com", "port": 5432,
+            "databases": ["app"], "user": { "literal": "app_user" }
+        },
+        "inject": { "pg_password": {} },
+        "allow_injected_path": "/bot{}"
+    }] }))
+    .unwrap_err();
+}
+
+#[test]
 fn refuses_bad_parts_and_names() {
     with_inject(json!({ "basic": { "username": { "literal": "" } } })).unwrap_err();
     with_inject(json!({ "basic": { "username": { "field": ".." } } })).unwrap_err();

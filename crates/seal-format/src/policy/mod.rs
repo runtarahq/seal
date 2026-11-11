@@ -170,6 +170,12 @@ pub struct Rule {
     /// before anything is sent. HTTP only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub require_form: BTreeMap<String, Vec<String>>,
+    /// Lets this value go with one whose rule injects into the path with exactly this
+    /// prefix, such as `/bot{}`. The request is then sent under that prefix, outside
+    /// the path this rule matched: whoever holds a value for that prefix chooses what
+    /// fills it. HTTP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_injected_path: Option<String>,
 }
 
 impl Rule {
@@ -186,6 +192,7 @@ impl Rule {
             allow_private_destination: false,
             allow_plain_http: false,
             require_form: BTreeMap::new(),
+            allow_injected_path: None,
         }
     }
 }
@@ -470,7 +477,8 @@ pub enum Inject {
         name: String,
     },
     /// In the URL's path, before the caller's path, through a template such as
-    /// `/bot{}`. No other value may be presented with it.
+    /// `/bot{}`. Another value may be presented with it only if its own rule allows
+    /// this prefix with `allow_injected_path`.
     Path {
         /// What is put before the caller's path, with exactly one `{}` for the secret.
         prefix: String,

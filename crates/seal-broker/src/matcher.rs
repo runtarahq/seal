@@ -120,7 +120,7 @@ pub fn decide(
         matched.insert(field, found);
     }
 
-    path_injection_stands_alone(&matched)?;
+    path_injection_is_allowed_by_the_rest(&matched)?;
 
     // Step 2: resolve the parts each primary rule refers to.
     let mut used_as_companion: BTreeSet<&FieldName> = BTreeSet::new();
@@ -314,22 +314,33 @@ fn resolve_part<'a>(
 }
 
 /// A path injection changes the path every presented value is sent to, after each rule
-/// matched the path the caller named. Anyone can seal a value with such a rule, so it may
-/// not be combined with any other value: otherwise it would move another value's
-/// credential outside that value's path prefix.
-fn path_injection_stands_alone(
+/// matched the path the caller named. Anyone can seal a value with such a rule, so it
+/// would move another value's credential outside that value's path prefix. It may go
+/// with another value only where that value's own rule allows exactly its prefix.
+fn path_injection_is_allowed_by_the_rest(
     matched: &BTreeMap<&FieldName, (usize, &Rule)>,
 ) -> Result<(), BrokerError> {
     let injects_path = matched
         .iter()
-        .find(|(_, (_, rule))| matches!(rule.inject, Inject::Path { .. }));
-    match injects_path {
-        Some((field, _)) if matched.len() > 1 => Err(BrokerError::for_field(
+        .find_map(|(field, (_, rule))| match &rule.inject {
+            Inject::Path { prefix } => Some((*field, prefix)),
+            _ => None,
+        });
+    let Some((field, prefix)) = injects_path else {
+        return Ok(());
+    };
+    let allowed = matched
+        .iter()
+        .filter(|(other, _)| **other != field)
+        .all(|(_, (_, rule))| rule.allow_injected_path.as_ref() == Some(prefix));
+    if allowed {
+        Ok(())
+    } else {
+        Err(BrokerError::for_field(
             ErrorCode::Conflict,
-            "a path injection cannot be combined with other values",
+            "a value presented with a path injection does not allow it",
             field,
-        )),
-        _ => Ok(()),
+        ))
     }
 }
 

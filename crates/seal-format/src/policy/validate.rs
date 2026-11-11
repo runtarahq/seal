@@ -111,6 +111,18 @@ fn rule(rule: &Rule, definitions: &BTreeMap<PolicyName, Definition>) -> Result<(
         )?;
     }
     required_form(rule)?;
+    if let Some(prefix) = &rule.allow_injected_path {
+        require(
+            matches!(rule.destination, Destination::Http { .. }),
+            "only HTTP rules allow an injected path",
+        )?;
+        // Two values cannot both fill the path.
+        require(
+            !matches!(rule.inject, Inject::Path { .. }),
+            "a path rule cannot allow another injected path",
+        )?;
+        injected_path(prefix)?;
+    }
     rule.limits.as_ref().map_or(Ok(()), limits)
 }
 
