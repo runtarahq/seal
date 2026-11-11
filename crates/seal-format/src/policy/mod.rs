@@ -515,6 +515,12 @@ pub enum Inject {
         /// `X-Amz-*` headers the caller may also set, from [`OPT_IN_AMZ_HEADERS`].
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         allow_headers: Vec<String>,
+        /// Lets a copy read any object on the rule's host, for a rule with no path
+        /// prefix that allows `x-amz-copy-source`. Only for an endpoint addressed by
+        /// path, whose host is every bucket's: where the host is one bucket's, a copy
+        /// could then read the others.
+        #[serde(default, skip_serializing_if = "is_false")]
+        allow_copy_from_any_bucket: bool,
         /// Also lets the caller have a presigned URL, which it can copy and pass on.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_presign: Option<Presign>,
@@ -587,18 +593,21 @@ pub const DEFAULT_AMZ_HEADER_PREFIXES: &[&str] = &[
     "x-amz-checksum-",
 ];
 
-/// `X-Amz-*` headers a caller may set on any SigV4 request, exactly.
+/// `X-Amz-*` headers a caller may set on any SigV4 request, exactly. `x-amz-target`
+/// names the operation for the services that take one, such as SQS and DynamoDB: as a
+/// method and a path do elsewhere, it says what the request does.
 pub const DEFAULT_AMZ_HEADERS: &[&str] = &[
     "x-amz-storage-class",
     "x-amz-tagging",
     "x-amz-expected-bucket-owner",
     "x-amz-request-payer",
+    "x-amz-target",
 ];
 
 /// `X-Amz-*` headers a rule may allow in `allow_headers`. ACLs and grants can widen who
 /// reads the data. `x-amz-copy-source` reads from the object it names, so it also allows
 /// the rest of the copy headers, and seal checks that the source is within the rule's
-/// path prefix.
+/// path prefix, or on its host where the rule sets `allow_copy_from_any_bucket`.
 pub const OPT_IN_AMZ_HEADERS: &[&str] = &[
     "x-amz-acl",
     "x-amz-grant-full-control",

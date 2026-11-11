@@ -22,9 +22,9 @@ the body, `range`, and every `x-amz-*` header.
 
 | Headers | Allowed |
 |---|---|
-| `x-amz-meta-*`, `x-amz-storage-class`, `x-amz-tagging`, `x-amz-server-side-encryption*`, `x-amz-checksum-*`, `x-amz-expected-bucket-owner`, `x-amz-request-payer` | Always: they change what the request does at its destination, not where it goes or how it is signed |
+| `x-amz-meta-*`, `x-amz-storage-class`, `x-amz-tagging`, `x-amz-server-side-encryption*`, `x-amz-checksum-*`, `x-amz-expected-bucket-owner`, `x-amz-request-payer`, `x-amz-target` | Always: they change what the request does at its destination, not where it goes or how it is signed. `x-amz-target` names the operation for services such as SQS and DynamoDB |
 | `x-amz-acl`, `x-amz-grant-*` | Where the rule lists them in `allow_headers`, since they can widen who reads the data |
-| `x-amz-copy-source` and the rest of the copy headers | Where the rule lists `x-amz-copy-source`, and only from within the rule's path prefix |
+| `x-amz-copy-source` and the rest of the copy headers | Where the rule lists `x-amz-copy-source`, and only from within the rule's path prefix, or from the rule's host where it sets `allow_copy_from_any_bucket` |
 | `X-Amz-Content-SHA256` | A well-formed hash, where the rule allows the caller's hash |
 | Every other `X-Amz-*` header, including `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Decoded-Content-Length` and `X-Amz-Trailer` | Never: they control signing, or are not on the list yet |
 
@@ -35,6 +35,11 @@ seal reads the copy source, `bucket/key` or `/bucket/key` with an optional
 the rule's path prefix. The same rules apply as to a request's URL. A rule that allows
 copies must have a path prefix naming the bucket: with virtual-hosted URLs the bucket is
 in the host name, so seal could not check a source against it.
+
+A credential for a whole endpoint that is addressed by path has no prefix, and its host
+is every bucket's. Its rule can set `allow_copy_from_any_bucket`, and a copy may then
+read any object on that host, which the credential could fetch there anyway. The source
+must still name a bucket and a key, plainly.
 
 ### Payload modes
 

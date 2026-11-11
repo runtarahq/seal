@@ -216,6 +216,26 @@ otherwise. A copy source must be within the path prefix, which such a rule needs
 }] }
 ```
 
+A rule for a whole endpoint has no path prefix to hold a copy's source to. Where the
+endpoint is addressed by path, so that its host is every bucket's,
+`allow_copy_from_any_bucket` lets a copy read any object there. It is a
+[weakening option](#weakening-options), and wrong for a host that is one bucket's, as
+with virtual-hosted URLs: a copy could then read the others.
+
+```json
+{ "rules": [{
+  "destination": { "scheme": "https", "host": "storage.example.com" },
+  "inject": { "aws_sigv4": {
+    "region": "us-east-1",
+    "service": "s3",
+    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
+    "payload": ["computed"],
+    "allow_headers": ["x-amz-copy-source"],
+    "allow_copy_from_any_bucket": true
+  } }
+}] }
+```
+
 `allow_presign` also lets the caller have a presigned URL for an object the rule allows,
 lasting at most `max_expiry_s`. It is a [weakening option](#weakening-options): the URL
 works without seal until it expires. The rule must name its `methods`, from `GET`,
@@ -578,6 +598,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |
 | `allow_headers` | `aws_sigv4` | Lets the caller set ACL, grant or copy headers |
+| `allow_copy_from_any_bucket` | `aws_sigv4` | Lets a copy read any object on the rule's host, for a rule with no path prefix. Only for an endpoint addressed by path |
 | `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |

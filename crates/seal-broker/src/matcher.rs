@@ -436,6 +436,7 @@ fn refuse_amz_headers(
     let Inject::AwsSigv4 {
         payload,
         allow_headers,
+        allow_copy_from_any_bucket,
         ..
     } = &rule.inject
     else {
@@ -455,7 +456,12 @@ fn refuse_amz_headers(
         }
     }
     if let (Some(source), Endpoint::Http(target)) = (head.copy_source, head.endpoint)
-        && !copy_source_within(source, &rule.destination, target)
+        && !copy_source_within(
+            source,
+            &rule.destination,
+            target,
+            *allow_copy_from_any_bucket,
+        )
     {
         return Err(BrokerError::for_field(
             ErrorCode::PolicyDenied,
@@ -469,10 +475,13 @@ fn refuse_amz_headers(
 /// Whether `x-amz-copy-source`, `bucket/key` or `/bucket/key` with an optional
 /// `?versionId=`, names an object within the destination. It is read as a path at the
 /// request's own scheme, host and port, with the same refusals as a request's URL.
+/// A destination with no path prefix has nothing to hold the source to, so it allows
+/// one only where the rule says its host is every bucket's (`any_bucket`).
 fn copy_source_within(
     source: &str,
     destination: &seal_format::policy::Destination,
     target: &Target,
+    any_bucket: bool,
 ) -> bool {
     let path = if source.starts_with('/') {
         source.to_owned()
@@ -486,12 +495,22 @@ fn copy_source_within(
         seal_format::policy::Scheme::Https => "https",
         seal_format::policy::Scheme::Http => "http",
     };
-    let has_prefix = matches!(
-        destination,
-        seal_format::policy::Destination::Http { path_prefix: Some(prefix), .. } if prefix.len() > 1
-    );
-    has_prefix
-        && only_a_version
+    let prefix = match destination {
+        seal_format::policy::Destination::Http { path_prefix, .. } => path_prefix.as_deref(),
+        seal_format::policy::Destination::Postgres { .. } => return false,
+    };
+    let held = match prefix {
+        Some(prefix) => prefix.len() > 1,
+        // The source must still name a bucket and a key.
+        None => {
+            any_bucket
+                && path
+                    .strip_prefix('/')
+                    .and_then(|path| path.split_once('/'))
+                    .is_some_and(|(bucket, key)| !bucket.is_empty() && !key.is_empty())
+        }
+    };
+    held && only_a_version
         && Target::parse(&format!("{scheme}://{}{path}", target.authority()))
             .is_ok_and(|source| source.matches(destination))
 }

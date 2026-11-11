@@ -308,6 +308,7 @@ pub fn aws(
         payload,
         allow_unsigned_payload: false,
         allow_headers: Vec::new(),
+        allow_copy_from_any_bucket: false,
         allow_presign: None,
     })
 }

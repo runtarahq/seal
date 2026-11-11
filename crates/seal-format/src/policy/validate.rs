@@ -277,12 +277,20 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             payload,
             allow_unsigned_payload,
             allow_headers,
+            allow_copy_from_any_bucket,
             allow_presign,
         } => {
             if let Some(terms) = allow_presign {
                 presign(terms)?;
                 require(service == "s3", "only S3 URLs can be presigned")?;
             }
+            require(
+                !*allow_copy_from_any_bucket
+                    || allow_headers
+                        .iter()
+                        .any(|header| header == "x-amz-copy-source"),
+                "copies from any bucket need x-amz-copy-source allowed",
+            )?;
             for (index, header) in allow_headers.iter().enumerate() {
                 require(
                     super::OPT_IN_AMZ_HEADERS.contains(&header.as_str()),
@@ -393,17 +401,31 @@ fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
             },
             inject,
         ) => {
-            if let Inject::AwsSigv4 { allow_headers, .. } = inject
+            if let Inject::AwsSigv4 {
+                allow_headers,
+                allow_copy_from_any_bucket,
+                ..
+            } = inject
                 && allow_headers
                     .iter()
                     .any(|header| header == "x-amz-copy-source")
             {
                 // The source is checked against the prefix, so there must be one, naming
                 // at least the bucket: a virtual-hosted bucket is in the host instead.
-                require(
-                    path_prefix.as_deref().is_some_and(|path| path.len() > 1),
-                    "copy sources need a path prefix naming the bucket",
-                )?;
+                // A rule for an endpoint addressed by path may say so, and let a copy
+                // read any bucket there; it then has no prefix to check against.
+                let names_a_bucket = path_prefix.as_deref().is_some_and(|path| path.len() > 1);
+                if *allow_copy_from_any_bucket {
+                    require(
+                        path_prefix.is_none(),
+                        "copies from any bucket are for a rule with no path prefix",
+                    )?;
+                } else {
+                    require(
+                        names_a_bucket,
+                        "copy sources need a path prefix naming the bucket",
+                    )?;
+                }
             }
             if matches!(inject, Inject::ClientCert { .. }) {
                 require(
