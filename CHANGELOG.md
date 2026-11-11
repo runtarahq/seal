@@ -95,7 +95,8 @@ The first release.
 - Audit records for every use and for every caller refused, Prometheus metrics, and process hardening (no core dumps,
   not dumpable, memory locked as configured, never as root).
 - A systemd unit, a container image and example configurations in [`deploy/`](deploy).
-  The binary is static, linked against musl, and the image holds nothing else.
+  The binary is static, linked against musl, and the image holds nothing else. It is
+  published as `ghcr.io/runtarahq/seal` for amd64 and arm64.
 
 ### Hardening
 

@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -51,15 +52,30 @@ jobs:
           cargo build --release --locked --package seal --target x86_64-unknown-linux-musl
           file target/x86_64-unknown-linux-musl/release/seal | tee /dev/stderr | grep -q "static-pie linked"
 
-  # The container image, started by the same tests in place of the binary they built.
+  # The container image, started by the same tests in place of the binary they built, on
+  # each architecture it is published for.
   image:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - run: docker build -f deploy/container/Dockerfile -t seal .
+      - run: |
+          docker build -f deploy/container/Dockerfile -t seal \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" .
+      - name: The image is for this architecture
+        run: test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' seal)" = "linux/$ARCH"
       - name: The image holds the binary and nothing else
         run: |
           container=$(docker create seal)
@@ -71,6 +87,17 @@ jobs:
         run: |
           SEAL_TEST_BIN="$PWD/scripts/seal-in-container.sh" \
             cargo test --package seal --test modes --test oauth --test service --locked
+      # Kept for the publish job, which pushes the image that was tested, not a rebuild.
+      - name: Save the image
+        if: github.event_name == 'push'
+        run: docker tag seal "seal:$ARCH" && docker save --output "seal-$ARCH.tar" "seal:$ARCH"
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.arch }}
+          path: seal-${{ matrix.arch }}.tar
+          retention-days: 1
+          if-no-files-found: error
 
   # RustFS, Azurite and Postgres 14 to 18, with images pinned by digest in seal-testkit.
   containers:
@@ -187,3 +214,68 @@ jobs:
           cargo +nightly fuzz run "$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -- -max_total_time=60
         env:
           TARGET: ${{ matrix.target }}
+
+  # Publishes the tested images to ghcr.io once every other job has passed. A push to
+  # main moves `main`; a tag `v1.2.3` publishes `1.2.3` and moves `latest`. Every
+  # publication also has a tag naming its commit, which never moves.
+  publish:
+    if: github.event_name == 'push'
+    needs:
+      - fmt
+      - clippy
+      - test-linux
+      - test-musl
+      - image
+      - containers
+      - test-macos
+      - deny
+      - audit
+      - doc
+      - wasm
+      - vectors
+      - fuzz-smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Choose the tags
+        run: |
+          tags="sha-$GITHUB_SHA"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+            # The tag names the version the binary reports.
+            grep -q -x -F "version = \"$version\"" Cargo.toml
+            tags="$tags $version"
+            # A pre-release, such as 1.2.3-rc.1, does not become `latest`.
+            case "$version" in *-*) ;; *) tags="$tags latest" ;; esac
+          else
+            tags="$tags $GITHUB_REF_NAME"
+          fi
+          echo "TAGS=$tags" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          merge-multiple: true
+      - run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # One image per architecture, then an index over both under each tag.
+      - name: Push
+        run: |
+          image="ghcr.io/$GITHUB_REPOSITORY"
+          for arch in amd64 arm64; do
+            docker load --input "seal-$arch.tar"
+            docker tag "seal:$arch" "$image:sha-$GITHUB_SHA-$arch"
+            docker push "$image:sha-$GITHUB_SHA-$arch"
+          done
+          set --
+          for tag in $TAGS; do set -- "$@" --tag "$image:$tag"; done
+          docker buildx imagetools create "$@" \
+            "$image:sha-$GITHUB_SHA-amd64" "$image:sha-$GITHUB_SHA-arm64"
+          docker buildx imagetools inspect "$image:sha-$GITHUB_SHA"

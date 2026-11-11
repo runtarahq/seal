@@ -1,4 +1,5 @@
 # seal as a container, for a separate machine or a sidecar. See docs/operations.md.
+# CI publishes it as ghcr.io/runtarahq/seal, for amd64 and arm64. To build it yourself:
 #
 #   docker build -f deploy/container/Dockerfile -t seal .
 #   docker run --read-only --cap-drop=ALL --security-opt=no-new-privileges \
@@ -17,6 +18,9 @@ RUN cargo build --release --locked --package seal \
 # Nothing but the binary: no libc, no shell and no package manager. TLS roots are
 # compiled in, and the runtime supplies /etc/resolv.conf.
 FROM scratch
+# Ties the published package to its repository.
+LABEL org.opencontainers.image.source="https://github.com/runtarahq/seal" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/seal /usr/local/bin/seal
 # Not root, which seal refuses to run as. The same id as distroless's `nonroot`.
 USER 65532:65532

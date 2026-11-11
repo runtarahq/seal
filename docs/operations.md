@@ -33,7 +33,9 @@ socket is group-readable, so add the application's user to seal's group.
 ### Separate machine
 
 Use the [container image](../deploy/container/Dockerfile) or the binary, with the
-[configuration](../deploy/config/separate-machine.toml). Callers present a client
+[configuration](../deploy/config/separate-machine.toml). The image is published as
+`ghcr.io/runtarahq/seal` for amd64 and arm64: a release is tagged with its version, such
+as `0.1.0`, and `latest`; `main` follows the main branch. Callers present a client
 certificate from the CA in `listen.tls.client_ca`, and are identified by its subject.
 Certificates are short-lived: seal checks its certificate files every
 `listen.reload_interval` and swaps them in. A change that does not load is logged and
