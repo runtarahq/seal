@@ -102,6 +102,7 @@ least twice `max_keys_per_keyset`.
 | `deny_cidrs` | `[]` | Always refused |
 | `allow_private_cidrs` | `[]` | Allowed whatever their class |
 | `honour_private_rules` | `false` | Whether a rule's `allow_private_destination` has any effect |
+| `honour_plaintext_postgres_rules` | `false` | Whether a Postgres rule whose `tls` is `"plaintext"` may connect with no TLS. Otherwise such a session is refused |
 | `extra_ca_files` | `[]` | CAs to trust toward providers, besides the public roots |
 
 ### `[pools]`, `[limits]`, `[audit]`, `[metrics]`

@@ -107,7 +107,7 @@ certificate's `server_name` take one host and no pattern.
 |---|---|
 | `databases` | The databases a session may use. At least one |
 | `user` | The user a session logs in as |
-| `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM |
+| `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM. `"unverified"` and `"plaintext"` are [weakening options](#weakening-options) |
 | `allow_replication` | Allows a replication session. Off by default |
 
 ## Injections
@@ -696,6 +696,8 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_headers` | `aws_sigv4` | Lets the caller set ACL, grant or copy headers |
 | `allow_copy_from_any_bucket` | `aws_sigv4` | Lets a copy read any object on the rule's host, for a rule with no path prefix. Only for an endpoint addressed by path |
 | `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
+| `tls: "unverified"` | A Postgres destination | TLS with whatever certificate the server presents, as libpq's `sslmode=require`. Anyone on the path can pass as the server and read the session. SCRAM only |
+| `tls: "plaintext"` | A Postgres destination | No TLS, as libpq's `sslmode=disable`. Anyone on the path can read and change the session. SCRAM only, and only where the operator sets `honour_plaintext_postgres_rules` |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
 | `require_channel_binding` | `pg_password` | Not a weakening: refuses any login but SCRAM-SHA-256-PLUS. Cannot go with the two above |

@@ -53,8 +53,8 @@ working afterwards.
    signs.
 4. **seal to provider.** seal resolves and checks the address, connects to the
    checked address, validates TLS and never follows redirects.
-5. **seal to a Postgres server.** As for a provider, then: TLS is required and verified
-   before anything is sent, and seal reads exactly the one-byte answer to its
+5. **seal to a Postgres server.** As for a provider, then: unless the rule weakens it,
+   TLS is required and verified before anything is sent, and seal reads exactly the one-byte answer to its
    `SSLRequest`, so nothing unprotected can be slipped in. SCRAM checks the server's
    signature, and channel binding ties the login to this TLS connection when the
    server offers it. A server that accepts the login without asking for the password
@@ -130,6 +130,15 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   the whole of it in constant time and refuses a shorter one, so the answers do not
   add up to a forgery. A compromised application can still accept a forged webhook by
   not asking; that was always its own decision.
+- **A Postgres rule can give up the server's identity, or TLS, but not the password.**
+  With `tls` set to `"unverified"` or `"plaintext"`, someone on the path to the server
+  can relay the login and then read or change the session, as with libpq's
+  `sslmode=require` and `disable`. The login is SCRAM only in those modes, so the
+  password and anything that could stand in for it stay with seal, and a server that
+  does not know the password is not logged in to. Channel binding, where the server
+  offers it, catches an impostor under `"unverified"`. `"plaintext"` also needs the
+  operator's `honour_plaintext_postgres_rules`. Both are the sealer's choice per value,
+  and the default verifies.
 - **A credential whose service the caller names is bounded by its own permissions.**
   With a fixed `service` and `region`, a SigV4 signature is good for one service in one
   region. Where the rule lets the caller name them, a compromised application can have a

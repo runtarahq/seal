@@ -70,6 +70,10 @@ The first release.
   replication. MD5 and cleartext only where the policy allows them, and a policy may
   require channel binding. A server that never asks for the password is not logged in
   to. Tested against Postgres 14 to 18. See [`docs/postgres.md`](docs/postgres.md).
+- A Postgres rule may set `tls` to `"unverified"` (TLS with any certificate, as
+  `sslmode=require`) or `"plaintext"` (no TLS, as `sslmode=disable`, and only where the
+  operator sets `honour_plaintext_postgres_rules`), for a server that cannot be
+  verified. The login is then SCRAM only, so the password is never sent.
 
 ### The service and the client
 

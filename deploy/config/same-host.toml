@@ -32,6 +32,7 @@ lock_memory = "best_effort"             # off | best_effort | required
 deny_cidrs = []
 allow_private_cidrs = []
 honour_private_rules = false
+honour_plaintext_postgres_rules = false
 
 [pools]
 max_upstream_connections = 1024
