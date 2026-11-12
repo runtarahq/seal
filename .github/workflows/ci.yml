@@ -93,7 +93,7 @@ jobs:
       - name: The service tests pass against the image
         run: |
           SEAL_TEST_BIN="$PWD/scripts/seal-in-container.sh" \
-            cargo test --package seal --test modes --test oauth --test service --locked
+            cargo test --package seal --features aws-kms --test modes --test oauth --test service --locked
       # Kept for the publish job, which pushes the image that was tested, not a rebuild.
       - name: Save the image
         if: github.event_name == 'push'

@@ -12,8 +12,9 @@ FROM rust:1.99.1-alpine AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
 COPY . .
-# Optional parts of seal, off unless asked for: `--build-arg FEATURES=aws-kms`.
-ARG FEATURES=""
+# The optional parts of seal that the image has. For an image without the AWS SDK,
+# `--build-arg FEATURES=`.
+ARG FEATURES="aws-kms"
 RUN cargo build --release --locked --package seal --features "$FEATURES" \
     && install -D -m 0755 target/release/seal /out/seal
 

@@ -23,8 +23,8 @@ dependencies are listed separately.
 
 ### Only with the `aws-kms` feature
 
-Off by default, and then none of these is linked. With it the binary's tree has about
-50 more crates.
+Off by default in a build, and then none of these is linked. The published container
+image is built with it. With it the binary's tree has about 50 more crates.
 
 | Crate | For | Notes |
 |---|---|---|

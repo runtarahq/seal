@@ -241,9 +241,10 @@ takes effect at a restart. An OVHcloud service account is not supported.
 seal sends the keyset and kid as the KMS's `context`, so a wrapped key copied to
 another keyset or kid does not unwrap.
 
-**AWS KMS.** Only in a seal built with the `aws-kms` feature, which links the AWS SDK:
-`cargo build --features aws-kms`, or `--build-arg FEATURES=aws-kms` for the image. A
-seal built without it refuses this configuration at start-up and in `check-config`.
+**AWS KMS.** Only in a seal built with the `aws-kms` feature, which links the AWS SDK.
+The published container image has it; a build of your own needs
+`cargo build --features aws-kms`. A seal built without it refuses this configuration at
+start-up and in `check-config`.
 
 Create a symmetric key for encryption and decryption, and give seal's identity
 `kms:Encrypt` and `kms:Decrypt` on it, and nothing else.
