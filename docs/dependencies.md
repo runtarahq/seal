@@ -13,13 +13,26 @@ dependencies are listed separately.
 | Crate | For | Used in | Notes |
 |---|---|---|---|
 | `hpke` (`=0.15.1`) | Sealing and opening (RFC 9180: X25519, HKDF-SHA256, AES-256-GCM) | `seal-format` | Pinned exactly: the format depends on its output. RustCrypto, audited. Wipes its X25519 keys |
-| `ring` | Key wrapping (AES-256-GCM), HMAC and SHA-256 for SigV4 (toward providers and AWS KMS) and Azure, JWT signatures, TLS's crypto provider | `seal-keys`, `seal-broker`, `seal` | One crypto library for everything but HPKE. Its keys are not wiped from outside |
+| `ring` | Key wrapping (AES-256-GCM), HMAC and SHA-256 for SigV4 (toward providers) and Azure, JWT signatures, TLS's crypto provider | `seal-keys`, `seal-broker`, `seal` | One crypto library for everything but HPKE. Its keys are not wiped from outside |
 | `rustls`, `tokio-rustls` | TLS toward providers, Postgres, key sources and a KMS, and mTLS from callers | `seal-keys`, `seal-broker`, `seal-client`, `seal` | `ring` provider only; no `aws-lc-rs`, so no C build |
 | `webpki-roots` | The public roots providers and a KMS are verified against | `seal-broker`, `seal-keys` | Mozilla's set, compiled in; operators add more |
 | `postgres-protocol` | SCRAM-SHA-256(-PLUS) and the MD5 hash for Postgres logins | `seal-broker` | From the `rust-postgres` project; its SCRAM state is not wiped (threat model) |
 | `zeroize` | Wiping buffers that hold secrets | all but `seal-proto` | |
 | `getrandom` | Randomness for sealing, in the WASM build too | `seal-format` | |
 | `x509-parser` | Reading a caller certificate's subject, to name the caller | `seal` | Parses only certificates that rustls has already verified |
+
+### Only with the `aws-kms` feature
+
+Off by default, and then none of these is linked. With it the binary's tree has about
+50 more crates.
+
+| Crate | For | Notes |
+|---|---|---|
+| `aws-sdk-kms` | `Encrypt` and `Decrypt` with the wrapping key in AWS KMS | Sees each private key it wraps or unwraps, in buffers it does not wipe |
+| `aws-config` | Finding seal's AWS credentials: the environment, the shared files, a web identity token, the container endpoint, instance metadata. Brings `aws-sdk-sts` | Without its `sso` feature. Its logging is off by default, since it logs whole responses |
+| `aws-credential-types` | Handing the SDK the credentials seal reads from its own file | |
+| `aws-smithy-http-client` | The SDK's HTTP client, on the `hyper` and `rustls` seal already has | `ring` only, so still no `aws-lc-rs` and no C build |
+| `webpki-root-certs` | The public roots as certificates, the form that client takes | The same Mozilla set as `webpki-roots`. The host's certificate store is not used |
 
 ## Formats and parsing
 
@@ -68,7 +81,7 @@ dependencies are listed separately.
 | `rcgen` | Test certificates |
 | `tempfile` | Test directories |
 | `trybuild` | Compile-fail tests: opening code is absent from the sealing build |
-| `aws-sigv4`, `aws-credential-types` | Cross-checking seal's SigV4 against the AWS SDK's, for providers and for AWS KMS |
+| `aws-sigv4`, `aws-credential-types` | Cross-checking seal's SigV4 against the AWS SDK's |
 | `tokio-postgres` | The client in Postgres tests |
 | `futures-core` | Test bodies |
 | `libfuzzer-sys` | Fuzz targets, in their own workspace |

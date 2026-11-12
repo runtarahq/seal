@@ -241,28 +241,63 @@ takes effect at a restart. An OVHcloud service account is not supported.
 seal sends the keyset and kid as the KMS's `context`, so a wrapped key copied to
 another keyset or kid does not unwrap.
 
-**AWS KMS.** Create a symmetric key for encryption and decryption, and give seal's
-identity `kms:Encrypt` and `kms:Decrypt` on it, and nothing else.
+**AWS KMS.** Only in a seal built with the `aws-kms` feature, which links the AWS SDK:
+`cargo build --features aws-kms`, or `--build-arg FEATURES=aws-kms` for the image. A
+seal built without it refuses this configuration at start-up and in `check-config`.
+
+Create a symmetric key for encryption and decryption, and give seal's identity
+`kms:Encrypt` and `kms:Decrypt` on it, and nothing else.
 
 ```toml
 [keys]
 source = { dir = "/var/lib/seal/keys" }
+# With the role of the EC2 instance, ECS task or EKS pod that seal runs in:
+wrap = { aws_kms = { key_arn = "arn:aws:kms:eu-central-1:123456789012:key/…" } }
+# Anywhere else, with an access key in a file:
 wrap = { aws_kms = { key_arn = "arn:aws:kms:eu-central-1:123456789012:key/…", credentials_file = "/etc/seal/aws-credentials" } }
 ```
 
 | Setting | |
 |---|---|
 | `key_arn` | The key's ARN, which names its region. Not an alias or a bare key id: an alias can be pointed at another key |
-| `credentials_file` | A file in the AWS shared credentials format, readable only by seal's user: `[default]`, then `aws_access_key_id`, `aws_secret_access_key` and, for temporary credentials, `aws_session_token` |
-| `profile` | The profile in that file. `default` if not given |
+| `credentials_file` | A file in the AWS shared credentials format, readable only by seal's user: `[default]`, then `aws_access_key_id`, `aws_secret_access_key` and, for temporary credentials, `aws_session_token`. Without it, seal uses what the AWS SDK finds |
+| `profile` | The profile, in that file or in the shared files the SDK finds. `default` if not given |
 | `endpoint` | The endpoint, if it is not the region's public one: a VPC or FIPS endpoint |
 | `ca` | The CA of the endpoint's certificate, if it is not a public one |
 
-The credentials file is read for every request to the KMS, so a rotated access key, or
-temporary credentials that something else keeps fresh, need no restart. seal does not
-fetch credentials itself: not from the instance metadata service, a container's
-credential endpoint, a web identity token or the environment. Requests are signed with
-Signature Version 4, so seal's clock must be within five minutes of the KMS's.
+With `credentials_file`, seal reads that file for every request to the KMS, so a rotated
+access key, or temporary credentials that something else keeps fresh, need no restart.
+Nothing else is looked for.
+
+Without it, the AWS SDK looks for credentials in its usual order, and keeps and renews
+what it finds:
+
+1. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the environment. A file is the
+   better place: the environment shows in the unit or the pod's description, and a new
+   key needs a restart.
+2. The shared files, `~/.aws/credentials` and `~/.aws/config` or where
+   `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` say, including a profile that
+   assumes a role or runs a `credential_process`, as IAM Roles Anywhere does. seal does
+   not check who can read these files. A profile that signs in with SSO is not
+   supported.
+3. A web identity token: IAM roles for service accounts on EKS.
+4. The container credentials endpoint: a task role on ECS and Fargate, and EKS Pod
+   Identity.
+5. The instance metadata service, version 2: an instance profile on EC2. In a container
+   on an instance, it answers only if the instance's hop limit is 2 or more.
+
+Only credentials are looked for this way. The region is the key's, and the endpoint and
+CA are the configured ones, whatever `AWS_REGION`, `AWS_ENDPOINT_URL` or a profile say.
+The KMS, and STS when a role is assumed, are verified against the public roots compiled
+into seal, not the host's certificate store, which a minimal image does not have.
+
+A role's credentials come from the host with no way for it to tell seal from anything
+else in the same instance, task or pod: whatever else runs there can take the same
+role. Give the role this key and nothing more.
+
+Requests are signed with Signature Version 4, so seal's clock must be within five
+minutes of the KMS's. A request that fails in passing is tried up to three times within
+its ten seconds.
 
 seal sends the keyset and kid as the encryption context, `seal:keyset` and `seal:kid`.
 A wrapped key copied to another keyset or kid does not unwrap, CloudTrail shows which
@@ -275,9 +310,12 @@ wrapped by any other.
 If the KMS cannot be reached or refuses, keys already unwrapped keep working until
 `max_unwrap_age`, and then that keyset returns `KEYS_UNAVAILABLE` until the KMS answers.
 `/readyz` does not ask the KMS. Each refusal is logged with the HTTP status and the
-KMS's own name or code for the error, and counted in `seal_kms_requests_total` by `kms`
+KMS's own name or code for the error, a failure to find AWS credentials is logged with
+what the SDK says of it, and each request is counted in `seal_kms_requests_total` by `kms`
 (`ovh` or `aws`), `operation` (`encrypt` or `decrypt`) and `outcome` (`ok`, `refused`, `unreachable` or
-`timeout`). A request to the KMS may take ten seconds.
+`timeout`). A request to the KMS may take ten seconds. The AWS SDK's own logging is off
+unless `RUST_LOG` turns it on: when a credential source fails, it logs the whole
+response, which may hold a token.
 
 To move existing keys to the KMS, see
 [rotating the wrapping key](#rotating-the-wrapping-key). To rotate an OVHcloud
