@@ -54,9 +54,15 @@ impl Logs {
 
 impl Drop for Logs {
     fn drop(&mut self) {
+        // The capture takes everything, down to the AWS SDK's tracing of each step.
+        // What seal itself says is what an operator sees, and is enough here.
         let logged = self.capture.contents();
-        if !logged.is_empty() {
-            println!("logged:\n{logged}");
+        let ours: Vec<&str> = logged
+            .lines()
+            .filter(|line| line.contains(" seal_keys::"))
+            .collect();
+        if !ours.is_empty() {
+            println!("logged:\n{}", ours.join("\n"));
         }
     }
 }
