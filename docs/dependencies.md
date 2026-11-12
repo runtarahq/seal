@@ -79,8 +79,8 @@ dependencies are listed separately.
   an unfixed timing advisory (RUSTSEC-2023-0071). `ring` signs all three algorithms.
 - **`aws-sigv4` at run time, and an Azure SDK:** seal signs itself, so it controls
   exactly what is signed and refused.
-- **The AWS and OVHcloud SDKs:** a KMS wrapper is two JSON requests. The AWS SDK alone
-  would more than double the tree, and bring its own HTTP and TLS stacks.
+- **The AWS and OVHcloud SDKs:** a KMS wrapper is two JSON requests, sent with the HTTP
+  and TLS stacks seal already has.
 - **`testcontainers`:** a helper runs the `docker` command instead.
 - **`aes-gcm`:** `ring` already provides it.
 - **OpenSSL:** none anywhere in the tree.

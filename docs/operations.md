@@ -209,7 +209,8 @@ If the key source is unreachable, loaded keysets keep working for `max_stale`, t
 With a wrapping key file, whoever reads seal's disk has the wrapping key and the wrapped
 keys together. With a KMS the wrapping key never leaves the KMS: seal sends it each
 private key to wrap when the key is made, and to unwrap when a keyset is loaded and
-again every `max_unwrap_age`. No request waits on the KMS once its keyset is loaded.
+again every `max_unwrap_age`. Requests that use an already unwrapped key do not touch
+the KMS.
 
 The KMS sees every private key it wraps or unwraps, and whoever can use the wrapping key
 there, with a copy of the wrapped keys, can open what seal can. Its access log shows
