@@ -9,6 +9,7 @@ mod files;
 pub mod http_source;
 mod https;
 pub mod keyring;
+mod kms;
 pub mod ovh_kms;
 pub mod source;
 pub mod wrap;

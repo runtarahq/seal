@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use http::{HeaderValue, Request, StatusCode, header};
+use http::{HeaderValue, Request, header};
 use http_body_util::Full;
 use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey};
@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::KeyError;
-use crate::https::{ClientIdentity, Https, Names, PREALLOCATED_BYTES, Roots};
+use crate::https::{ClientIdentity, Https, Names, Roots};
+use crate::kms::{KEY_BASE64_BYTES, Refusal, exchange, key_from_base64, push_key_base64};
 use crate::source::MAX_WRAPPED_KEY_BYTES;
 use crate::wrap::{KeyWrap, associated_data};
 
@@ -89,9 +90,6 @@ const NAMES: Names = Names {
     no_host: "the KMS endpoint has no host",
     ca: "the KMS CA",
 };
-
-/// The most a private key takes in base64, with room to spare.
-const PLAINTEXT_BASE64_BYTES: usize = 128;
 
 /// Whether this is a UUID as the KMS writes them: 8-4-4-4-12 hex digits.
 fn is_uuid(value: &str) -> bool {
@@ -203,24 +201,9 @@ impl OvhKmsWrap {
                 .headers_mut()
                 .insert(header::AUTHORIZATION, authorization.clone());
         }
-        let sent =
-            tokio::time::timeout(self.timeout, self.https.send(request, PREALLOCATED_BYTES)).await;
-        let outcome = match &sent {
-            Ok(Ok((StatusCode::OK, _))) => "ok",
-            Ok(Ok(_)) => "refused",
-            Ok(Err(_)) => "unreachable",
-            Err(_) => "timeout",
-        };
-        metrics::counter!(
-            "seal_kms_requests_total",
-            "kms" => "ovh",
-            "operation" => operation,
-            "outcome" => outcome,
-        )
-        .increment(1);
-        match sent {
-            Ok(Ok((StatusCode::OK, body))) => Ok(body),
-            Ok(Ok((status, body))) => {
+        match exchange(&self.https, request, self.timeout, "ovh", operation).await? {
+            Ok(body) => Ok(body),
+            Err(Refusal { status, body }) => {
                 let error: ErrorResponse = serde_json::from_slice(&body).unwrap_or_default();
                 tracing::warn!(
                     kms = "ovh",
@@ -230,14 +213,6 @@ impl OvhKmsWrap {
                     request_id = error.request_id.as_deref().filter(|id| is_uuid(id)),
                     "the KMS refused a request"
                 );
-                Err(KeyError::Unavailable)
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(kms = "ovh", operation, "the KMS could not be reached");
-                Err(error)
-            }
-            Err(_) => {
-                tracing::warn!(kms = "ovh", operation, "the KMS did not answer in time");
                 Err(KeyError::Unavailable)
             }
         }
@@ -259,15 +234,9 @@ impl KeyWrap for OvhKmsWrap {
         let context = context(keyset, kid);
         // Written by hand into a buffer of its final size, so the key is never in an
         // allocation that is not wiped. Neither value needs escaping: both are base64.
-        let mut body = Zeroizing::new(Vec::with_capacity(
-            PLAINTEXT_BASE64_BYTES + context.len() + 64,
-        ));
+        let mut body = Zeroizing::new(Vec::with_capacity(KEY_BASE64_BYTES + context.len() + 64));
         body.extend_from_slice(br#"{"plaintext":""#);
-        let mut encoded = Zeroizing::new([0_u8; PLAINTEXT_BASE64_BYTES]);
-        let length = key
-            .expose(|bytes| STANDARD.encode_slice(bytes, encoded.as_mut_slice()))
-            .map_err(|_| KeyError::Unavailable)?;
-        body.extend_from_slice(encoded.get(..length).ok_or(KeyError::Unavailable)?);
+        push_key_base64(key, &mut body)?;
         body.extend_from_slice(br#"","context":""#);
         body.extend_from_slice(context.as_bytes());
         body.extend_from_slice(br#""}"#);
@@ -307,12 +276,7 @@ impl KeyWrap for OvhKmsWrap {
         let plaintext = serde_json::from_slice::<DecryptResponse>(&response)
             .map(|response| Zeroizing::new(response.plaintext))
             .map_err(|_| KeyError::Unavailable)?;
-        let mut decoded = Zeroizing::new([0_u8; PLAINTEXT_BASE64_BYTES]);
-        let length = STANDARD
-            .decode_slice(plaintext.as_bytes(), decoded.as_mut_slice())
-            .map_err(|_| KeyError::Unavailable)?;
-        PrivateKey::from_bytes(decoded.get(..length).ok_or(KeyError::Unavailable)?)
-            .map_err(|_| KeyError::Unavailable)
+        key_from_base64(&plaintext)
     }
 }
 
