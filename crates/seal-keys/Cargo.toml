@@ -32,6 +32,9 @@ webpki-roots = "1"
 zeroize = "1"
 
 [dev-dependencies]
+# Only to check seal's signature of a KMS request against the AWS SDK's.
+aws-credential-types = { version = "1", default-features = false }
+aws-sigv4 = { version = "1", default-features = false, features = ["sign-http", "http1"] }
 futures-util = "0.3"
 seal-testkit = { path = "../seal-testkit" }
 tempfile = "3"

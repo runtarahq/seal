@@ -98,3 +98,113 @@ pub fn serve_ovh(provider: &MockProvider, okms_id: &str, key_id: &str, token: Op
         }),
     );
 }
+
+fn aws_error(kind: &str) -> CannedResponse {
+    CannedResponse {
+        status: 400,
+        headers: vec![(
+            "content-type".to_owned(),
+            "application/x-amz-json-1.1".to_owned(),
+        )],
+        body: json!({ "__type": kind, "message": "refused by the fake KMS" })
+            .to_string()
+            .into_bytes(),
+    }
+}
+
+/// The context of a request, in one canonical form.
+fn aws_context(body: &Value) -> String {
+    body.get("EncryptionContext")
+        .filter(|context| context.is_object())
+        .map_or_else(|| "{}".to_owned(), Value::to_string)
+}
+
+fn aws_encrypt(body: &Value, key_arn: &str) -> Option<CannedResponse> {
+    let plaintext = STANDARD.decode(body.get("Plaintext")?.as_str()?).ok()?;
+    let blob = format!(
+        "fake.{}.{}",
+        URL_SAFE_NO_PAD.encode(aws_context(body)),
+        URL_SAFE_NO_PAD.encode(masked(&plaintext)),
+    );
+    Some(json_response(
+        200,
+        &json!({
+            "CiphertextBlob": STANDARD.encode(blob),
+            "KeyId": key_arn,
+            "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+        }),
+    ))
+}
+
+fn aws_decrypt(body: &Value, key_arn: &str) -> Option<CannedResponse> {
+    let blob = STANDARD
+        .decode(body.get("CiphertextBlob")?.as_str()?)
+        .ok()?;
+    let blob = String::from_utf8(blob).ok()?;
+    let mut parts = blob.split('.');
+    let (Some("fake"), Some(sealed_context), Some(sealed), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if URL_SAFE_NO_PAD.decode(sealed_context).ok()? != aws_context(body).as_bytes() {
+        return None;
+    }
+    let plaintext = masked(&URL_SAFE_NO_PAD.decode(sealed).ok()?);
+    Some(json_response(
+        200,
+        &json!({
+            "Plaintext": STANDARD.encode(plaintext),
+            "KeyId": key_arn,
+            "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+        }),
+    ))
+}
+
+/// Makes `provider` answer as AWS KMS does for one key: `Encrypt` and `Decrypt`, as
+/// `POST /` with the operation in `X-Amz-Target`. A request must be signed with
+/// `access_key_id` for the key's region; the signature itself is not checked, which
+/// the wrapper's own tests do against the AWS SDK. A ciphertext decrypts only with the
+/// encryption context it was encrypted with.
+pub fn serve_aws(provider: &MockProvider, key_arn: &str, access_key_id: &str) {
+    let region = key_arn.split(':').nth(3).unwrap_or_default();
+    let credential = format!("AWS4-HMAC-SHA256 Credential={access_key_id}/");
+    let scope = format!("/{region}/kms/aws4_request, SignedHeaders=");
+    let key_arn = key_arn.to_owned();
+    provider.handle(
+        "/",
+        Arc::new(move |request: &Received| {
+            let authorization = request.header("authorization").unwrap_or_default();
+            let signed = authorization.starts_with(&credential)
+                && authorization.contains(&scope)
+                && authorization.contains("host;x-amz-date")
+                && authorization.contains(", Signature=")
+                && request.header("x-amz-date").is_some();
+            if !signed {
+                return aws_error("UnrecognizedClientException");
+            }
+            if request.method != "POST"
+                || request.uri != "/"
+                || request.header("content-type") != Some("application/x-amz-json-1.1")
+            {
+                return aws_error("ValidationException");
+            }
+            let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+                return aws_error("SerializationException");
+            };
+            if body.get("KeyId").and_then(Value::as_str) != Some(key_arn.as_str()) {
+                return aws_error("NotFoundException");
+            }
+            let (answer, failure) = match request.header("x-amz-target") {
+                Some("TrustedService.Encrypt") => {
+                    (aws_encrypt(&body, &key_arn), "ValidationException")
+                }
+                Some("TrustedService.Decrypt") => {
+                    (aws_decrypt(&body, &key_arn), "InvalidCiphertextException")
+                }
+                _ => (None, "UnknownOperationException"),
+            };
+            answer.unwrap_or_else(|| aws_error(failure))
+        }),
+    );
+}
