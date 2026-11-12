@@ -2621,7 +2621,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "url",
+ "webpki-roots",
  "zeroize",
 ]
 
