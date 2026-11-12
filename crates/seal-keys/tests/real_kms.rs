@@ -10,12 +10,13 @@
 //!   `SEAL_TEST_OVH_KMS_CERT` and `SEAL_TEST_OVH_KMS_KEY`, an access certificate and its
 //!   key, in PEM.
 //!
-//! AWS KMS:
+//! AWS KMS, in a build with the `aws-kms` feature:
 //!
 //! - `SEAL_TEST_AWS_KMS_KEY_ARN`: a symmetric key that may encrypt and decrypt.
 //! - `SEAL_TEST_AWS_KMS_CREDENTIALS_FILE`: a shared credentials file that only its
-//!   owner can read, such as `~/.aws/credentials`, and optionally
-//!   `SEAL_TEST_AWS_KMS_PROFILE`.
+//!   owner can read. Or `SEAL_TEST_AWS_KMS_FOUND=1`, to use what the AWS SDK finds: the
+//!   environment, `~/.aws`, or the role of the instance, task or pod the test runs in.
+//! - Optionally `SEAL_TEST_AWS_KMS_PROFILE`.
 
 #![allow(
     clippy::unwrap_used,
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey};
-use seal_keys::{AwsKmsConfig, AwsKmsWrap, KeyWrap, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
+use seal_keys::{KeyWrap, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
 use seal_testkit::log_capture::LogCapture;
 use tracing::dispatcher::DefaultGuard;
 use zeroize::Zeroizing;
@@ -104,21 +105,35 @@ async fn ovh_kms_wraps_and_unwraps_a_key() {
     round_trip(&OvhKmsWrap::new(&config).unwrap(), true).await;
 }
 
+#[cfg(feature = "aws-kms")]
 #[tokio::test]
 #[ignore = "needs a key in AWS KMS"]
 async fn aws_kms_wraps_and_unwraps_a_key() {
-    let (Some(key_arn), Some(credentials_file)) = (
-        setting("SEAL_TEST_AWS_KMS_KEY_ARN"),
+    use seal_keys::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
+
+    let credentials = match (
         setting("SEAL_TEST_AWS_KMS_CREDENTIALS_FILE"),
-    ) else {
+        setting("SEAL_TEST_AWS_KMS_FOUND"),
+    ) {
+        (Some(path), _) => Some(AwsCredentials::File {
+            path: path.into(),
+            profile: setting("SEAL_TEST_AWS_KMS_PROFILE"),
+        }),
+        (None, Some(_)) => Some(AwsCredentials::Found {
+            profile: setting("SEAL_TEST_AWS_KMS_PROFILE"),
+        }),
+        (None, None) => None,
+    };
+    let (Some(key_arn), Some(credentials)) = (setting("SEAL_TEST_AWS_KMS_KEY_ARN"), credentials)
+    else {
         println!("skipped: the SEAL_TEST_AWS_KMS_* settings are not all set");
         return;
     };
     let _logs = Logs::print_at_the_end();
+    println!("credentials: {credentials:?}");
     let wrap = AwsKmsWrap::new(&AwsKmsConfig {
         key_arn,
-        credentials_file: credentials_file.into(),
-        profile: setting("SEAL_TEST_AWS_KMS_PROFILE"),
+        credentials,
         endpoint: None,
         ca_pem: None,
         timeout: Duration::from_secs(10),

@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "aws-kms")]
 pub mod aws_kms;
 mod files;
 pub mod http_source;
@@ -25,7 +26,8 @@ use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey, PublicKey};
 use tokio::sync::OwnedSemaphorePermit;
 
-pub use aws_kms::{AwsKmsConfig, AwsKmsWrap};
+#[cfg(feature = "aws-kms")]
+pub use aws_kms::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
 pub use http_source::{HttpKeySource, HttpKeySourceConfig};
 pub use keyring::{Keyring, KeyringConfig, PublicKeyInfo};
 pub use ovh_kms::{OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};

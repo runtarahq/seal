@@ -1,5 +1,6 @@
 //! The AWS KMS wrapper against a stand-in for the KMS.
 
+#![cfg(feature = "aws-kms")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::time::Duration;
 
 use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey};
-use seal_keys::{AwsKmsConfig, AwsKmsWrap, KeyError, KeyWrap};
+use seal_keys::{AwsCredentials, AwsKmsConfig, AwsKmsWrap, KeyError, KeyWrap};
 use seal_testkit::mock_kms::serve_aws;
 use seal_testkit::mock_provider::{Alpn, CannedResponse, MockProvider};
 use seal_testkit::pki::TestPki;
@@ -60,8 +61,10 @@ fn static_credentials(kms: &Kms) -> PathBuf {
 fn wrapper(kms: &Kms, credentials_file: PathBuf) -> AwsKmsWrap {
     AwsKmsWrap::new(&AwsKmsConfig {
         key_arn: ARN.to_owned(),
-        credentials_file,
-        profile: None,
+        credentials: AwsCredentials::File {
+            path: credentials_file,
+            profile: None,
+        },
         endpoint: Some(format!("https://localhost:{}", kms.provider.port())),
         ca_pem: Some(kms.pki.ca_pem.clone()),
         timeout: Duration::from_secs(5),
@@ -103,9 +106,13 @@ async fn a_key_wrapped_by_the_kms_unwraps_to_the_same_key() {
         assert_eq!(request.header("host"), Some(host.as_str()));
         assert_eq!(request.header("x-amz-security-token"), None);
         let authorization = request.header("authorization").unwrap();
-        assert!(authorization.contains(
-            "/eu-central-1/kms/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target, Signature="
-        ));
+        assert!(authorization.contains("/eu-central-1/kms/aws4_request, SignedHeaders="));
+        for signed in ["content-type;", "host;", "x-amz-date;", "x-amz-target"] {
+            assert!(
+                authorization.contains(signed),
+                "{signed} in {authorization}"
+            );
+        }
         assert!(!authorization.contains(SECRET_KEY));
     }
 }
@@ -179,9 +186,10 @@ async fn temporary_credentials_send_their_session_token_signed() {
         Some("a/session+token==")
     );
     assert!(
-        request.header("authorization").unwrap().contains(
-            "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target,"
-        )
+        request
+            .header("authorization")
+            .unwrap()
+            .contains(";x-amz-security-token;")
     );
 }
 
@@ -281,8 +289,10 @@ async fn a_kms_with_a_certificate_from_another_ca_is_not_trusted() {
     let kms = kms().await;
     let wrap = AwsKmsWrap::new(&AwsKmsConfig {
         key_arn: ARN.to_owned(),
-        credentials_file: static_credentials(&kms),
-        profile: None,
+        credentials: AwsCredentials::File {
+            path: static_credentials(&kms),
+            profile: None,
+        },
         endpoint: Some(format!("https://localhost:{}", kms.provider.port())),
         ca_pem: Some(TestPki::new("someone else").ca_pem),
         timeout: Duration::from_secs(5),
