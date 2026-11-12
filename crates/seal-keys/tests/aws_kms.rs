@@ -93,10 +93,7 @@ async fn a_key_wrapped_by_the_kms_unwraps_to_the_same_key() {
         .iter()
         .map(|request| request.header("x-amz-target").unwrap().to_owned())
         .collect();
-    assert_eq!(
-        targets,
-        ["TrentService.Encrypt", "TrentService.Decrypt"]
-    );
+    assert_eq!(targets, ["TrentService.Encrypt", "TrentService.Decrypt"]);
     let host = format!("localhost:{}", kms.provider.port());
     for request in &received {
         assert_eq!(
