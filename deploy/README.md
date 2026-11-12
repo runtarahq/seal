@@ -15,6 +15,9 @@ rustup target add x86_64-unknown-linux-musl     # and a musl C compiler, such as
 cargo build --release --locked --package seal --target x86_64-unknown-linux-musl
 ```
 
+Wrapping with a key in AWS KMS links the AWS SDK and is left out unless asked for: add
+`--features aws-kms` to that command, or `--build-arg FEATURES=aws-kms` to `docker build`.
+
 The container image is that binary alone, `FROM scratch`: no libc, shell or package
 manager. It runs as uid 65532.
 
