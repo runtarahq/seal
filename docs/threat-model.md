@@ -17,7 +17,8 @@ working afterwards.
 | Asset | Where it lives | Why it matters |
 |---|---|---|
 | Private keys of keysets | In seal's memory, unwrapped; wrapped in the key source | Open every value sealed to them, including those in backups |
-| Key-wrapping key | KMS, or a file readable only by seal's user | Unwraps the private keys |
+| Key-wrapping key | A file readable only by seal's user, or a KMS (OVHcloud KMS), which it never leaves | Unwraps the private keys |
+| KMS credentials | An access certificate's key or a token, in a file readable only by seal's user, and in seal's memory | Ask the KMS to unwrap any private key seal has a wrapped copy of |
 | Opened secrets | In seal's memory, during one `send`, or a Postgres session until its login ends | The credentials themselves |
 | Client-certificate private keys | In a TLS configuration, while its identity exists | Credentials kept beyond one request (see Residual risks) |
 | SigV4 signing keys | In seal's memory, during one request or chunked upload | Sign requests for one day, region and service |
@@ -63,7 +64,10 @@ working afterwards.
 6. **Provider's response to the caller.** Response sealing replaces declared fields
    before the response reaches the caller. Everything else passes through.
 7. **seal to key source and KMS.** These supply the private keys. Whoever controls
-   them controls what seal can open.
+   them controls what seal can open. A KMS is reached over TLS, verified against the
+   public roots or a configured CA, and sees each private key it wraps or unwraps. The
+   keyset and kid are authenticated with each wrapped key, so the key source cannot
+   pass one keyset's key off as another's.
 
 ## What enforces each boundary
 
@@ -211,7 +215,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 ### Copies seal cannot erase
 
 - **Third-party copies.** Dependencies copy values seal cannot zeroize: `hyper` header
-  values and write buffers, `bytes::Bytes`, `ring`'s key pairs and HMAC keys,
+  values and write buffers, `bytes::Bytes` (a private key on its way to or from a KMS
+  passes through both, and through `serde_json`'s reading of the KMS's answer), `ring`'s key pairs and HMAC keys,
   `serde_json`'s reading of a field of a response being sealed, or of the claims a policy
   names in a JWT's payload. Headers are marked sensitive, and
   plaintext may remain in freed memory until it is reused. This matters to someone
@@ -255,6 +260,10 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   key is rotated by re-wrapping every key with `seal rewrap` and restarting. Copies of
   the keys wrapped with the old wrapping key stay readable to whoever has it, until
   they are deleted.
+- **A wrapping key in a KMS is revoked within `max_unwrap_age`.** seal asks the KMS
+  each time it unwraps a key, so taking away its access, or deleting the service key,
+  stops it once the keys it has unwrapped are dropped. KMS credentials are read once,
+  so a stolen certificate key or token is revoked at the KMS, not by replacing the file.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups

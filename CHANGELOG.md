@@ -92,6 +92,9 @@ The first release.
   mean entering every secret again. Only whoever runs seal can do this.
 - `seal rewrap` rotates the wrapping key, by wrapping every key again into a new
   directory.
+- The wrapping key can stay in OVHcloud KMS: `keys.wrap = { ovh_kms = { … } }`, with an
+  access certificate or a personal access token. `seal rewrap --new-wrap` moves existing
+  keys to it. See [`docs/operations.md`](docs/operations.md#wrapping-with-a-kms).
 - Audit records for every use and for every caller refused, Prometheus metrics, and process hardening (no core dumps,
   not dumpable, memory locked as configured, never as root).
 - A systemd unit, a container image and example configurations in [`deploy/`](deploy).
