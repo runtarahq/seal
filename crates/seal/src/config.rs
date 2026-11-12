@@ -274,6 +274,8 @@ pub enum WrapConfig {
     File(PathBuf),
     /// A service key in OVHcloud KMS.
     OvhKms(OvhKmsWrapConfig),
+    /// A key in AWS KMS.
+    AwsKms(AwsKmsWrapConfig),
 }
 
 impl WrapConfig {
@@ -297,7 +299,7 @@ impl WrapConfig {
 
     fn check(&self) -> Result<(), ConfigError> {
         match self {
-            Self::File(_) => Ok(()),
+            Self::File(_) | Self::AwsKms(_) => Ok(()),
             Self::OvhKms(kms) => match (&kms.cert, &kms.key, &kms.token_file) {
                 (Some(_), Some(_), None) | (None, None, Some(_)) => Ok(()),
                 _ => Err(invalid(
@@ -306,6 +308,22 @@ impl WrapConfig {
             },
         }
     }
+}
+
+/// A key in AWS KMS, and seal's credentials for it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsKmsWrapConfig {
+    /// The key's ARN. Its region is where the KMS is.
+    pub key_arn: String,
+    /// A file in the AWS shared credentials format that only seal's user can read.
+    pub credentials_file: PathBuf,
+    /// The profile in that file. `default` if not given.
+    pub profile: Option<String>,
+    /// The endpoint, if it is not the region's public one.
+    pub endpoint: Option<String>,
+    /// The CA that issued the endpoint's certificate, if it is not a public one.
+    pub ca: Option<PathBuf>,
 }
 
 /// A service key in OVHcloud KMS, and seal's credentials for it: an access
@@ -815,6 +833,18 @@ mod tests {
         ));
         assert!(WrapConfig::parse(&kms("")).is_err());
         assert!(WrapConfig::parse("{ file = \"a\" }\nextra = 1").is_err());
+
+        let aws = "{ aws_kms = { key_arn = \"arn:aws:kms:eu-central-1:123456789012:key/1234abcd\", \
+                   credentials_file = \"/etc/seal/aws-credentials\" } }";
+        assert!(matches!(
+            WrapConfig::parse(aws).unwrap(),
+            WrapConfig::AwsKms(AwsKmsWrapConfig { profile: None, .. })
+        ));
+        Config::parse(&MINIMAL.replace("{ file = \"/etc/seal/kek\" }", aws)).unwrap();
+        assert!(WrapConfig::parse(&aws.replace("credentials_file", "credentials")).is_err());
+        assert!(
+            WrapConfig::parse("{ aws_kms = { credentials_file = \"/etc/seal/aws\" } }").is_err()
+        );
     }
 
     #[test]

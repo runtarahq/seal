@@ -12,8 +12,8 @@ use seal_broker::audit::AuditSink;
 use seal_broker::client::ClientConfig;
 use seal_broker::{Broker, BrokerConfig, Environment, Limits};
 use seal_keys::{
-    DirKeySource, FileKeyWrap, HttpKeySource, HttpKeySourceConfig, KeySource, KeyWrap, Keyring,
-    OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
+    AwsKmsConfig, AwsKmsWrap, DirKeySource, FileKeyWrap, HttpKeySource, HttpKeySourceConfig,
+    KeySource, KeyWrap, Keyring, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
 };
 use seal_proto::MAX_BODY_CHUNK;
 use seal_proto::v1::seal_server::SealServer;
@@ -90,6 +90,17 @@ pub fn key_wrap(config: &WrapConfig) -> Result<Arc<dyn KeyWrap>, String> {
         WrapConfig::File(path) => {
             Arc::new(FileKeyWrap::from_file(path).map_err(|error| error.to_string())?)
         }
+        WrapConfig::AwsKms(kms) => Arc::new(
+            AwsKmsWrap::new(&AwsKmsConfig {
+                key_arn: kms.key_arn.clone(),
+                credentials_file: kms.credentials_file.clone(),
+                profile: kms.profile.clone(),
+                endpoint: kms.endpoint.clone(),
+                ca_pem: kms.ca.as_ref().map(read).transpose()?,
+                timeout: KMS_TIMEOUT,
+            })
+            .map_err(|error| error.to_string())?,
+        ),
         WrapConfig::OvhKms(kms) => {
             let auth = match (&kms.cert, &kms.key, &kms.token_file) {
                 (Some(cert), Some(key), None) => OvhKmsAuth::Certificate {
