@@ -13,7 +13,7 @@ dependencies are listed separately.
 | Crate | For | Used in | Notes |
 |---|---|---|---|
 | `hpke` (`=0.15.1`) | Sealing and opening (RFC 9180: X25519, HKDF-SHA256, AES-256-GCM) | `seal-format` | Pinned exactly: the format depends on its output. RustCrypto, audited. Wipes its X25519 keys |
-| `ring` | Key wrapping (AES-256-GCM), HMAC and SHA-256 for SigV4 and Azure, JWT signatures, TLS's crypto provider | `seal-keys`, `seal-broker`, `seal` | One crypto library for everything but HPKE. Its keys are not wiped from outside |
+| `ring` | Key wrapping (AES-256-GCM), HMAC and SHA-256 for SigV4 (toward providers and AWS KMS) and Azure, JWT signatures, TLS's crypto provider | `seal-keys`, `seal-broker`, `seal` | One crypto library for everything but HPKE. Its keys are not wiped from outside |
 | `rustls`, `tokio-rustls` | TLS toward providers, Postgres, key sources and a KMS, and mTLS from callers | `seal-keys`, `seal-broker`, `seal-client`, `seal` | `ring` provider only; no `aws-lc-rs`, so no C build |
 | `webpki-roots` | The public roots providers and a KMS are verified against | `seal-broker`, `seal-keys` | Mozilla's set, compiled in; operators add more |
 | `postgres-protocol` | SCRAM-SHA-256(-PLUS) and the MD5 hash for Postgres logins | `seal-broker` | From the `rust-postgres` project; its SCRAM state is not wiped (threat model) |
@@ -68,7 +68,7 @@ dependencies are listed separately.
 | `rcgen` | Test certificates |
 | `tempfile` | Test directories |
 | `trybuild` | Compile-fail tests: opening code is absent from the sealing build |
-| `aws-sigv4`, `aws-credential-types` | Cross-checking seal's SigV4 against the AWS SDK's |
+| `aws-sigv4`, `aws-credential-types` | Cross-checking seal's SigV4 against the AWS SDK's, for providers and for AWS KMS |
 | `tokio-postgres` | The client in Postgres tests |
 | `futures-core` | Test bodies |
 | `libfuzzer-sys` | Fuzz targets, in their own workspace |
@@ -79,6 +79,8 @@ dependencies are listed separately.
   an unfixed timing advisory (RUSTSEC-2023-0071). `ring` signs all three algorithms.
 - **`aws-sigv4` at run time, and an Azure SDK:** seal signs itself, so it controls
   exactly what is signed and refused.
+- **The AWS and OVHcloud SDKs:** a KMS wrapper is two JSON requests. The AWS SDK alone
+  would more than double the tree, and bring its own HTTP and TLS stacks.
 - **`testcontainers`:** a helper runs the `docker` command instead.
 - **`aes-gcm`:** `ring` already provides it.
 - **OpenSSL:** none anywhere in the tree.

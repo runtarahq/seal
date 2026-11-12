@@ -83,7 +83,7 @@ asked for. A certificate that matches two configured callers is refused.
 | Setting | Default | |
 |---|---|---|
 | `source` | | `{ dir = "…" }`, or `{ http = { url, ca, cert, key } }` for a key service with a client certificate |
-| `wrap` | | `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
+| `wrap` | | `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }` or `{ aws_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
 | `idle_evict` | `15m` | A keyset unused this long is dropped from memory |
 | `refresh_interval` | `60s` | How often a loaded keyset is fetched again |
 | `max_stale` | `5m` | A keyset not fetched successfully this long is dropped |
@@ -238,19 +238,50 @@ expires. Credentials are read once, at start-up, so a renewed certificate or tok
 takes effect at a restart. An OVHcloud service account is not supported.
 
 seal sends the keyset and kid as the KMS's `context`, so a wrapped key copied to
-another keyset or kid does not unwrap. A wrapped key records the KMS and service key
-that wrapped it, and seal refuses one wrapped by any other.
+another keyset or kid does not unwrap.
+
+**AWS KMS.** Create a symmetric key for encryption and decryption, and give seal's
+identity `kms:Encrypt` and `kms:Decrypt` on it, and nothing else.
+
+```toml
+[keys]
+source = { dir = "/var/lib/seal/keys" }
+wrap = { aws_kms = { key_arn = "arn:aws:kms:eu-central-1:123456789012:key/…", credentials_file = "/etc/seal/aws-credentials" } }
+```
+
+| Setting | |
+|---|---|
+| `key_arn` | The key's ARN, which names its region. Not an alias or a bare key id: an alias can be pointed at another key |
+| `credentials_file` | A file in the AWS shared credentials format, readable only by seal's user: `[default]`, then `aws_access_key_id`, `aws_secret_access_key` and, for temporary credentials, `aws_session_token` |
+| `profile` | The profile in that file. `default` if not given |
+| `endpoint` | The endpoint, if it is not the region's public one: a VPC or FIPS endpoint |
+| `ca` | The CA of the endpoint's certificate, if it is not a public one |
+
+The credentials file is read for every request to the KMS, so a rotated access key, or
+temporary credentials that something else keeps fresh, need no restart. seal does not
+fetch credentials itself: not from the instance metadata service, a container's
+credential endpoint, a web identity token or the environment. Requests are signed with
+Signature Version 4, so seal's clock must be within five minutes of the KMS's.
+
+seal sends the keyset and kid as the encryption context, `seal:keyset` and `seal:kid`.
+A wrapped key copied to another keyset or kid does not unwrap, CloudTrail shows which
+keyset each `Decrypt` was for, and a key policy can limit an identity to some keysets
+with a condition on `kms:EncryptionContext:seal:keyset`.
+
+**Either KMS.** A wrapped key records the KMS key that wrapped it, and seal refuses one
+wrapped by any other.
 
 If the KMS cannot be reached or refuses, keys already unwrapped keep working until
 `max_unwrap_age`, and then that keyset returns `KEYS_UNAVAILABLE` until the KMS answers.
 `/readyz` does not ask the KMS. Each refusal is logged with the HTTP status and the
-KMS's error code and request id, and counted in `seal_kms_requests_total` by
-`operation` (`encrypt` or `decrypt`) and `outcome` (`ok`, `refused`, `unreachable` or
+KMS's own name or code for the error, and counted in `seal_kms_requests_total` by `kms`
+(`ovh` or `aws`), `operation` (`encrypt` or `decrypt`) and `outcome` (`ok`, `refused`, `unreachable` or
 `timeout`). A request to the KMS may take ten seconds.
 
 To move existing keys to the KMS, see
-[rotating the wrapping key](#rotating-the-wrapping-key). To rotate the service key,
-create a new one and do the same: seal does not use the KMS's own key rotation.
+[rotating the wrapping key](#rotating-the-wrapping-key). To rotate an OVHcloud
+service key, create a new one and do the same. AWS KMS's automatic rotation keeps the
+key's ARN and needs nothing from seal.
 
 ### Rotation
 
@@ -286,6 +317,9 @@ For a directory key source. A key service re-wraps the keys it holds itself.
    seal rewrap --config /etc/seal/seal.toml --out /var/lib/seal/keys-2 \
      --new-wrap '{ ovh_kms = { endpoint = "…", okms_id = "…", key_id = "…", cert = "…", key = "…" } }'
    ```
+
+   The old wrapping key is the configured one, of whatever kind, so the same command
+   moves keys from one KMS to another, or back to a file.
 
    Each key is unwrapped, checked against its public key and wrapped again. The
    configured directory and wrapping key are not touched, the new directory must not

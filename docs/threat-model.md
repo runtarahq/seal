@@ -17,8 +17,8 @@ working afterwards.
 | Asset | Where it lives | Why it matters |
 |---|---|---|
 | Private keys of keysets | In seal's memory, unwrapped; wrapped in the key source | Open every value sealed to them, including those in backups |
-| Key-wrapping key | A file readable only by seal's user, or a KMS (OVHcloud KMS), which it never leaves | Unwraps the private keys |
-| KMS credentials | An access certificate's key or a token, in a file readable only by seal's user, and in seal's memory | Ask the KMS to unwrap any private key seal has a wrapped copy of |
+| Key-wrapping key | A file readable only by seal's user, or a KMS (OVHcloud KMS or AWS KMS), which it never leaves | Unwraps the private keys |
+| KMS credentials | An access certificate's key, a token or an AWS secret access key, in a file readable only by seal's user; in seal's memory for the life of the process (OVHcloud) or of one request (AWS) | Ask the KMS to unwrap any private key seal has a wrapped copy of |
 | Opened secrets | In seal's memory, during one `send`, or a Postgres session until its login ends | The credentials themselves |
 | Client-certificate private keys | In a TLS configuration, while its identity exists | Credentials kept beyond one request (see Residual risks) |
 | SigV4 signing keys | In seal's memory, during one request or chunked upload | Sign requests for one day, region and service |
@@ -262,8 +262,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   they are deleted.
 - **A wrapping key in a KMS is revoked within `max_unwrap_age`.** seal asks the KMS
   each time it unwraps a key, so taking away its access, or deleting the service key,
-  stops it once the keys it has unwrapped are dropped. KMS credentials are read once,
-  so a stolen certificate key or token is revoked at the KMS, not by replacing the file.
+  stops it once the keys it has unwrapped are dropped. OVHcloud credentials are read
+  once and AWS credentials for each request; either way a stolen one is revoked at the
+  KMS, not by replacing the file.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups
