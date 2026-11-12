@@ -253,16 +253,56 @@ wrap = { aws_kms = { key_arn = "arn:aws:kms:eu-central-1:123456789012:key/…", 
 | Setting | |
 |---|---|
 | `key_arn` | The key's ARN, which names its region. Not an alias or a bare key id: an alias can be pointed at another key |
-| `credentials_file` | A file in the AWS shared credentials format, readable only by seal's user: `[default]`, then `aws_access_key_id`, `aws_secret_access_key` and, for temporary credentials, `aws_session_token` |
-| `profile` | The profile in that file. `default` if not given |
+| `credentials_file` | A file in the AWS shared credentials format, readable only by seal's user: `[default]`, then `aws_access_key_id`, `aws_secret_access_key` and, for temporary credentials, `aws_session_token`. Without it, seal uses [the role its host gives it](#a-role-on-aws) |
+| `profile` | The profile in that file. `default` if not given. Only with `credentials_file` |
 | `endpoint` | The endpoint, if it is not the region's public one: a VPC or FIPS endpoint |
 | `ca` | The CA of the endpoint's certificate, if it is not a public one |
 
 The credentials file is read for every request to the KMS, so a rotated access key, or
-temporary credentials that something else keeps fresh, need no restart. seal does not
-fetch credentials itself: not from the instance metadata service, a container's
-credential endpoint, a web identity token or the environment. Requests are signed with
-Signature Version 4, so seal's clock must be within five minutes of the KMS's.
+temporary credentials that something else keeps fresh, need no restart. Requests are
+signed with Signature Version 4, so seal's clock must be within five minutes of the
+KMS's.
+
+#### A role on AWS
+
+On AWS itself, leave `credentials_file` out and give the instance, task or pod a role
+that may use the key:
+
+```toml
+wrap = { aws_kms = { key_arn = "arn:aws:kms:eu-central-1:123456789012:key/…" } }
+```
+
+seal then finds the role's credentials as the AWS SDKs do, from its environment:
+
+| Where seal runs | What it asks | Set by |
+|---|---|---|
+| ECS or Fargate, with a task role | `http://169.254.170.2` and the path in `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` | ECS |
+| EKS, with Pod Identity | The address in `AWS_CONTAINER_CREDENTIALS_FULL_URI`, showing the token in the file `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` | EKS |
+| EC2, with an instance profile | The instance metadata service at `169.254.169.254`, version 2 only | Nothing: it is what is left when neither variable is set |
+
+- A full URI must be plain `http` to a loopback address, `169.254.170.2`,
+  `169.254.170.23` or `fd00:ec2::23`. seal refuses to start with any other, so that
+  the token is sent nowhere else.
+- `AWS_EC2_METADATA_DISABLED=true` rules out instance metadata; with no container
+  endpoint either, seal refuses to start.
+- In a container on an EC2 instance that has no task or pod role, the instance
+  metadata service answers only if the instance's hop limit is 2 or more. Prefer a
+  task role or Pod Identity, which give the role to seal's container alone.
+- Not supported: IAM roles for service accounts on EKS (a web identity token exchanged
+  at STS), SSO, `credential_process`, `AWS_ACCESS_KEY_ID` in the environment, and the
+  IPv6 instance metadata address. Use Pod Identity, or a credentials file that
+  something else keeps fresh.
+
+seal keeps a role's credentials until five minutes before they expire and then fetches
+new ones. If that fails, it goes on with the ones it has while they are valid, and
+tries again every thirty seconds. With none that are valid, a request to the KMS fails
+as if the KMS were unreachable, and the log says `no AWS credentials` with the source
+and the reason. A fetch may take five seconds.
+
+These endpoints have no TLS and no way to tell seal from anything else on the same
+instance, task or pod: whatever else runs there can take the same role. Give the role
+`kms:Encrypt` and `kms:Decrypt` on this key and nothing more, and run nothing else
+beside seal that should not have them.
 
 seal sends the keyset and kid as the encryption context, `seal:keyset` and `seal:kid`.
 A wrapped key copied to another keyset or kid does not unwrap, CloudTrail shows which

@@ -94,7 +94,8 @@ The first release.
   directory.
 - The wrapping key can stay in a KMS. OVHcloud KMS: `keys.wrap = { ovh_kms = { … } }`,
   with an access certificate or a personal access token. AWS KMS:
-  `keys.wrap = { aws_kms = { … } }`, with a credentials file. `seal rewrap --new-wrap`
+  `keys.wrap = { aws_kms = { … } }`, with a credentials file, or with the role of the
+  EC2 instance, ECS task or EKS pod (Pod Identity) that seal runs in. `seal rewrap --new-wrap`
   moves existing keys to either. See [`docs/operations.md`](docs/operations.md#wrapping-with-a-kms).
 - Audit records for every use and for every caller refused, Prometheus metrics, and process hardening (no core dumps,
   not dumpable, memory locked as configured, never as root).

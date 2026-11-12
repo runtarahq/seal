@@ -18,7 +18,7 @@ working afterwards.
 |---|---|---|
 | Private keys of keysets | In seal's memory, unwrapped; wrapped in the key source | Open every value sealed to them, including those in backups |
 | Key-wrapping key | A file readable only by seal's user, or a KMS (OVHcloud KMS or AWS KMS), which it never leaves | Unwraps the private keys |
-| KMS credentials | An access certificate's key, a token or an AWS secret access key, in a file readable only by seal's user; in seal's memory for the life of the process (OVHcloud) or of one request (AWS) | Ask the KMS to unwrap any private key seal has a wrapped copy of |
+| KMS credentials | An access certificate's key, a token or an AWS secret access key, in a file readable only by seal's user; in seal's memory for the life of the process (OVHcloud) or of one request (AWS). Or an AWS role's temporary credentials, fetched from the host and in seal's memory until they are about to expire | Ask the KMS to unwrap any private key seal has a wrapped copy of |
 | Opened secrets | In seal's memory, during one `send`, or a Postgres session until its login ends | The credentials themselves |
 | Client-certificate private keys | In a TLS configuration, while its identity exists | Credentials kept beyond one request (see Residual risks) |
 | SigV4 signing keys | In seal's memory, during one request or chunked upload | Sign requests for one day, region and service |
@@ -67,7 +67,10 @@ working afterwards.
    them controls what seal can open. A KMS is reached over TLS, verified against the
    public roots or a configured CA, and sees each private key it wraps or unwraps. The
    keyset and kid are authenticated with each wrapped key, so the key source cannot
-   pass one keyset's key off as another's.
+   pass one keyset's key off as another's. An AWS role's credentials come over plain
+   HTTP from a link-local or loopback address on seal's own host, which seal trusts as
+   it trusts the host; whatever else runs in the same instance, task or pod can fetch
+   the same credentials and ask the KMS to unwrap.
 
 ## What enforces each boundary
 
@@ -264,7 +267,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   each time it unwraps a key, so taking away its access, or deleting the service key,
   stops it once the keys it has unwrapped are dropped. OVHcloud credentials are read
   once and AWS credentials for each request; either way a stolen one is revoked at the
-  KMS, not by replacing the file.
+  KMS, not by replacing the file. A role's temporary credentials work until they
+  expire, wherever they were copied to, unless the role's sessions are revoked in IAM.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups
