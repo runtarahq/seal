@@ -196,10 +196,10 @@ pub fn serve_aws(provider: &MockProvider, key_arn: &str, access_key_id: &str) {
                 return aws_error("NotFoundException");
             }
             let (answer, failure) = match request.header("x-amz-target") {
-                Some("TrustedService.Encrypt") => {
+                Some("TrentService.Encrypt") => {
                     (aws_encrypt(&body, &key_arn), "ValidationException")
                 }
-                Some("TrustedService.Decrypt") => {
+                Some("TrentService.Decrypt") => {
                     (aws_decrypt(&body, &key_arn), "InvalidCiphertextException")
                 }
                 _ => (None, "UnknownOperationException"),

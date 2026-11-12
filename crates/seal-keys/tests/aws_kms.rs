@@ -95,7 +95,7 @@ async fn a_key_wrapped_by_the_kms_unwraps_to_the_same_key() {
         .collect();
     assert_eq!(
         targets,
-        ["TrustedService.Encrypt", "TrustedService.Decrypt"]
+        ["TrentService.Encrypt", "TrentService.Decrypt"]
     );
     let host = format!("localhost:{}", kms.provider.port());
     for request in &received {

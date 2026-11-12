@@ -434,7 +434,7 @@ impl KeyWrap for AwsKmsWrap {
         let response = self
             .call(
                 "encrypt",
-                "TrustedService.Encrypt",
+                "TrentService.Encrypt",
                 Bytes::copy_from_slice(&body),
             )
             .await?;
@@ -466,7 +466,7 @@ impl KeyWrap for AwsKmsWrap {
         })
         .map_err(|_| KeyError::Unavailable)?;
         let response = self
-            .call("decrypt", "TrustedService.Decrypt", Bytes::from(body))
+            .call("decrypt", "TrentService.Decrypt", Bytes::from(body))
             .await?;
         let plaintext = serde_json::from_slice::<DecryptResponse>(&response)
             .map(|response| Zeroizing::new(response.plaintext))
@@ -609,7 +609,7 @@ mod tests {
         for (index, token) in [None, Some("a/session+token==")].into_iter().enumerate() {
             let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64 * 86_399);
             let body = format!(r#"{{"KeyId":"{ARN}","n":{index}}}"#);
-            let target = "TrustedService.Decrypt";
+            let target = "TrentService.Decrypt";
             let credentials = Credentials {
                 access_key_id: "AKIAIOSFODNN7EXAMPLE".to_owned(),
                 secret_access_key: Zeroizing::new(
