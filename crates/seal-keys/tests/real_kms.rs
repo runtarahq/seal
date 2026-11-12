@@ -29,7 +29,36 @@ use std::time::{Duration, Instant};
 use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey};
 use seal_keys::{AwsKmsConfig, AwsKmsWrap, KeyWrap, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
+use seal_testkit::log_capture::LogCapture;
+use tracing::dispatcher::DefaultGuard;
 use zeroize::Zeroizing;
+
+/// Prints what was logged when the test ends, pass or fail: a wrapper says only
+/// `Unavailable`, and the log says why.
+struct Logs {
+    capture: LogCapture,
+    _guard: DefaultGuard,
+}
+
+impl Logs {
+    fn print_at_the_end() -> Self {
+        let capture = LogCapture::new();
+        let guard = capture.install();
+        Self {
+            capture,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for Logs {
+    fn drop(&mut self) {
+        let logged = self.capture.contents();
+        if !logged.is_empty() {
+            println!("logged:\n{logged}");
+        }
+    }
+}
 
 fn setting(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -70,6 +99,7 @@ async fn ovh_kms_wraps_and_unwraps_a_key() {
         println!("skipped: the SEAL_TEST_OVH_KMS_* settings are not all set");
         return;
     };
+    let _logs = Logs::print_at_the_end();
     println!("authenticating with {:?}", config.auth);
     round_trip(&OvhKmsWrap::new(&config).unwrap(), true).await;
 }
@@ -84,6 +114,7 @@ async fn aws_kms_wraps_and_unwraps_a_key() {
         println!("skipped: the SEAL_TEST_AWS_KMS_* settings are not all set");
         return;
     };
+    let _logs = Logs::print_at_the_end();
     let wrap = AwsKmsWrap::new(&AwsKmsConfig {
         key_arn,
         credentials_file: credentials_file.into(),
