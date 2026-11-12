@@ -29,7 +29,7 @@ image is built with it. With it the binary's tree has about 50 more crates.
 | Crate | For | Notes |
 |---|---|---|
 | `aws-sdk-kms` | `Encrypt` and `Decrypt` with the wrapping key in AWS KMS | Sees each private key it wraps or unwraps, in buffers it does not wipe |
-| `aws-config` | Finding seal's AWS credentials: the environment, the shared files, a web identity token, the container endpoint, instance metadata. Brings `aws-sdk-sts` | Without its `sso` feature. Its logging is off by default, since it logs whole responses |
+| `aws-config` | Finding seal's AWS credentials: the environment, the shared files, a web identity token, the container endpoint, instance metadata. Brings `aws-sdk-sts`, and `aws-sdk-sso` and `aws-sdk-ssooidc` for profiles that sign in with SSO | Its logging is off by default, since it logs whole responses |
 | `aws-credential-types` | Handing the SDK the credentials seal reads from its own file | |
 | `aws-smithy-http-client` | The SDK's HTTP client, on the `hyper` and `rustls` seal already has | `ring` only, so still no `aws-lc-rs` and no C build |
 | `webpki-root-certs` | The public roots as certificates, the form that client takes | The same Mozilla set as `webpki-roots`. The host's certificate store is not used |

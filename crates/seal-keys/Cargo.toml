@@ -21,7 +21,7 @@ aws-kms = [
 
 [dependencies]
 async-trait = "0.1"
-aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "credentials-process"] }
+aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
 aws-credential-types = { version = "1", optional = true, default-features = false }
 aws-sdk-kms = { version = "1", optional = true, default-features = false, features = ["rt-tokio"] }
 aws-smithy-http-client = { version = "1", optional = true, default-features = false, features = ["rustls-ring"] }

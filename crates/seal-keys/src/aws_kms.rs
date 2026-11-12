@@ -186,6 +186,9 @@ fn parse_credentials(text: &str, profile: &str) -> Option<Credentials> {
 }
 
 fn read_credentials(path: &Path, profile: &str) -> Result<Credentials, KeyError> {
+    if !path.exists() {
+        return Err(KeyError::Invalid("the AWS credentials file does not exist"));
+    }
     check_private(path)?;
     let text = Zeroizing::new(
         std::fs::read_to_string(path)

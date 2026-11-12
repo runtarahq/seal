@@ -278,9 +278,10 @@ what it finds:
    key needs a restart.
 2. The shared files, `~/.aws/credentials` and `~/.aws/config` or where
    `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` say, including a profile that
-   assumes a role or runs a `credential_process`, as IAM Roles Anywhere does. seal does
-   not check who can read these files. A profile that signs in with SSO is not
-   supported.
+   assumes a role, runs a `credential_process` as IAM Roles Anywhere does, or signs in
+   with IAM Identity Center (SSO), which needs `aws sso login` to have been run and so
+   suits a developer's machine, not a server. seal does not check who can read these
+   files.
 3. A web identity token: IAM roles for service accounts on EKS.
 4. The container credentials endpoint: a task role on ECS and Fargate, and EKS Pod
    Identity.

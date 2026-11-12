@@ -98,7 +98,7 @@ enum Command {
 /// credential source fails it logs the whole response, which may hold a token. seal
 /// logs such a failure itself, without the response.
 const DEFAULT_LOG_FILTER: &str = "info,aws_config=off,aws_credential_types=off,aws_runtime=off,\
-     aws_sdk_kms=off,aws_sdk_sts=off,aws_sigv4=off,aws_smithy_async=off,aws_smithy_http=off,\
+     aws_sdk_kms=off,aws_sdk_sso=off,aws_sdk_ssooidc=off,aws_sdk_sts=off,aws_sigv4=off,aws_smithy_async=off,aws_smithy_http=off,\
      aws_smithy_http_client=off,aws_smithy_runtime=off,aws_smithy_runtime_api=off,\
      aws_smithy_types=off,aws_types=off";
 
