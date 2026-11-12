@@ -299,7 +299,11 @@ impl WrapConfig {
 
     fn check(&self) -> Result<(), ConfigError> {
         match self {
-            Self::File(_) | Self::AwsKms(_) => Ok(()),
+            Self::File(_) => Ok(()),
+            Self::AwsKms(_) if !cfg!(feature = "aws-kms") => Err(invalid(
+                "keys.wrap.aws_kms needs a seal built with the aws-kms feature",
+            )),
+            Self::AwsKms(_) => Ok(()),
             Self::OvhKms(kms) => match (&kms.cert, &kms.key, &kms.token_file) {
                 (Some(_), Some(_), None) | (None, None, Some(_)) => Ok(()),
                 _ => Err(invalid(
@@ -317,8 +321,10 @@ pub struct AwsKmsWrapConfig {
     /// The key's ARN. Its region is where the KMS is.
     pub key_arn: String,
     /// A file in the AWS shared credentials format that only seal's user can read.
-    pub credentials_file: PathBuf,
-    /// The profile in that file. `default` if not given.
+    /// Without one, seal uses what the AWS SDK finds: the environment, the shared
+    /// files, or the role of the instance, task or pod it runs in.
+    pub credentials_file: Option<PathBuf>,
+    /// The profile, in that file or in the shared files the SDK finds.
     pub profile: Option<String>,
     /// The endpoint, if it is not the region's public one.
     pub endpoint: Option<String>,
@@ -836,11 +842,32 @@ mod tests {
 
         let aws = "{ aws_kms = { key_arn = \"arn:aws:kms:eu-central-1:123456789012:key/1234abcd\", \
                    credentials_file = \"/etc/seal/aws-credentials\" } }";
-        assert!(matches!(
-            WrapConfig::parse(aws).unwrap(),
-            WrapConfig::AwsKms(AwsKmsWrapConfig { profile: None, .. })
-        ));
-        Config::parse(&MINIMAL.replace("{ file = \"/etc/seal/kek\" }", aws)).unwrap();
+        let found = "{ aws_kms = { key_arn = \"arn:aws:kms:eu-central-1:123456789012:key/1234abcd\", \
+                     profile = \"seal\" } }";
+        if cfg!(feature = "aws-kms") {
+            assert!(matches!(
+                WrapConfig::parse(aws).unwrap(),
+                WrapConfig::AwsKms(AwsKmsWrapConfig {
+                    credentials_file: Some(_),
+                    profile: None,
+                    ..
+                })
+            ));
+            assert!(matches!(
+                WrapConfig::parse(found).unwrap(),
+                WrapConfig::AwsKms(AwsKmsWrapConfig {
+                    credentials_file: None,
+                    profile: Some(_),
+                    ..
+                })
+            ));
+            Config::parse(&MINIMAL.replace("{ file = \"/etc/seal/kek\" }", aws)).unwrap();
+        } else {
+            // A build without the SDK says so, and does not start as if with a file.
+            let refused = WrapConfig::parse(aws).unwrap_err().to_string();
+            assert!(refused.contains("aws-kms feature"), "{refused}");
+            assert!(Config::parse(&MINIMAL.replace("{ file = \"/etc/seal/kek\" }", aws)).is_err());
+        }
         assert!(WrapConfig::parse(&aws.replace("credentials_file", "credentials")).is_err());
         assert!(
             WrapConfig::parse("{ aws_kms = { credentials_file = \"/etc/seal/aws\" } }").is_err()

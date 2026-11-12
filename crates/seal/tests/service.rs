@@ -1140,7 +1140,7 @@ fn rewrap_moves_the_keys_to_a_kms_and_seal_then_wraps_with_it() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "aws-kms"))]
 #[test]
 fn seal_configured_with_aws_kms_wraps_and_re_wraps_with_it() {
     use std::os::unix::fs::PermissionsExt;
@@ -1255,6 +1255,221 @@ fn seal_configured_with_aws_kms_wraps_and_re_wraps_with_it() {
     );
     assert!(String::from_utf8_lossy(&returned.stdout).starts_with("re-wrapped 3 keys"));
     assert_eq!(kms.received().len(), before + 3);
+}
+
+/// A configuration that wraps with AWS KMS and names no credentials file, and an empty
+/// key directory for it.
+#[cfg(feature = "aws-kms")]
+fn aws_kms_config_without_credentials(setup: &Setup, wrap: &str, keys: &str) -> std::path::PathBuf {
+    let config_text = setup.config_text(
+        Mode::Unix,
+        &Options::default(),
+        "[listen]\nunix = \"/tmp/x.sock\"\n",
+    );
+    let empty = setup.dir.path().join(keys);
+    std::fs::create_dir(&empty).unwrap();
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    let source = format!("source = {{ dir = {:?} }}", setup.keys_dir);
+    write_config(
+        setup,
+        &config_text
+            .replace(&kek, &format!("wrap = {wrap}"))
+            .replace(&source, &format!("source = {{ dir = {empty:?} }}")),
+    )
+}
+
+#[cfg(feature = "aws-kms")]
+#[test]
+fn seal_with_aws_kms_and_no_credentials_file_uses_what_the_sdk_finds() {
+    use seal_testkit::mock_kms::{
+        aws_role_credentials, serve_aws, serve_aws_container_credentials,
+        serve_aws_instance_metadata,
+    };
+    use seal_testkit::mock_provider::{Alpn, MockProvider};
+    use seal_testkit::pki::TestPki;
+
+    const ARN: &str =
+        "arn:aws:kms:eu-central-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+    const KEY_ID: &str = "ASIAROLEEXAMPLE";
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let kms_pki = TestPki::new("KMS CA");
+    let kms = runtime.block_on(MockProvider::tls_with(
+        &kms_pki,
+        Alpn::Http1,
+        &["localhost"],
+        None,
+    ));
+    serve_aws(&kms, ARN, KEY_ID);
+    let role = std::sync::Arc::new(std::sync::Mutex::new(aws_role_credentials(
+        KEY_ID,
+        Duration::from_secs(3600),
+    )));
+    // The task's role, as ECS gives it to a container.
+    let container = runtime.block_on(MockProvider::plain());
+    serve_aws_container_credentials(&container, "/v2/credentials/task", Some("a-token"), &role);
+    // The instance profile's role, as EC2 gives it to an instance.
+    let metadata = runtime.block_on(MockProvider::plain());
+    serve_aws_instance_metadata(&metadata, Some("seal-role"), &role);
+
+    let ca = setup.dir.path().join("kms-ca.crt");
+    std::fs::write(&ca, &kms_pki.ca_pem).unwrap();
+    let wrap = format!(
+        "{{ aws_kms = {{ key_arn = {ARN:?}, endpoint = \"https://localhost:{}\", ca = {ca:?} }} }}",
+        kms.port()
+    );
+    let config = aws_kms_config_without_credentials(&setup, &wrap, "keys-found");
+    // Nothing of the machine's own AWS settings reaches seal: no variables, no `~/.aws`.
+    let home = setup.dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let keygen = |keyset: &str, variables: &[(&str, String)]| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(["keygen", "--keyset", keyset, "--config"])
+            .arg(&config)
+            .env_clear()
+            .env("HOME", &home)
+            .envs(
+                variables
+                    .iter()
+                    .map(|(name, value)| (*name, value.as_str())),
+            )
+            .output()
+            .unwrap()
+    };
+    let token = format!("session-of-{KEY_ID}");
+
+    let from_environment = keygen(
+        "environment",
+        &[
+            ("AWS_ACCESS_KEY_ID", KEY_ID.to_owned()),
+            ("AWS_SECRET_ACCESS_KEY", "a-secret".to_owned()),
+            ("AWS_SESSION_TOKEN", "an-environment-token".to_owned()),
+            // The KMS is the configured one, whatever the environment says.
+            ("AWS_ENDPOINT_URL", "https://127.0.0.1:1".to_owned()),
+            ("AWS_ENDPOINT_URL_KMS", "https://127.0.0.1:1".to_owned()),
+            ("AWS_REGION", "us-west-2".to_owned()),
+        ],
+    );
+    assert!(
+        from_environment.status.success(),
+        "{}",
+        String::from_utf8_lossy(&from_environment.stderr)
+    );
+    let sent = kms.received();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].header("x-amz-security-token"),
+        Some("an-environment-token")
+    );
+
+    let from_container = keygen(
+        "container",
+        &[
+            (
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                format!("http://{}/v2/credentials/task", container.address()),
+            ),
+            ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "a-token".to_owned()),
+        ],
+    );
+    assert!(
+        from_container.status.success(),
+        "{}",
+        String::from_utf8_lossy(&from_container.stderr)
+    );
+    assert_eq!(container.received().len(), 1);
+    let sent = kms.received();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].header("x-amz-security-token"), Some(token.as_str()));
+
+    let from_metadata = keygen(
+        "metadata",
+        &[(
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+            format!("http://{}", metadata.address()),
+        )],
+    );
+    assert!(
+        from_metadata.status.success(),
+        "{}",
+        String::from_utf8_lossy(&from_metadata.stderr)
+    );
+    // Version 2: a session is asked for first.
+    let asked = metadata.received();
+    assert_eq!(
+        (asked[0].method.as_str(), asked[0].uri.as_str()),
+        ("PUT", "/latest/api/token")
+    );
+    assert!(
+        asked
+            .iter()
+            .any(|request| request.uri.ends_with("/seal-role"))
+    );
+    let sent = kms.received();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2].header("x-amz-security-token"), Some(token.as_str()));
+
+    // An answer that is not credentials is not printed, though it may hold some.
+    *role.lock().unwrap() = serde_json::json!({
+        "AccessKeyId": KEY_ID,
+        "SecretAccessKey": "a-canary-secret-access-key",
+        "Token": 7,
+    });
+    let malformed = keygen(
+        "malformed",
+        &[
+            (
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                format!("http://{}/v2/credentials/task", container.address()),
+            ),
+            ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "a-token".to_owned()),
+            ("AWS_EC2_METADATA_DISABLED", "true".to_owned()),
+        ],
+    );
+    assert!(!malformed.status.success());
+    let logged = String::from_utf8_lossy(&malformed.stderr);
+    assert!(logged.contains("the KMS could not be asked"), "{logged}");
+    assert!(!logged.contains("a-canary-secret-access-key"), "{logged}");
+    assert!(!logged.contains("a-token"), "{logged}");
+    assert_eq!(kms.received().len(), 3);
+
+    // With nothing to find, seal says so and sends the KMS nothing.
+    let nothing = keygen(
+        "nothing",
+        &[("AWS_EC2_METADATA_DISABLED", "true".to_owned())],
+    );
+    assert!(!nothing.status.success());
+    assert_eq!(kms.received().len(), 3);
+}
+
+#[cfg(not(feature = "aws-kms"))]
+#[test]
+fn a_seal_built_without_aws_kms_refuses_a_configuration_that_asks_for_it() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let config_text = setup.config_text(
+        Mode::Unix,
+        &Options::default(),
+        "[listen]\nunix = \"/tmp/x.sock\"\n",
+    );
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    let wrap =
+        "wrap = { aws_kms = { key_arn = \"arn:aws:kms:eu-central-1:123456789012:key/1234abcd\" } }";
+    let config = write_config(&setup, &config_text.replace(&kek, wrap));
+    for command in ["check-config", "serve"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args([command, "--config"])
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{command}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("aws-kms feature"),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
