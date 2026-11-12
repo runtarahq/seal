@@ -21,6 +21,7 @@ allow = [
 # Mozilla's root certificates, as data. The TLS roots seal verifies providers against.
 exceptions = [
   { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]

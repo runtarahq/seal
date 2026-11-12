@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Wrapping with a key in AWS KMS, which links the AWS SDK. Off by default.
+aws-kms = ["seal-keys/aws-kms"]
+
 [dependencies]
 bytes = "1"
 clap = { version = "4", features = ["derive"] }

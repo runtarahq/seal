@@ -41,6 +41,17 @@ pub(crate) fn key_from_base64(encoded: &str) -> Result<PrivateKey, KeyError> {
         .map_err(|_| KeyError::Unavailable)
 }
 
+/// Counts one request to a KMS: `outcome` is `ok`, `refused`, `unreachable` or `timeout`.
+pub(crate) fn count(kms: &'static str, operation: &'static str, outcome: &'static str) {
+    metrics::counter!(
+        "seal_kms_requests_total",
+        "kms" => kms,
+        "operation" => operation,
+        "outcome" => outcome,
+    )
+    .increment(1);
+}
+
 /// What a KMS said when it did not do as asked.
 pub(crate) struct Refusal {
     /// The status.
@@ -70,13 +81,7 @@ pub(crate) async fn exchange(
         Ok(Err(_)) => "unreachable",
         Err(_) => "timeout",
     };
-    metrics::counter!(
-        "seal_kms_requests_total",
-        "kms" => kms,
-        "operation" => operation,
-        "outcome" => outcome,
-    )
-    .increment(1);
+    count(kms, operation, outcome);
     match sent {
         Ok(Ok((StatusCode::OK, body))) => Ok(Ok(body)),
         Ok(Ok((status, body))) => Ok(Err(Refusal { status, body })),

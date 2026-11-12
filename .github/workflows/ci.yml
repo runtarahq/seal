@@ -36,6 +36,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - run: cargo test --workspace --locked
+      # Off by default, so the run above builds and tests seal without it.
+      - name: With AWS KMS
+        run: cargo test --package seal-keys --package seal --features aws-kms --locked
 
   # What is released: a static binary, linked against musl.
   test-musl:
@@ -50,6 +53,10 @@ jobs:
       - name: The release binary is static
         run: |
           cargo build --release --locked --package seal --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/seal | tee /dev/stderr | grep -q "static-pie linked"
+      - name: And is static with AWS KMS
+        run: |
+          cargo build --release --locked --package seal --features aws-kms --target x86_64-unknown-linux-musl
           file target/x86_64-unknown-linux-musl/release/seal | tee /dev/stderr | grep -q "static-pie linked"
 
   # The container image, started by the same tests in place of the binary they built, on
@@ -86,7 +93,7 @@ jobs:
       - name: The service tests pass against the image
         run: |
           SEAL_TEST_BIN="$PWD/scripts/seal-in-container.sh" \
-            cargo test --package seal --test modes --test oauth --test service --locked
+            cargo test --package seal --features aws-kms --test modes --test oauth --test service --locked
       # Kept for the publish job, which pushes the image that was tested, not a rebuild.
       - name: Save the image
         if: github.event_name == 'push'

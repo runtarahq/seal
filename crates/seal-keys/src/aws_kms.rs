@@ -1,30 +1,69 @@
 //! Wrapping with a key in AWS KMS, so that the wrapping key never leaves the KMS: seal
-//! sends each private key to `Encrypt` or `Decrypt`, signed with Signature Version 4.
+//! sends each private key to `Encrypt` or `Decrypt`, with the AWS SDK.
 //!
 //! The keyset and kid go as the encryption context, `seal:keyset` and `seal:kid`, so a
 //! wrapped key moved to another keyset or kid does not unwrap, and each use shows in
 //! CloudTrail under its keyset. What is stored is the KMS's `CiphertextBlob`.
+//!
+//! seal's credentials are a file it reads for every request, or whatever the SDK's
+//! default chain finds: the environment, the shared files, a web identity token, the
+//! container credentials endpoint or the instance metadata service.
+//!
+//! Only in a build with the `aws-kms` feature.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use aws_config::default_provider::credentials::DefaultCredentialsChain;
+use aws_config::provider_config::ProviderConfig;
+use aws_credential_types::provider::error::CredentialsError;
+use aws_credential_types::provider::future::ProvideCredentials as ProvidingCredentials;
+use aws_sdk_kms::Client;
+use aws_sdk_kms::config::http::HttpResponse;
+use aws_sdk_kms::config::retry::RetryConfig;
+use aws_sdk_kms::config::timeout::TimeoutConfig;
+use aws_sdk_kms::config::{
+    BehaviorVersion, IdentityCache, ProvideCredentials, Region, SharedHttpClient,
+};
+use aws_sdk_kms::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_kms::primitives::Blob;
+use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
+use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use bytes::Bytes;
-use http::{HeaderValue, Request, header};
-use http_body_util::Full;
-use ring::{digest, hmac};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey};
-use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 use zeroize::Zeroizing;
 
 use crate::KeyError;
 use crate::https::{Https, Names, Roots};
-use crate::kms::{KEY_BASE64_BYTES, Refusal, exchange, key_from_base64, push_key_base64};
+use crate::kms::count;
 use crate::source::MAX_WRAPPED_KEY_BYTES;
 use crate::wrap::{KeyWrap, check_private};
+
+/// Where seal's AWS credentials come from.
+#[derive(Clone, Debug)]
+pub enum AwsCredentials {
+    /// A file in the AWS shared credentials format, readable only by seal's user. It is
+    /// read for every request, so new credentials need no restart.
+    File {
+        /// The file.
+        path: PathBuf,
+        /// The profile in it. `default` if not given.
+        profile: Option<String>,
+    },
+    /// What the AWS SDK finds, in its usual order: the environment, the shared
+    /// credentials and configuration files, a web identity token, the container
+    /// credentials endpoint, and the instance metadata service.
+    Found {
+        /// The profile in the shared files. `AWS_PROFILE` or `default` if not given.
+        profile: Option<String>,
+    },
+}
 
 /// How to reach a KMS key.
 #[derive(Clone, Debug)]
@@ -32,35 +71,37 @@ pub struct AwsKmsConfig {
     /// The key's ARN, `arn:aws:kms:<region>:<account>:key/<id>`. A symmetric key that
     /// may encrypt and decrypt. Not an alias, which can be pointed at another key.
     pub key_arn: String,
-    /// A file in the AWS shared credentials format, readable only by seal's user. It is
-    /// read for every request, so new credentials need no restart.
-    pub credentials_file: PathBuf,
-    /// The profile in that file. `default` if not given.
-    pub profile: Option<String>,
+    /// Where seal's credentials come from.
+    pub credentials: AwsCredentials,
     /// The endpoint, if it is not the region's public one: a VPC or FIPS endpoint.
     pub endpoint: Option<String>,
     /// The CA that issued the endpoint's certificate, in PEM, if it is not a public one.
     pub ca_pem: Option<String>,
-    /// How long one request may take.
+    /// How long one request may take, with its retries.
     pub timeout: Duration,
 }
 
 /// Wraps with a key in AWS KMS.
 pub struct AwsKmsWrap {
-    https: Https,
     key_arn: String,
     region: String,
-    credentials_file: PathBuf,
-    profile: String,
     id: String,
+    credentials: AwsCredentials,
+    endpoint: Option<String>,
     timeout: Duration,
+    /// Reaches the KMS: verified against the configured CA, or the public roots.
+    kms_http: SharedHttpClient,
+    /// Reaches whatever gives credentials: verified against the public roots.
+    credentials_http: SharedHttpClient,
+    /// Made on first use, since finding the credentials' sources is asynchronous.
+    client: OnceCell<Client>,
 }
 
 impl std::fmt::Debug for AwsKmsWrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AwsKmsWrap")
             .field("id", &self.id)
-            .field("host", &self.https.host())
+            .field("endpoint", &self.endpoint)
             .finish_non_exhaustive()
     }
 }
@@ -71,8 +112,6 @@ const NAMES: Names = Names {
     no_host: "the KMS endpoint has no host",
     ca: "the KMS CA",
 };
-
-const CONTENT_TYPE: &str = "application/x-amz-json-1.1";
 
 /// The region of a key ARN, if it is the ARN of a key.
 fn region_of(arn: &str) -> Option<(&str, &str)> {
@@ -102,7 +141,7 @@ fn region_of(arn: &str) -> Option<(&str, &str)> {
     valid.then_some((partition, region))
 }
 
-/// seal's AWS credentials.
+/// Credentials from a file.
 struct Credentials {
     access_key_id: String,
     secret_access_key: Zeroizing<String>,
@@ -147,6 +186,9 @@ fn parse_credentials(text: &str, profile: &str) -> Option<Credentials> {
 }
 
 fn read_credentials(path: &Path, profile: &str) -> Result<Credentials, KeyError> {
+    if !path.exists() {
+        return Err(KeyError::Invalid("the AWS credentials file does not exist"));
+    }
     check_private(path)?;
     let text = Zeroizing::new(
         std::fs::read_to_string(path)
@@ -157,248 +199,224 @@ fn read_credentials(path: &Path, profile: &str) -> Result<Credentials, KeyError>
     ))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
+/// Gives the credentials in a file, read anew each time it is asked.
+#[derive(Debug)]
+struct CredentialsFile {
+    path: PathBuf,
+    profile: String,
 }
 
-/// `20150830` and `20150830T123600Z`, for a time since the epoch.
-fn amz_dates(now: SystemTime) -> (String, String) {
-    let seconds = now
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
-    let of_day = seconds % 86_400;
-    // Howard Hinnant's days-to-civil algorithm.
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    let date = format!("{year:04}{month:02}{day:02}");
-    let time = format!(
-        "{date}T{:02}{:02}{:02}Z",
-        of_day / 3600,
-        of_day / 60 % 60,
-        of_day % 60
-    );
-    (date, time)
-}
-
-/// The headers of a signed request, besides `Host` and `Content-Type`.
-struct Signed {
-    amz_date: String,
-    authorization: HeaderValue,
-}
-
-/// Signs a `POST /` with no query, the only request seal makes of AWS KMS. The signed
-/// headers are `content-type`, `host`, `x-amz-date`, `x-amz-target`, and the session
-/// token if there is one.
-fn sign(
-    credentials: &Credentials,
-    region: &str,
-    authority: &str,
-    target: &str,
-    body: &[u8],
-    now: SystemTime,
-) -> Result<Signed, KeyError> {
-    let (date, amz_date) = amz_dates(now);
-    let mut headers =
-        format!("content-type:{CONTENT_TYPE}\nhost:{authority}\nx-amz-date:{amz_date}\n");
-    let mut signed_headers = "content-type;host;x-amz-date".to_owned();
-    if let Some(token) = &credentials.session_token {
-        headers.push_str("x-amz-security-token:");
-        headers.push_str(token);
-        headers.push('\n');
-        signed_headers.push_str(";x-amz-security-token");
+impl ProvideCredentials for CredentialsFile {
+    fn provide_credentials<'a>(&'a self) -> ProvidingCredentials<'a>
+    where
+        Self: 'a,
+    {
+        ProvidingCredentials::ready(
+            read_credentials(&self.path, &self.profile)
+                .map(|credentials| {
+                    aws_sdk_kms::config::Credentials::new(
+                        credentials.access_key_id,
+                        credentials.secret_access_key.as_str(),
+                        credentials
+                            .session_token
+                            .map(|token| token.as_str().to_owned()),
+                        None,
+                        "seal's credentials file",
+                    )
+                })
+                .map_err(|error| CredentialsError::not_loaded(error.to_string())),
+        )
     }
-    headers.push_str("x-amz-target:");
-    headers.push_str(target);
-    headers.push('\n');
-    signed_headers.push_str(";x-amz-target");
+}
 
-    let payload = hex(digest::digest(&digest::SHA256, body).as_ref());
-    let canonical = format!("POST\n/\n\n{headers}\n{signed_headers}\n{payload}");
-    let scope = format!("{date}/{region}/kms/aws4_request");
-    let to_sign = format!(
-        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
-        hex(digest::digest(&digest::SHA256, canonical.as_bytes()).as_ref())
-    );
-
-    let mut secret = Zeroizing::new(Vec::with_capacity(4 + credentials.secret_access_key.len()));
-    secret.extend_from_slice(b"AWS4");
-    secret.extend_from_slice(credentials.secret_access_key.as_bytes());
-    let mut key = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &secret), date.as_bytes());
-    for part in [region, "kms", "aws4_request"] {
-        key = hmac::sign(
-            &hmac::Key::new(hmac::HMAC_SHA256, key.as_ref()),
-            part.as_bytes(),
-        );
+/// The public roots, as the PEM the SDK's HTTP client takes.
+fn public_roots() -> String {
+    let mut pem = String::new();
+    for certificate in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+        pem.push_str("-----BEGIN CERTIFICATE-----\n");
+        let encoded = STANDARD.encode(certificate.as_ref());
+        for line in encoded.as_bytes().chunks(64) {
+            pem.push_str(&String::from_utf8_lossy(line));
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
     }
-    let signature = hmac::sign(
-        &hmac::Key::new(hmac::HMAC_SHA256, key.as_ref()),
-        to_sign.as_bytes(),
-    );
-    let authorization = HeaderValue::from_str(&format!(
-        "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={}",
-        credentials.access_key_id,
-        hex(signature.as_ref())
-    ))
-    .map_err(|_| KeyError::Invalid("the AWS access key id"))?;
-    Ok(Signed {
-        amz_date,
-        authorization,
-    })
+    pem
 }
 
-#[derive(Serialize)]
-struct Context<'a> {
-    #[serde(rename = "seal:keyset")]
-    keyset: &'a str,
-    #[serde(rename = "seal:kid")]
-    kid: &'a str,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "PascalCase")]
-struct DecryptRequest<'a> {
-    ciphertext_blob: String,
-    key_id: &'a str,
-    encryption_context: Context<'a>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct EncryptResponse {
-    ciphertext_blob: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DecryptResponse {
-    plaintext: String,
-}
-
-/// The part of the KMS's error that names it, such as `AccessDeniedException`.
-#[derive(Default, Deserialize)]
-struct ErrorResponse {
-    #[serde(rename = "__type")]
-    kind: Option<String>,
+/// An HTTP client for the SDK that trusts these certificates and no others: not the
+/// platform's, which a minimal container image does not have.
+fn http_client(roots_pem: &str) -> Result<SharedHttpClient, KeyError> {
+    // Checked here, since the client panics on a certificate it cannot read.
+    let certificates = CertificateDer::pem_slice_iter(roots_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| KeyError::Invalid(NAMES.ca))?;
+    let mut store = rustls::RootCertStore::empty();
+    for certificate in certificates {
+        store
+            .add(certificate)
+            .map_err(|_| KeyError::Invalid(NAMES.ca))?;
+    }
+    if store.is_empty() {
+        return Err(KeyError::Invalid(NAMES.ca));
+    }
+    let context = TlsContext::builder()
+        .with_trust_store(TrustStore::empty().with_pem_certificate(roots_pem.as_bytes()))
+        .build()
+        .map_err(|_| KeyError::Invalid(NAMES.ca))?;
+    Ok(aws_smithy_http_client::Builder::new()
+        .tls_provider(Provider::Rustls(CryptoMode::Ring))
+        .tls_context(context)
+        .build_https())
 }
 
 impl AwsKmsWrap {
-    /// Configures the wrapper. Connects to nothing, and does not read the credentials.
+    /// Configures the wrapper. Connects to nothing, and does not look for the
+    /// credentials.
     ///
     /// # Errors
     ///
-    /// Returns [`KeyError::Invalid`] if the ARN or the endpoint is not valid.
+    /// Returns [`KeyError::Invalid`] if the ARN, the endpoint, the CA or a profile is
+    /// not valid.
     pub fn new(config: &AwsKmsConfig) -> Result<Self, KeyError> {
-        let (partition, region) = region_of(&config.key_arn)
+        let (_, region) = region_of(&config.key_arn)
             .ok_or(KeyError::Invalid("the KMS key must be a key's ARN"))?;
-        let endpoint = config.endpoint.clone().unwrap_or_else(|| {
-            let suffix = if partition == "aws-cn" {
-                "amazonaws.com.cn"
-            } else {
-                "amazonaws.com"
-            };
-            format!("https://kms.{region}.{suffix}")
-        });
-        let roots = config.ca_pem.as_deref().map_or(Roots::Public, Roots::Pem);
-        let https = Https::new(&endpoint, roots, None, NAMES)?;
-        if !https.base_path().is_empty() {
-            return Err(KeyError::Invalid("the KMS endpoint must have no path"));
+        if let Some(endpoint) = &config.endpoint {
+            // Held to what seal asks of any HTTPS endpoint it is configured with.
+            let https = Https::new(endpoint, Roots::Public, None, NAMES)?;
+            if !https.base_path().is_empty() {
+                return Err(KeyError::Invalid("the KMS endpoint must have no path"));
+            }
         }
-        let profile = config
-            .profile
-            .clone()
-            .unwrap_or_else(|| "default".to_owned());
-        if profile.is_empty() {
+        let (AwsCredentials::File { profile, .. } | AwsCredentials::Found { profile }) =
+            &config.credentials;
+        if profile.as_ref().is_some_and(String::is_empty) {
             return Err(KeyError::Invalid("the AWS profile is empty"));
         }
+        let public = public_roots();
+        let credentials_http = http_client(&public)?;
+        let kms_http = match &config.ca_pem {
+            Some(ca) => http_client(ca)?,
+            None => credentials_http.clone(),
+        };
         Ok(Self {
-            https,
             id: format!("aws-kms:{}", config.key_arn),
             key_arn: config.key_arn.clone(),
             region: region.to_owned(),
-            credentials_file: config.credentials_file.clone(),
-            profile,
+            credentials: config.credentials.clone(),
+            endpoint: config.endpoint.clone(),
             timeout: config.timeout,
+            kms_http,
+            credentials_http,
+            client: OnceCell::new(),
         })
     }
 
-    /// Signs and posts a JSON body, and returns the response to a 200. Anything else
-    /// is logged, by status and the name of the KMS's error, and is `Unavailable`.
-    async fn call(
-        &self,
-        operation: &'static str,
-        target: &'static str,
-        body: Bytes,
-    ) -> Result<Zeroizing<Vec<u8>>, KeyError> {
-        let credentials = match read_credentials(&self.credentials_file, &self.profile) {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                tracing::warn!(kms = "aws", operation, %error, "no AWS credentials");
-                return Err(KeyError::Unavailable);
-            }
-        };
-        let authority = self.https.authority();
-        let signed = sign(
-            &credentials,
-            &self.region,
-            &authority,
-            target,
-            &body,
-            SystemTime::now(),
-        )?;
-        let mut request = Request::post("/")
-            .header(header::HOST, authority)
-            .header(header::CONTENT_TYPE, CONTENT_TYPE)
-            .header("x-amz-date", signed.amz_date)
-            .header("x-amz-target", target)
-            .header(header::AUTHORIZATION, signed.authorization)
-            .body(Full::new(body))
-            .map_err(|_| KeyError::Invalid("the KMS request"))?;
-        if let Some(token) = &credentials.session_token {
-            let mut value = HeaderValue::from_str(token)
-                .map_err(|_| KeyError::Invalid("the AWS session token"))?;
-            value.set_sensitive(true);
-            request.headers_mut().insert("x-amz-security-token", value);
+    /// The SDK's client. The region, endpoint and CA are the configured ones, whatever
+    /// the environment or the shared files say; only credentials are looked for there.
+    async fn client(&self) -> &Client {
+        self.client
+            .get_or_init(|| async {
+                let region = Region::new(self.region.clone());
+                let mut config = aws_sdk_kms::Config::builder()
+                    .behavior_version(BehaviorVersion::latest())
+                    .region(region.clone())
+                    .http_client(self.kms_http.clone())
+                    .retry_config(RetryConfig::standard())
+                    .timeout_config(
+                        TimeoutConfig::builder()
+                            .operation_timeout(self.timeout)
+                            .build(),
+                    );
+                if let Some(endpoint) = &self.endpoint {
+                    config = config.endpoint_url(endpoint);
+                }
+                config = match &self.credentials {
+                    AwsCredentials::File { path, profile } => config
+                        .credentials_provider(CredentialsFile {
+                            path: path.clone(),
+                            profile: profile.clone().unwrap_or_else(|| "default".to_owned()),
+                        })
+                        // The file is read for every request.
+                        .identity_cache(IdentityCache::no_cache()),
+                    AwsCredentials::Found { profile } => {
+                        let mut chain = DefaultCredentialsChain::builder()
+                            .configure(
+                                ProviderConfig::without_region()
+                                    .with_region(Some(region.clone()))
+                                    .with_http_client(self.credentials_http.clone()),
+                            )
+                            .region(region);
+                        if let Some(profile) = profile {
+                            chain = chain.profile_name(profile);
+                        }
+                        config.credentials_provider(chain.build().await)
+                    }
+                };
+                Client::from_conf(config.build())
+            })
+            .await
+    }
+}
+
+/// What went wrong, as each error in the chain describes itself. Not their debug form,
+/// which holds whole responses, and so may hold a token or a credential.
+fn described(error: &(dyn std::error::Error + 'static)) -> String {
+    const LONGEST: usize = 400;
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    if text.len() > LONGEST {
+        let mut end = LONGEST;
+        while !text.is_char_boundary(end) {
+            end -= 1;
         }
-        match exchange(&self.https, request, self.timeout, "aws", operation).await? {
-            Ok(body) => Ok(body),
-            Err(Refusal { status, body }) => {
-                let error: ErrorResponse = serde_json::from_slice(&body).unwrap_or_default();
-                let kind = error.kind.as_deref().filter(|kind| {
-                    kind.len() <= 96
-                        && kind
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || b"#._".contains(&byte))
-                });
-                tracing::warn!(
-                    kms = "aws",
-                    operation,
-                    status = status.as_u16(),
-                    error = kind,
-                    "the KMS refused a request"
-                );
-                Err(KeyError::Unavailable)
-            }
+        text.truncate(end);
+    }
+    text
+}
+
+/// Counts and logs a request that the KMS did not do, and makes it `Unavailable`.
+fn failed<E>(operation: &'static str, error: &SdkError<E, HttpResponse>) -> KeyError
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    match error {
+        SdkError::ServiceError(refusal) => {
+            count("aws", operation, "refused");
+            let kind = refusal.err().code().filter(|kind| {
+                kind.len() <= 96
+                    && kind
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"#._".contains(&byte))
+            });
+            tracing::warn!(
+                kms = "aws",
+                operation,
+                status = refusal.raw().status().as_u16(),
+                error = kind,
+                "the KMS refused a request"
+            );
+        }
+        SdkError::TimeoutError(_) => {
+            count("aws", operation, "timeout");
+            tracing::warn!(kms = "aws", operation, "the KMS did not answer in time");
+        }
+        other => {
+            count("aws", operation, "unreachable");
+            tracing::warn!(
+                kms = "aws",
+                operation,
+                error = described(other),
+                "the KMS could not be asked"
+            );
         }
     }
+    KeyError::Unavailable
 }
 
 #[async_trait]
@@ -413,36 +431,22 @@ impl KeyWrap for AwsKmsWrap {
         kid: &KeyId,
         key: &PrivateKey,
     ) -> Result<Vec<u8>, KeyError> {
-        let context = serde_json::to_string(&Context {
-            keyset: keyset.as_str(),
-            kid: kid.as_str(),
-        })
-        .map_err(|_| KeyError::Unavailable)?;
-        // Written by hand into a buffer of its final size, so the key is never in an
-        // allocation that is not wiped. The ARN needs no escaping, and base64 has none.
-        let mut body = Zeroizing::new(Vec::with_capacity(
-            KEY_BASE64_BYTES + self.key_arn.len() + context.len() + 64,
-        ));
-        body.extend_from_slice(br#"{"KeyId":""#);
-        body.extend_from_slice(self.key_arn.as_bytes());
-        body.extend_from_slice(br#"","EncryptionContext":"#);
-        body.extend_from_slice(context.as_bytes());
-        body.extend_from_slice(br#","Plaintext":""#);
-        push_key_base64(key, &mut body)?;
-        body.extend_from_slice(br#""}"#);
-
-        let response = self
-            .call(
-                "encrypt",
-                "TrentService.Encrypt",
-                Bytes::copy_from_slice(&body),
-            )
-            .await?;
-        let EncryptResponse { ciphertext_blob } =
-            serde_json::from_slice(&response).map_err(|_| KeyError::Unavailable)?;
-        let wrapped = STANDARD
-            .decode(ciphertext_blob)
-            .map_err(|_| KeyError::Unavailable)?;
+        let answer = self
+            .client()
+            .await
+            .encrypt()
+            .key_id(&self.key_arn)
+            .encryption_context("seal:keyset", keyset.as_str())
+            .encryption_context("seal:kid", kid.as_str())
+            .plaintext(key.expose(|bytes| Blob::new(bytes)))
+            .send()
+            .await
+            .map_err(|error| failed("encrypt", &error))?;
+        count("aws", "encrypt", "ok");
+        let wrapped = answer
+            .ciphertext_blob
+            .map(Blob::into_inner)
+            .ok_or(KeyError::Unavailable)?;
         if wrapped.is_empty() || wrapped.len() > MAX_WRAPPED_KEY_BYTES / 2 {
             return Err(KeyError::Unavailable);
         }
@@ -455,34 +459,31 @@ impl KeyWrap for AwsKmsWrap {
         kid: &KeyId,
         wrapped: &[u8],
     ) -> Result<PrivateKey, KeyError> {
-        let body = serde_json::to_vec(&DecryptRequest {
-            ciphertext_blob: STANDARD.encode(wrapped),
+        let answer = self
+            .client()
+            .await
+            .decrypt()
             // Named, so that the KMS refuses a ciphertext from any other key.
-            key_id: &self.key_arn,
-            encryption_context: Context {
-                keyset: keyset.as_str(),
-                kid: kid.as_str(),
-            },
-        })
-        .map_err(|_| KeyError::Unavailable)?;
-        let response = self
-            .call("decrypt", "TrentService.Decrypt", Bytes::from(body))
-            .await?;
-        let plaintext = serde_json::from_slice::<DecryptResponse>(&response)
-            .map(|response| Zeroizing::new(response.plaintext))
-            .map_err(|_| KeyError::Unavailable)?;
-        key_from_base64(&plaintext)
+            .key_id(&self.key_arn)
+            .encryption_context("seal:keyset", keyset.as_str())
+            .encryption_context("seal:kid", kid.as_str())
+            .ciphertext_blob(Blob::new(wrapped))
+            .send()
+            .await
+            .map_err(|error| failed("decrypt", &error))?;
+        count("aws", "decrypt", "ok");
+        let plaintext = Zeroizing::new(
+            answer
+                .plaintext
+                .map(Blob::into_inner)
+                .ok_or(KeyError::Unavailable)?,
+        );
+        PrivateKey::from_bytes(&plaintext).map_err(|_| KeyError::Unavailable)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use aws_credential_types::Credentials as SdkCredentials;
-    use aws_sigv4::http_request::{
-        SignableBody, SignableRequest, SigningSettings, sign as sdk_sign,
-    };
-    use aws_sigv4::sign::v4;
-
     use super::*;
 
     const ARN: &str =
@@ -491,8 +492,7 @@ mod tests {
     fn config() -> AwsKmsConfig {
         AwsKmsConfig {
             key_arn: ARN.to_owned(),
-            credentials_file: PathBuf::from("/nowhere"),
-            profile: None,
+            credentials: AwsCredentials::Found { profile: None },
             endpoint: None,
             ca_pem: None,
             timeout: Duration::from_secs(5),
@@ -500,20 +500,16 @@ mod tests {
     }
 
     #[test]
-    fn the_region_endpoint_and_id_come_from_the_arn() {
+    fn the_region_and_id_come_from_the_arn() {
         let wrap = AwsKmsWrap::new(&config()).unwrap();
         assert_eq!(wrap.id(), format!("aws-kms:{ARN}"));
         assert_eq!(wrap.region, "eu-central-1");
-        assert_eq!(wrap.https.host(), "kms.eu-central-1.amazonaws.com");
 
         let mut china = config();
         china.key_arn = ARN
             .replace("arn:aws:", "arn:aws-cn:")
             .replace("eu-central-1", "cn-north-1");
-        assert_eq!(
-            AwsKmsWrap::new(&china).unwrap().https.host(),
-            "kms.cn-north-1.amazonaws.com.cn"
-        );
+        assert_eq!(AwsKmsWrap::new(&china).unwrap().region, "cn-north-1");
 
         let mut multi_region = config();
         multi_region.key_arn =
@@ -523,14 +519,11 @@ mod tests {
 
         let mut elsewhere = config();
         elsewhere.endpoint = Some("https://vpce-1.kms.eu-central-1.vpce.amazonaws.com".to_owned());
-        assert_eq!(
-            AwsKmsWrap::new(&elsewhere).unwrap().https.host(),
-            "vpce-1.kms.eu-central-1.vpce.amazonaws.com"
-        );
+        assert!(AwsKmsWrap::new(&elsewhere).is_ok());
     }
 
     #[test]
-    fn only_a_keys_arn_and_a_plain_endpoint_are_accepted() {
+    fn only_a_keys_arn_a_plain_endpoint_and_a_readable_ca_are_accepted() {
         for key in [
             "",
             "1234abcd-12ab-34cd-56ef-1234567890ab",
@@ -556,9 +549,39 @@ mod tests {
             bad.endpoint = Some(endpoint.to_owned());
             assert!(AwsKmsWrap::new(&bad).is_err(), "endpoint {endpoint:?}");
         }
-        let mut bad = config();
-        bad.profile = Some(String::new());
-        assert!(AwsKmsWrap::new(&bad).is_err());
+        for ca in [
+            "",
+            "not a certificate",
+            "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n",
+        ] {
+            let mut bad = config();
+            bad.ca_pem = Some(ca.to_owned());
+            assert!(AwsKmsWrap::new(&bad).is_err(), "CA {ca:?}");
+        }
+        for credentials in [
+            AwsCredentials::Found {
+                profile: Some(String::new()),
+            },
+            AwsCredentials::File {
+                path: "/nowhere".into(),
+                profile: Some(String::new()),
+            },
+        ] {
+            let mut bad = config();
+            bad.credentials = credentials;
+            assert!(AwsKmsWrap::new(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn the_public_roots_are_certificates_the_client_takes() {
+        let pem = public_roots();
+        let read = CertificateDer::pem_slice_iter(pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(read.len(), webpki_root_certs::TLS_SERVER_ROOT_CERTS.len());
+        assert!(read.len() > 50);
+        assert!(http_client(&pem).is_ok());
     }
 
     #[test]
@@ -587,86 +610,6 @@ mod tests {
         for bad in ["a b", "", "tab\there"] {
             let text = format!("[default]\naws_access_key_id = A\naws_secret_access_key = {bad}\n");
             assert!(parse_credentials(&text, "default").is_none(), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn dates_are_as_sigv4_writes_them() {
-        let at = |seconds| amz_dates(UNIX_EPOCH + Duration::from_secs(seconds));
-        assert_eq!(
-            at(0),
-            ("19700101".to_owned(), "19700101T000000Z".to_owned())
-        );
-        assert_eq!(at(1_440_938_160).1, "20150830T123600Z");
-        assert_eq!(at(1_709_251_199).1, "20240229T235959Z");
-        assert_eq!(at(4_102_444_800).1, "21000101T000000Z");
-    }
-
-    /// seal's signature is the AWS SDK's, with and without a session token.
-    #[test]
-    fn the_signature_is_what_the_aws_sdk_makes() {
-        let host = "kms.eu-central-1.amazonaws.com";
-        for (index, token) in [None, Some("a/session+token==")].into_iter().enumerate() {
-            let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64 * 86_399);
-            let body = format!(r#"{{"KeyId":"{ARN}","n":{index}}}"#);
-            let target = "TrentService.Decrypt";
-            let credentials = Credentials {
-                access_key_id: "AKIAIOSFODNN7EXAMPLE".to_owned(),
-                secret_access_key: Zeroizing::new(
-                    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_owned(),
-                ),
-                session_token: token.map(|token| Zeroizing::new(token.to_owned())),
-            };
-            let ours = sign(
-                &credentials,
-                "eu-central-1",
-                host,
-                target,
-                body.as_bytes(),
-                now,
-            )
-            .unwrap();
-
-            let identity = SdkCredentials::new(
-                credentials.access_key_id.clone(),
-                credentials.secret_access_key.as_str(),
-                token.map(str::to_owned),
-                None,
-                "test",
-            )
-            .into();
-            let params = v4::SigningParams::builder()
-                .identity(&identity)
-                .region("eu-central-1")
-                .name("kms")
-                .time(now)
-                .settings(SigningSettings::default())
-                .build()
-                .unwrap()
-                .into();
-            let url = format!("https://{host}/");
-            let headers = [
-                ("host", host),
-                ("content-type", CONTENT_TYPE),
-                ("x-amz-target", target),
-            ];
-            let signable = SignableRequest::new(
-                "POST",
-                &url,
-                headers.into_iter(),
-                SignableBody::Bytes(body.as_bytes()),
-            )
-            .unwrap();
-            let (instructions, _) = sdk_sign(signable, &params).unwrap().into_parts();
-            let theirs: std::collections::BTreeMap<_, _> = instructions
-                .headers()
-                .map(|(name, value)| (name.to_owned(), value.to_owned()))
-                .collect();
-            assert_eq!(theirs["x-amz-date"], ours.amz_date);
-            assert_eq!(
-                theirs["authorization"],
-                ours.authorization.to_str().unwrap()
-            );
         }
     }
 }

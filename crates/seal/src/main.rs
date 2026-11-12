@@ -94,6 +94,14 @@ enum Command {
     Version,
 }
 
+/// What is logged unless `RUST_LOG` says otherwise. The AWS SDK is silent: when a
+/// credential source fails it logs the whole response, which may hold a token. seal
+/// logs such a failure itself, without the response.
+const DEFAULT_LOG_FILTER: &str = "info,aws_config=off,aws_credential_types=off,aws_runtime=off,\
+     aws_sdk_kms=off,aws_sdk_sso=off,aws_sdk_ssooidc=off,aws_sdk_sts=off,aws_sigv4=off,aws_smithy_async=off,aws_smithy_http=off,\
+     aws_smithy_http_client=off,aws_smithy_runtime=off,aws_smithy_runtime_api=off,\
+     aws_smithy_types=off,aws_types=off";
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -101,7 +109,7 @@ fn main() -> ExitCode {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .init();
     match run(Cli::parse()) {
