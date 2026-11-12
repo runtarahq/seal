@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, SourceConfig, WrapConfig};
 use crate::limits;
-use crate::serve::key_parts;
+use crate::serve::{key_parts, key_wrap};
 
 /// Writes how the memory ceiling adds up. Returns whether it fits the budget.
 ///
@@ -91,32 +91,32 @@ pub async fn destroy_keyset(config: &Config, keyset: &KeysetId) -> Result<(), St
 }
 
 /// Wraps every key in the configured key directory again, under a new wrapping key,
-/// into a new directory. The configured directory and wrapping key are left as they
-/// are; seal uses the new ones once its configuration names them and it is restarted.
-/// Returns how many keys were written.
+/// into a new directory. The new wrapping key may be of another kind: this is also how
+/// keys move from a wrapping key file to a KMS, or back. The configured directory and
+/// wrapping key are left as they are; seal uses the new ones once its configuration
+/// names them and it is restarted. Returns how many keys were written.
 ///
 /// # Errors
 ///
 /// Returns a message if the key source is not a directory, the new directory exists,
 /// or a key cannot be re-wrapped. Nothing is said of any key's contents.
-pub async fn rewrap(config: &Config, new_wrapping_key: &Path, out: &Path) -> Result<usize, String> {
+pub async fn rewrap(config: &Config, new_wrap: &WrapConfig, out: &Path) -> Result<usize, String> {
     let SourceConfig::Dir(keys) = &config.keys.source else {
         return Err(
             "rewrap needs a directory key source; re-wrap the keys where the key service keeps them"
                 .to_owned(),
         );
     };
-    let WrapConfig::File(old) = &config.keys.wrap;
     if out.exists() {
         return Err(format!("{} must not exist", out.display()));
     }
-    let old = FileKeyWrap::from_file(old).map_err(|error| error.to_string())?;
-    let new = FileKeyWrap::from_file(new_wrapping_key).map_err(|error| error.to_string())?;
+    let old = key_wrap(&config.keys.wrap)?;
+    let new = key_wrap(new_wrap)?;
     seal_keys::rewrap(
         &DirKeySource::new(keys, usize::MAX),
         &DirKeySource::new(out, usize::MAX),
-        &old,
-        &new,
+        old.as_ref(),
+        new.as_ref(),
     )
     .await
     .map_err(|error| format!("cannot re-wrap the keys: {error}"))

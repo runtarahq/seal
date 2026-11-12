@@ -993,6 +993,153 @@ fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
     assert!(current(&setup.keys_dir, &new_kek).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn rewrap_moves_the_keys_to_a_kms_and_seal_then_wraps_with_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use seal_keys::{
+        DirKeySource, FileKeyWrap, KeyWrap, Keyring, KeyringConfig, Keys, OvhKmsAuth, OvhKmsConfig,
+        OvhKmsWrap,
+    };
+    use seal_testkit::mock_kms::serve_ovh;
+    use seal_testkit::mock_provider::{Alpn, MockProvider};
+    use seal_testkit::pki::TestPki;
+
+    const OKMS: &str = "11111111-2222-3333-4444-555555555555";
+    const KEY: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const TOKEN: &str = "a-personal-access-token";
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let kms_pki = TestPki::new("KMS CA");
+    let kms = runtime.block_on(MockProvider::tls_with(
+        &kms_pki,
+        Alpn::Http1,
+        &["localhost"],
+        None,
+    ));
+    serve_ovh(&kms, OKMS, KEY, Some(TOKEN));
+    let endpoint = format!("https://localhost:{}", kms.port());
+
+    let ca = setup.dir.path().join("kms-ca.crt");
+    std::fs::write(&ca, &kms_pki.ca_pem).unwrap();
+    let token = setup.dir.path().join("kms-token");
+    std::fs::write(&token, format!("{TOKEN}\n")).unwrap();
+    let new_wrap = format!(
+        "{{ ovh_kms = {{ endpoint = {endpoint:?}, okms_id = {OKMS:?}, key_id = {KEY:?}, \
+         token_file = {token:?}, ca = {ca:?} }} }}"
+    );
+
+    let config_text = setup.config_text(
+        Mode::Unix,
+        &Options::default(),
+        "[listen]\nunix = \"/tmp/x.sock\"\n",
+    );
+    let config = write_config(&setup, &config_text);
+    let run = |args: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let rewrap = |out: &std::path::Path| {
+        run(&[
+            "rewrap".as_ref(),
+            "--config".as_ref(),
+            config.as_ref(),
+            "--new-wrap".as_ref(),
+            new_wrap.as_ref(),
+            "--out".as_ref(),
+            out.as_ref(),
+        ])
+    };
+
+    // A token that others can read is not used, and nothing is sent to the KMS.
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let refused = rewrap(&setup.dir.path().join("keys-refused"));
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("accessible to its group or others"));
+    assert!(kms.received().is_empty());
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let new_keys = setup.dir.path().join("keys-kms");
+    let done = rewrap(&new_keys);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(String::from_utf8_lossy(&done.stdout).starts_with("re-wrapped 2 keys"));
+    assert_eq!(kms.received().len(), 2);
+
+    // The KMS gives the keys the wrapping key file gave, and the file no longer does.
+    let kms_wrap = || -> std::sync::Arc<dyn KeyWrap> {
+        std::sync::Arc::new(
+            OvhKmsWrap::new(&OvhKmsConfig {
+                endpoint: endpoint.clone(),
+                okms_id: OKMS.to_owned(),
+                key_id: KEY.to_owned(),
+                auth: OvhKmsAuth::Token(TOKEN.to_owned().into()),
+                ca_pem: Some(kms_pki.ca_pem.clone()),
+                timeout: std::time::Duration::from_secs(5),
+            })
+            .unwrap(),
+        )
+    };
+    let current = |keys: &std::path::Path, wrap: std::sync::Arc<dyn KeyWrap>, name: &str| {
+        let _guard = runtime.enter();
+        let keyring = Keyring::new(
+            std::sync::Arc::new(DirKeySource::new(keys, 16)),
+            wrap,
+            KeyringConfig::default(),
+        )
+        .unwrap();
+        runtime.block_on(keyring.current_public_key(&name.parse().unwrap()))
+    };
+    let file_wrap = || -> std::sync::Arc<dyn KeyWrap> {
+        std::sync::Arc::new(FileKeyWrap::from_file(&setup.kek).unwrap())
+    };
+    let before = current(&setup.keys_dir, file_wrap(), "acme").unwrap();
+    assert_eq!(current(&new_keys, kms_wrap(), "acme").unwrap(), before);
+    assert!(current(&new_keys, file_wrap(), "acme").is_err());
+    assert!(current(&setup.keys_dir, kms_wrap(), "acme").is_err());
+
+    // Configured with the KMS, seal wraps a new keyset's key with it.
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    let keys = format!("source = {{ dir = {:?} }}", setup.keys_dir);
+    assert!(config_text.contains(&kek) && config_text.contains(&keys));
+    let with_kms = write_config(
+        &setup,
+        &config_text
+            .replace(&kek, &format!("wrap = {new_wrap}"))
+            .replace(&keys, &format!("source = {{ dir = {new_keys:?} }}")),
+    );
+    let made = run(&[
+        "keygen".as_ref(),
+        "--config".as_ref(),
+        with_kms.as_ref(),
+        "--keyset".as_ref(),
+        "fresh".as_ref(),
+    ]);
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    assert!(current(&new_keys, kms_wrap(), "fresh").is_ok());
+    let stored = std::fs::read_dir(new_keys.join("fresh"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let stored = std::fs::read_to_string(stored.path()).unwrap();
+    assert!(
+        stored.contains(&format!("ovh-kms:{OKMS}/{KEY}")),
+        "{stored}"
+    );
+}
+
 #[test]
 fn destroy_keyset_deletes_one_keyset_once_its_name_is_confirmed() {
     let runtime = tokio::runtime::Runtime::new().unwrap();

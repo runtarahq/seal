@@ -13,9 +13,11 @@ use seal_broker::client::ClientConfig;
 use seal_broker::{Broker, BrokerConfig, Environment, Limits};
 use seal_keys::{
     DirKeySource, FileKeyWrap, HttpKeySource, HttpKeySourceConfig, KeySource, KeyWrap, Keyring,
+    OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
 };
 use seal_proto::MAX_BODY_CHUNK;
 use seal_proto::v1::seal_server::SealServer;
+use zeroize::Zeroizing;
 
 use crate::callers::CallerMap;
 use crate::config::{AuditSinkConfig, Config, SourceConfig, WrapConfig};
@@ -63,12 +65,57 @@ pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
             )
         }
     };
-    let wrap: Arc<dyn KeyWrap> = match &config.keys.wrap {
+    Ok((source, key_wrap(&config.keys.wrap)?))
+}
+
+/// How long one request to a KMS may take.
+const KMS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Builds a wrapping key. Connects to nothing.
+///
+/// # Errors
+///
+/// Returns a message naming what could not be loaded.
+pub fn key_wrap(config: &WrapConfig) -> Result<Arc<dyn KeyWrap>, String> {
+    let read = |path: &PathBuf| {
+        std::fs::read_to_string(path).map_err(|_| format!("cannot read {}", path.display()))
+    };
+    // A credential is read only from a file that no one else can.
+    let read_private = |path: &PathBuf| {
+        seal_keys::wrap::check_private(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        read(path).map(Zeroizing::new)
+    };
+    Ok(match config {
         WrapConfig::File(path) => {
             Arc::new(FileKeyWrap::from_file(path).map_err(|error| error.to_string())?)
         }
-    };
-    Ok((source, wrap))
+        WrapConfig::OvhKms(kms) => {
+            let auth = match (&kms.cert, &kms.key, &kms.token_file) {
+                (Some(cert), Some(key), None) => OvhKmsAuth::Certificate {
+                    cert_pem: read(cert)?,
+                    key_pem: read_private(key)?,
+                },
+                (None, None, Some(token)) => OvhKmsAuth::Token(read_private(token)?),
+                _ => {
+                    return Err(
+                        "keys.wrap.ovh_kms needs either cert and key, or token_file".to_owned()
+                    );
+                }
+            };
+            Arc::new(
+                OvhKmsWrap::new(&OvhKmsConfig {
+                    endpoint: kms.endpoint.clone(),
+                    okms_id: kms.okms_id.clone(),
+                    key_id: kms.key_id.clone(),
+                    auth,
+                    ca_pem: kms.ca.as_ref().map(read).transpose()?,
+                    timeout: KMS_TIMEOUT,
+                })
+                .map_err(|error| error.to_string())?,
+            )
+        }
+    })
 }
 
 /// The broker's settings.
