@@ -272,6 +272,79 @@ pub enum SourceConfig {
 pub enum WrapConfig {
     /// 32 bytes in a file only seal's user can read.
     File(PathBuf),
+    /// A service key in OVHcloud KMS.
+    OvhKms(OvhKmsWrapConfig),
+    /// A key in AWS KMS.
+    AwsKms(AwsKmsWrapConfig),
+}
+
+impl WrapConfig {
+    /// Reads a wrapping key as the configuration writes it, such as
+    /// `{ file = "/etc/seal/kek" }`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] naming what is wrong.
+    pub fn parse(text: &str) -> Result<Self, ConfigError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Holder {
+            wrap: WrapConfig,
+        }
+        let holder: Holder =
+            toml::from_str(&format!("wrap = {text}")).map_err(|error| invalid(error.message()))?;
+        holder.wrap.check()?;
+        Ok(holder.wrap)
+    }
+
+    fn check(&self) -> Result<(), ConfigError> {
+        match self {
+            Self::File(_) | Self::AwsKms(_) => Ok(()),
+            Self::OvhKms(kms) => match (&kms.cert, &kms.key, &kms.token_file) {
+                (Some(_), Some(_), None) | (None, None, Some(_)) => Ok(()),
+                _ => Err(invalid(
+                    "keys.wrap.ovh_kms needs either cert and key, or token_file",
+                )),
+            },
+        }
+    }
+}
+
+/// A key in AWS KMS, and seal's credentials for it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsKmsWrapConfig {
+    /// The key's ARN. Its region is where the KMS is.
+    pub key_arn: String,
+    /// A file in the AWS shared credentials format that only seal's user can read.
+    pub credentials_file: PathBuf,
+    /// The profile in that file. `default` if not given.
+    pub profile: Option<String>,
+    /// The endpoint, if it is not the region's public one.
+    pub endpoint: Option<String>,
+    /// The CA that issued the endpoint's certificate, if it is not a public one.
+    pub ca: Option<PathBuf>,
+}
+
+/// A service key in OVHcloud KMS, and seal's credentials for it: an access
+/// certificate, or a personal access token.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OvhKmsWrapConfig {
+    /// The KMS's regional endpoint, such as `https://eu-west-rbx.okms.ovh.net`.
+    pub endpoint: String,
+    /// The KMS's id.
+    pub okms_id: String,
+    /// The service key's id.
+    pub key_id: String,
+    /// seal's access certificate, in PEM.
+    pub cert: Option<PathBuf>,
+    /// The access certificate's key, in PEM, in a file only seal's user can read.
+    pub key: Option<PathBuf>,
+    /// A personal access token, in a file only seal's user can read.
+    pub token_file: Option<PathBuf>,
+    /// The CA that issued the endpoint's certificate, if it is not a public one.
+    pub ca: Option<PathBuf>,
 }
 
 /// Whether to lock memory, so that key pages are never swapped.
@@ -512,6 +585,7 @@ impl Config {
         if self.callers.is_empty() {
             return Err(invalid("there are no callers"));
         }
+        self.keys.wrap.check()?;
         let mut names = std::collections::BTreeSet::new();
         let mut uids = std::collections::BTreeSet::new();
         let mut subjects = std::collections::BTreeSet::new();
@@ -713,6 +787,64 @@ mod tests {
             let text = std::fs::read_to_string(&path).unwrap();
             Config::parse(&text).unwrap_or_else(|error| panic!("{name}: {error}"));
         }
+    }
+
+    #[test]
+    fn an_ovh_kms_wrapping_key_needs_one_kind_of_credential() {
+        let kms = |credentials: &str| {
+            format!(
+                "{{ ovh_kms = {{ endpoint = \"https://eu-west-rbx.okms.ovh.net\", \
+                 okms_id = \"11111111-2222-3333-4444-555555555555\", \
+                 key_id = \"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"{credentials} }} }}"
+            )
+        };
+        let with = |credentials: &str| {
+            let text = MINIMAL.replace("{ file = \"/etc/seal/kek\" }", &kms(credentials));
+            assert_ne!(text, MINIMAL);
+            Config::parse(&text)
+        };
+        let certificate = ", cert = \"/etc/seal/kms.crt\", key = \"/etc/seal/kms.key\"";
+        let token = ", token_file = \"/etc/seal/kms-token\"";
+        let config = with(certificate).unwrap();
+        assert!(matches!(config.keys.wrap, WrapConfig::OvhKms(_)));
+        with(token).unwrap();
+        with(&format!("{token}, ca = \"/etc/seal/kms-ca.crt\"")).unwrap();
+        for credentials in [
+            String::new(),
+            ", cert = \"/etc/seal/kms.crt\"".to_owned(),
+            ", key = \"/etc/seal/kms.key\"".to_owned(),
+            format!("{certificate}{token}"),
+        ] {
+            let error = with(&credentials).unwrap_err();
+            assert!(
+                error.0.contains("either cert and key, or token_file"),
+                "{error}"
+            );
+        }
+        assert!(with(&format!("{token}, region = \"waw\"")).is_err());
+
+        assert!(matches!(
+            WrapConfig::parse("{ file = \"/etc/seal/kek\" }").unwrap(),
+            WrapConfig::File(_)
+        ));
+        assert!(matches!(
+            WrapConfig::parse(&kms(token)).unwrap(),
+            WrapConfig::OvhKms(_)
+        ));
+        assert!(WrapConfig::parse(&kms("")).is_err());
+        assert!(WrapConfig::parse("{ file = \"a\" }\nextra = 1").is_err());
+
+        let aws = "{ aws_kms = { key_arn = \"arn:aws:kms:eu-central-1:123456789012:key/1234abcd\", \
+                   credentials_file = \"/etc/seal/aws-credentials\" } }";
+        assert!(matches!(
+            WrapConfig::parse(aws).unwrap(),
+            WrapConfig::AwsKms(AwsKmsWrapConfig { profile: None, .. })
+        ));
+        Config::parse(&MINIMAL.replace("{ file = \"/etc/seal/kek\" }", aws)).unwrap();
+        assert!(WrapConfig::parse(&aws.replace("credentials_file", "credentials")).is_err());
+        assert!(
+            WrapConfig::parse("{ aws_kms = { credentials_file = \"/etc/seal/aws\" } }").is_err()
+        );
     }
 
     #[test]

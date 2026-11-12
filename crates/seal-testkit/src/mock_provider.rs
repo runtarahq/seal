@@ -16,6 +16,7 @@
 //! | `/trickle` | Sends a byte now and then, forever |
 //! | `/reset` | Sends a head and some body, then breaks the connection |
 //! | anything set with [`MockProvider::respond`] | That response |
+//! | anything under a prefix set with [`MockProvider::handle`] | What the handler returns |
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -98,10 +99,14 @@ impl CannedResponse {
     }
 }
 
+/// Answers the requests under a path prefix. Set with [`MockProvider::handle`].
+pub type Handler = Arc<dyn Fn(&Received) -> CannedResponse + Send + Sync>;
+
 #[derive(Default)]
 struct State {
     received: Mutex<Vec<Received>>,
     canned: Mutex<HashMap<String, CannedResponse>>,
+    handlers: Mutex<Vec<(String, Handler)>>,
     connections: AtomicU64,
     /// How many connections have ended.
     closed: AtomicU64,
@@ -243,6 +248,15 @@ impl MockProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(path.to_owned(), response);
+    }
+
+    /// Answers every path that starts with `prefix` with what `handler` returns.
+    pub fn handle(&self, prefix: &str, handler: Handler) {
+        self.state
+            .handlers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((prefix.to_owned(), handler));
     }
 
     /// Everything received so far.
@@ -402,6 +416,16 @@ async fn handle(request: Request<Incoming>, state: Arc<State>) -> Response<MockB
         .cloned();
     if let Some(canned) = canned {
         return canned_response(&canned);
+    }
+    let handler = state
+        .handlers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(prefix, _)| path.starts_with(prefix.as_str()))
+        .map(|(_, handler)| Arc::clone(handler));
+    if let Some(handler) = handler {
+        return canned_response(&handler(&received));
     }
 
     match path.as_str() {

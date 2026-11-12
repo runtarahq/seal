@@ -38,7 +38,7 @@ pub trait KeyWrap: Send + Sync {
 }
 
 /// The associated data: `"seal/v1/wrap" || lp(keyset) || lp(kid)`.
-fn associated_data(keyset: &KeysetId, kid: &KeyId) -> Vec<u8> {
+pub(crate) fn associated_data(keyset: &KeysetId, kid: &KeyId) -> Vec<u8> {
     let mut aad = b"seal/v1/wrap".to_vec();
     for part in [keyset.as_str(), kid.as_str()] {
         // Validated identifiers are at most 128 bytes.
@@ -127,7 +127,7 @@ impl FileKeyWrap {
 }
 
 /// Refuses a file that its group or others can read or write.
-pub(crate) fn check_private(path: &Path) -> Result<(), KeyError> {
+pub fn check_private(path: &Path) -> Result<(), KeyError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

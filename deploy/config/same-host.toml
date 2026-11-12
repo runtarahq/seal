@@ -18,6 +18,9 @@ admin = true
 [keys]
 source = { dir = "/var/lib/seal/keys" }
 wrap = { file = "/etc/seal/kek" }       # 32 bytes, readable only by seal's user
+# Or a key that stays in a KMS (docs/operations.md, "Wrapping with a KMS"):
+# wrap = { aws_kms = { key_arn = "arn:aws:kms:eu-central-1:123456789012:key/…", credentials_file = "/etc/seal/aws-credentials" } }
+# wrap = { ovh_kms = { endpoint = "https://eu-central-waw.okms.ovh.net", okms_id = "…", key_id = "…", cert = "/etc/seal/kms.crt", key = "/etc/seal/kms.key" } }
 idle_evict = "15m"
 refresh_interval = "60s"
 max_stale = "5m"
