@@ -5,7 +5,6 @@
 //! wrapped key moved to another keyset or kid does not unwrap, and each use shows in
 //! CloudTrail under its keyset. What is stored is the KMS's `CiphertextBlob`.
 
-use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -21,10 +20,11 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::KeyError;
+use crate::aws_credentials::{AwsCredentialSource, CredentialProvider, Credentials};
 use crate::https::{Https, Names, Roots};
 use crate::kms::{KEY_BASE64_BYTES, Refusal, exchange, key_from_base64, push_key_base64};
 use crate::source::MAX_WRAPPED_KEY_BYTES;
-use crate::wrap::{KeyWrap, check_private};
+use crate::wrap::KeyWrap;
 
 /// How to reach a KMS key.
 #[derive(Clone, Debug)]
@@ -32,11 +32,8 @@ pub struct AwsKmsConfig {
     /// The key's ARN, `arn:aws:kms:<region>:<account>:key/<id>`. A symmetric key that
     /// may encrypt and decrypt. Not an alias, which can be pointed at another key.
     pub key_arn: String,
-    /// A file in the AWS shared credentials format, readable only by seal's user. It is
-    /// read for every request, so new credentials need no restart.
-    pub credentials_file: PathBuf,
-    /// The profile in that file. `default` if not given.
-    pub profile: Option<String>,
+    /// Where seal's credentials come from: a file, or the role its host gives it.
+    pub credentials: AwsCredentialSource,
     /// The endpoint, if it is not the region's public one: a VPC or FIPS endpoint.
     pub endpoint: Option<String>,
     /// The CA that issued the endpoint's certificate, in PEM, if it is not a public one.
@@ -50,8 +47,7 @@ pub struct AwsKmsWrap {
     https: Https,
     key_arn: String,
     region: String,
-    credentials_file: PathBuf,
-    profile: String,
+    credentials: CredentialProvider,
     id: String,
     timeout: Duration,
 }
@@ -100,61 +96,6 @@ fn region_of(arn: &str) -> Option<(&str, &str)> {
         && account.bytes().all(|byte| byte.is_ascii_digit())
         && plain(key);
     valid.then_some((partition, region))
-}
-
-/// seal's AWS credentials.
-struct Credentials {
-    access_key_id: String,
-    secret_access_key: Zeroizing<String>,
-    session_token: Option<Zeroizing<String>>,
-}
-
-/// Reads one profile of a shared credentials file: `[name]`, then `key = value` lines.
-fn parse_credentials(text: &str, profile: &str) -> Option<Credentials> {
-    let (mut inside, mut id, mut secret, mut token) = (false, None, None, None);
-    for line in text.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            inside = section.trim() == profile;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim();
-        match name.trim() {
-            "aws_access_key_id" => id = Some(value.to_owned()),
-            "aws_secret_access_key" => secret = Some(Zeroizing::new(value.to_owned())),
-            "aws_session_token" => token = Some(Zeroizing::new(value.to_owned())),
-            _ => {}
-        }
-    }
-    let visible = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic());
-    let (access_key_id, secret_access_key) = (id?, secret?);
-    let valid = visible(&access_key_id)
-        && visible(&secret_access_key)
-        && token.as_ref().is_none_or(|token| visible(token));
-    valid.then_some(Credentials {
-        access_key_id,
-        secret_access_key,
-        session_token: token,
-    })
-}
-
-fn read_credentials(path: &Path, profile: &str) -> Result<Credentials, KeyError> {
-    check_private(path)?;
-    let text = Zeroizing::new(
-        std::fs::read_to_string(path)
-            .map_err(|_| KeyError::Invalid("the AWS credentials file cannot be read"))?,
-    );
-    parse_credentials(&text, profile).ok_or(KeyError::Invalid(
-        "the AWS credentials file has no such profile with a key id and a secret key",
-    ))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -301,11 +242,13 @@ struct ErrorResponse {
 }
 
 impl AwsKmsWrap {
-    /// Configures the wrapper. Connects to nothing, and does not read the credentials.
+    /// Configures the wrapper. Connects to nothing, and does not read or fetch the
+    /// credentials.
     ///
     /// # Errors
     ///
-    /// Returns [`KeyError::Invalid`] if the ARN or the endpoint is not valid.
+    /// Returns [`KeyError::Invalid`] if the ARN, the endpoint or the source of the
+    /// credentials is not valid.
     pub fn new(config: &AwsKmsConfig) -> Result<Self, KeyError> {
         let (partition, region) = region_of(&config.key_arn)
             .ok_or(KeyError::Invalid("the KMS key must be a key's ARN"))?;
@@ -322,20 +265,12 @@ impl AwsKmsWrap {
         if !https.base_path().is_empty() {
             return Err(KeyError::Invalid("the KMS endpoint must have no path"));
         }
-        let profile = config
-            .profile
-            .clone()
-            .unwrap_or_else(|| "default".to_owned());
-        if profile.is_empty() {
-            return Err(KeyError::Invalid("the AWS profile is empty"));
-        }
         Ok(Self {
             https,
             id: format!("aws-kms:{}", config.key_arn),
             key_arn: config.key_arn.clone(),
             region: region.to_owned(),
-            credentials_file: config.credentials_file.clone(),
-            profile,
+            credentials: CredentialProvider::new(&config.credentials, config.timeout)?,
             timeout: config.timeout,
         })
     }
@@ -348,13 +283,7 @@ impl AwsKmsWrap {
         target: &'static str,
         body: Bytes,
     ) -> Result<Zeroizing<Vec<u8>>, KeyError> {
-        let credentials = match read_credentials(&self.credentials_file, &self.profile) {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                tracing::warn!(kms = "aws", operation, %error, "no AWS credentials");
-                return Err(KeyError::Unavailable);
-            }
-        };
+        let credentials = self.credentials.credentials().await?;
         let authority = self.https.authority();
         let signed = sign(
             &credentials,
@@ -491,8 +420,10 @@ mod tests {
     fn config() -> AwsKmsConfig {
         AwsKmsConfig {
             key_arn: ARN.to_owned(),
-            credentials_file: PathBuf::from("/nowhere"),
-            profile: None,
+            credentials: AwsCredentialSource::File {
+                path: "/nowhere".into(),
+                profile: None,
+            },
             endpoint: None,
             ca_pem: None,
             timeout: Duration::from_secs(5),
@@ -557,37 +488,11 @@ mod tests {
             assert!(AwsKmsWrap::new(&bad).is_err(), "endpoint {endpoint:?}");
         }
         let mut bad = config();
-        bad.profile = Some(String::new());
+        bad.credentials = AwsCredentialSource::File {
+            path: "/nowhere".into(),
+            profile: Some(String::new()),
+        };
         assert!(AwsKmsWrap::new(&bad).is_err());
-    }
-
-    #[test]
-    fn a_profile_is_read_from_a_shared_credentials_file() {
-        let text = "# a comment\n[other]\naws_access_key_id = AKIAOTHER\naws_secret_access_key = no\n\n\
-                    [default]\naws_access_key_id=AKIAEXAMPLE\n  aws_secret_access_key =  secret/with+signs==  \n\
-                    region = eu-central-1\n; another comment\n[ temporary ]\naws_access_key_id = ASIAEXAMPLE\n\
-                    aws_secret_access_key = temporary\naws_session_token = a-token\n";
-        let default = parse_credentials(text, "default").unwrap();
-        assert_eq!(default.access_key_id, "AKIAEXAMPLE");
-        assert_eq!(default.secret_access_key.as_str(), "secret/with+signs==");
-        assert!(default.session_token.is_none());
-        let temporary = parse_credentials(text, "temporary").unwrap();
-        assert_eq!(temporary.access_key_id, "ASIAEXAMPLE");
-        assert_eq!(temporary.session_token.unwrap().as_str(), "a-token");
-
-        assert!(parse_credentials(text, "missing").is_none());
-        assert!(parse_credentials("[default]\naws_access_key_id = A\n", "default").is_none());
-        assert!(
-            parse_credentials(
-                "aws_access_key_id = A\naws_secret_access_key = b\n",
-                "default"
-            )
-            .is_none()
-        );
-        for bad in ["a b", "", "tab\there"] {
-            let text = format!("[default]\naws_access_key_id = A\naws_secret_access_key = {bad}\n");
-            assert!(parse_credentials(&text, "default").is_none(), "{bad:?}");
-        }
     }
 
     #[test]

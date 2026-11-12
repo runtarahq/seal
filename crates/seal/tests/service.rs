@@ -1258,6 +1258,112 @@ fn seal_configured_with_aws_kms_wraps_and_re_wraps_with_it() {
 }
 
 #[test]
+fn seal_with_aws_kms_and_no_credentials_file_uses_the_role_its_host_gives_it() {
+    use seal_testkit::mock_kms::{
+        aws_role_credentials, serve_aws, serve_aws_container_credentials,
+    };
+    use seal_testkit::mock_provider::{Alpn, MockProvider};
+    use seal_testkit::pki::TestPki;
+
+    const ARN: &str =
+        "arn:aws:kms:eu-central-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let setup = runtime.block_on(Setup::new(None));
+    let kms_pki = TestPki::new("KMS CA");
+    let kms = runtime.block_on(MockProvider::tls_with(
+        &kms_pki,
+        Alpn::Http1,
+        &["localhost"],
+        None,
+    ));
+    serve_aws(&kms, ARN, "ASIAROLEEXAMPLE");
+    // The task's role, as ECS gives it to a container.
+    let endpoint = runtime.block_on(MockProvider::plain());
+    let role = std::sync::Arc::new(std::sync::Mutex::new(aws_role_credentials(
+        "ASIAROLEEXAMPLE",
+        Duration::from_secs(3600),
+    )));
+    serve_aws_container_credentials(&endpoint, "/v2/credentials/task", Some("a-token"), &role);
+
+    let ca = setup.dir.path().join("kms-ca.crt");
+    std::fs::write(&ca, &kms_pki.ca_pem).unwrap();
+    let wrap = format!(
+        "{{ aws_kms = {{ key_arn = {ARN:?}, endpoint = \"https://localhost:{}\", ca = {ca:?} }} }}",
+        kms.port()
+    );
+    let config_text = setup.config_text(
+        Mode::Unix,
+        &Options::default(),
+        "[listen]\nunix = \"/tmp/x.sock\"\n",
+    );
+    let empty = setup.dir.path().join("keys-role");
+    std::fs::create_dir(&empty).unwrap();
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    let keys = format!("source = {{ dir = {:?} }}", setup.keys_dir);
+    let config = write_config(
+        &setup,
+        &config_text
+            .replace(&kek, &format!("wrap = {wrap}"))
+            .replace(&keys, &format!("source = {{ dir = {empty:?} }}")),
+    );
+    let keygen = |variables: &[(&str, String)]| {
+        Command::new(env!("CARGO_BIN_EXE_seal"))
+            .args(["keygen", "--keyset", "fresh", "--config"])
+            .arg(&config)
+            .env_remove("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+            .env_remove("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+            .env_remove("AWS_EC2_METADATA_DISABLED")
+            .envs(
+                variables
+                    .iter()
+                    .map(|(name, value)| (*name, value.as_str())),
+            )
+            .output()
+            .unwrap()
+    };
+
+    // An endpoint seal will not send the token to is refused before anything is asked.
+    let elsewhere = keygen(&[(
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "http://10.0.0.1/v2/credentials/task".to_owned(),
+    )]);
+    assert!(!elsewhere.status.success());
+    assert!(
+        String::from_utf8_lossy(&elsewhere.stderr).contains("AWS_CONTAINER_CREDENTIALS_FULL_URI"),
+        "{}",
+        String::from_utf8_lossy(&elsewhere.stderr)
+    );
+    assert!(endpoint.received().is_empty() && kms.received().is_empty());
+
+    let made = keygen(&[
+        (
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            format!("http://{}/v2/credentials/task", endpoint.address()),
+        ),
+        ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "a-token".to_owned()),
+    ]);
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    assert_eq!(endpoint.received().len(), 1);
+    let sent = kms.received();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].header("x-amz-security-token"),
+        Some("session-of-ASIAROLEEXAMPLE")
+    );
+    assert!(
+        std::fs::read_dir(empty.join("fresh"))
+            .unwrap()
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
 fn destroy_keyset_deletes_one_keyset_once_its_name_is_confirmed() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let setup = runtime.block_on(Setup::new(None));

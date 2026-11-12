@@ -15,7 +15,8 @@
 //! - `SEAL_TEST_AWS_KMS_KEY_ARN`: a symmetric key that may encrypt and decrypt.
 //! - `SEAL_TEST_AWS_KMS_CREDENTIALS_FILE`: a shared credentials file that only its
 //!   owner can read, such as `~/.aws/credentials`, and optionally
-//!   `SEAL_TEST_AWS_KMS_PROFILE`.
+//!   `SEAL_TEST_AWS_KMS_PROFILE`. Or `SEAL_TEST_AWS_KMS_ROLE=1`, on an EC2 instance, an
+//!   ECS task or an EKS pod, to use the role it has.
 
 #![allow(
     clippy::unwrap_used,
@@ -28,7 +29,9 @@ use std::time::{Duration, Instant};
 
 use seal_format::id::KeyId;
 use seal_format::{KeysetId, PrivateKey};
-use seal_keys::{AwsKmsConfig, AwsKmsWrap, KeyWrap, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
+use seal_keys::{
+    AwsCredentialSource, AwsKmsConfig, AwsKmsWrap, KeyWrap, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
+};
 use seal_testkit::log_capture::LogCapture;
 use tracing::dispatcher::DefaultGuard;
 use zeroize::Zeroizing;
@@ -107,18 +110,27 @@ async fn ovh_kms_wraps_and_unwraps_a_key() {
 #[tokio::test]
 #[ignore = "needs a key in AWS KMS"]
 async fn aws_kms_wraps_and_unwraps_a_key() {
-    let (Some(key_arn), Some(credentials_file)) = (
-        setting("SEAL_TEST_AWS_KMS_KEY_ARN"),
+    let credentials = match (
         setting("SEAL_TEST_AWS_KMS_CREDENTIALS_FILE"),
-    ) else {
+        setting("SEAL_TEST_AWS_KMS_ROLE"),
+    ) {
+        (Some(path), _) => Some(AwsCredentialSource::File {
+            path: path.into(),
+            profile: setting("SEAL_TEST_AWS_KMS_PROFILE"),
+        }),
+        (None, Some(_)) => Some(AwsCredentialSource::from_environment(setting).unwrap()),
+        (None, None) => None,
+    };
+    let (Some(key_arn), Some(credentials)) = (setting("SEAL_TEST_AWS_KMS_KEY_ARN"), credentials)
+    else {
         println!("skipped: the SEAL_TEST_AWS_KMS_* settings are not all set");
         return;
     };
+    println!("credentials from {credentials:?}");
     let _logs = Logs::print_at_the_end();
     let wrap = AwsKmsWrap::new(&AwsKmsConfig {
         key_arn,
-        credentials_file: credentials_file.into(),
-        profile: setting("SEAL_TEST_AWS_KMS_PROFILE"),
+        credentials,
         endpoint: None,
         ca_pem: None,
         timeout: Duration::from_secs(10),

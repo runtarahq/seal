@@ -299,7 +299,11 @@ impl WrapConfig {
 
     fn check(&self) -> Result<(), ConfigError> {
         match self {
-            Self::File(_) | Self::AwsKms(_) => Ok(()),
+            Self::File(_) => Ok(()),
+            Self::AwsKms(kms) if kms.profile.is_some() && kms.credentials_file.is_none() => Err(
+                invalid("keys.wrap.aws_kms has a profile and no credentials_file"),
+            ),
+            Self::AwsKms(_) => Ok(()),
             Self::OvhKms(kms) => match (&kms.cert, &kms.key, &kms.token_file) {
                 (Some(_), Some(_), None) | (None, None, Some(_)) => Ok(()),
                 _ => Err(invalid(
@@ -317,7 +321,9 @@ pub struct AwsKmsWrapConfig {
     /// The key's ARN. Its region is where the KMS is.
     pub key_arn: String,
     /// A file in the AWS shared credentials format that only seal's user can read.
-    pub credentials_file: PathBuf,
+    /// Without one, seal uses the role its host gives it: the container credentials
+    /// endpoint if the environment names one, and otherwise instance metadata.
+    pub credentials_file: Option<PathBuf>,
     /// The profile in that file. `default` if not given.
     pub profile: Option<String>,
     /// The endpoint, if it is not the region's public one.
@@ -842,6 +848,16 @@ mod tests {
         ));
         Config::parse(&MINIMAL.replace("{ file = \"/etc/seal/kek\" }", aws)).unwrap();
         assert!(WrapConfig::parse(&aws.replace("credentials_file", "credentials")).is_err());
+        let role =
+            "{ aws_kms = { key_arn = \"arn:aws:kms:eu-central-1:123456789012:key/1234abcd\" } }";
+        assert!(matches!(
+            WrapConfig::parse(role).unwrap(),
+            WrapConfig::AwsKms(AwsKmsWrapConfig {
+                credentials_file: None,
+                ..
+            })
+        ));
+        assert!(WrapConfig::parse(&role.replace(" } }", ", profile = \"seal\" } }")).is_err());
         assert!(
             WrapConfig::parse("{ aws_kms = { credentials_file = \"/etc/seal/aws\" } }").is_err()
         );

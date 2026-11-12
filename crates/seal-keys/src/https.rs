@@ -1,6 +1,8 @@
 //! The HTTPS client the key source and the KMS wrappers share: HTTP/1.1, one request
-//! per connection, no redirects, and a response no larger than the caller allows.
+//! per connection, no redirects, and a response no larger than the caller allows. And
+//! the same over plain HTTP, for the credential endpoints a host gives its workloads.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -10,6 +12,7 @@ use hyper_util::rt::TokioIo;
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
@@ -177,26 +180,58 @@ impl Https {
             .connect(name, stream)
             .await
             .map_err(|_| KeyError::Unavailable)?;
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .map_err(|_| KeyError::Unavailable)?;
-        tokio::spawn(connection);
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|_| KeyError::Unavailable)?;
-        let status = response.status();
-        let mut received = Zeroizing::new(Vec::with_capacity(limit.min(PREALLOCATED_BYTES)));
-        let mut body = response.into_body();
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|_| KeyError::Unavailable)?;
-            if let Some(data) = frame.data_ref() {
-                if data.len() > limit.saturating_sub(received.len()) {
-                    return Err(KeyError::Unavailable);
-                }
-                received.extend_from_slice(data);
-            }
-        }
-        Ok((status, received))
+        exchange_on(stream, request, limit).await
     }
+}
+
+/// Sends a request over plain HTTP on a new connection to an address, and reads the
+/// whole response, which may be at most `limit` bytes. Only for the endpoints a host
+/// gives its own workloads on a link-local address, which have no TLS. The request
+/// needs a `Host` header. The response is wiped when dropped.
+///
+/// # Errors
+///
+/// Returns [`KeyError::Unavailable`] if the address cannot be reached or the response
+/// is too large.
+pub(crate) async fn send_plain(
+    address: SocketAddr,
+    request: Request<Full<Bytes>>,
+    limit: usize,
+) -> Result<(StatusCode, Zeroizing<Vec<u8>>), KeyError> {
+    let stream = TcpStream::connect(address)
+        .await
+        .map_err(|_| KeyError::Unavailable)?;
+    exchange_on(stream, request, limit).await
+}
+
+/// Sends one request on a connection and reads the whole response.
+async fn exchange_on<S>(
+    stream: S,
+    request: Request<Full<Bytes>>,
+    limit: usize,
+) -> Result<(StatusCode, Zeroizing<Vec<u8>>), KeyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| KeyError::Unavailable)?;
+    tokio::spawn(connection);
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(|_| KeyError::Unavailable)?;
+    let status = response.status();
+    let mut received = Zeroizing::new(Vec::with_capacity(limit.min(PREALLOCATED_BYTES)));
+    let mut body = response.into_body();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| KeyError::Unavailable)?;
+        if let Some(data) = frame.data_ref() {
+            if data.len() > limit.saturating_sub(received.len()) {
+                return Err(KeyError::Unavailable);
+            }
+            received.extend_from_slice(data);
+        }
+    }
+    Ok((status, received))
 }

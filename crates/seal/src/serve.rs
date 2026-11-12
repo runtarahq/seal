@@ -12,8 +12,8 @@ use seal_broker::audit::AuditSink;
 use seal_broker::client::ClientConfig;
 use seal_broker::{Broker, BrokerConfig, Environment, Limits};
 use seal_keys::{
-    AwsKmsConfig, AwsKmsWrap, DirKeySource, FileKeyWrap, HttpKeySource, HttpKeySourceConfig,
-    KeySource, KeyWrap, Keyring, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
+    AwsCredentialSource, AwsKmsConfig, AwsKmsWrap, DirKeySource, FileKeyWrap, HttpKeySource,
+    HttpKeySourceConfig, KeySource, KeyWrap, Keyring, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
 };
 use seal_proto::MAX_BODY_CHUNK;
 use seal_proto::v1::seal_server::SealServer;
@@ -93,8 +93,15 @@ pub fn key_wrap(config: &WrapConfig) -> Result<Arc<dyn KeyWrap>, String> {
         WrapConfig::AwsKms(kms) => Arc::new(
             AwsKmsWrap::new(&AwsKmsConfig {
                 key_arn: kms.key_arn.clone(),
-                credentials_file: kms.credentials_file.clone(),
-                profile: kms.profile.clone(),
+                credentials: match &kms.credentials_file {
+                    Some(path) => AwsCredentialSource::File {
+                        path: path.clone(),
+                        profile: kms.profile.clone(),
+                    },
+                    // The role the host gives seal, found as the AWS SDKs find it.
+                    None => AwsCredentialSource::from_environment(|name| std::env::var(name).ok())
+                        .map_err(|error| error.to_string())?,
+                },
                 endpoint: kms.endpoint.clone(),
                 ca_pem: kms.ca.as_ref().map(read).transpose()?,
                 timeout: KMS_TIMEOUT,
