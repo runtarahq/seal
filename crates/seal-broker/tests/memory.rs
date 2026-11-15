@@ -312,7 +312,11 @@ impl S3 {
             .await
             .expect("RustFS starts");
         let port = container.port(9000).unwrap();
-        let harness = Harness::new();
+        // RustFS answers a 5 GB upload only once it has stored it, which on a slow
+        // disk takes longer than the short timeouts the other tests run with.
+        let mut options = Options::default();
+        options.limits = seal_broker::Limits::default();
+        let harness = Harness::with(options);
         let secret = harness.seal(
             "secret_key",
             seal_testkit::containers::RUSTFS_SECRET_KEY.as_bytes(),
