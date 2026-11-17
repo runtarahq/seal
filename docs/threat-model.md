@@ -114,6 +114,17 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   returns it encoded some other way, compressed, or escaped inside JSON, still gives it
   to the caller, and one that means to can always do so. Policies should name API
   hosts, not services that reflect requests.
+- **A provider that returns what the caller chose lets the caller test guesses at a
+  secret.** To keep a streamed response that repeats a credential from the caller, seal
+  holds back the end of a piece of the body while it is the start of one, so how a body
+  arrives shows whether its last bytes were. A compromised application that can get a
+  destination to answer with bytes it chose, from an endpoint that echoes its request or
+  a file it stored there, can therefore find a header, basic, query, path or body secret
+  a byte at a time, in about as many audited requests as the secret has bytes times
+  half its alphabet. A signing key is not looked for, so it is not exposed, nor is
+  anything in a sealed response, which is read whole. A destination that serves the
+  caller's own content is as bad for a credential as one that reflects requests:
+  policies should name API hosts that do neither.
 - **Response sealing covers declared fields at declared locations only.** The same
   value elsewhere in a response passes through, as does anything else a provider
   returns, such as a presigned URL it generates itself.
