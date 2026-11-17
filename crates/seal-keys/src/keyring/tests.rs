@@ -61,6 +61,24 @@ impl KeySource for MemorySource {
         self.keys.lock().unwrap().remove(keyset);
         Ok(())
     }
+
+    async fn keysets(&self) -> Result<Vec<KeysetId>, KeyError> {
+        let mut keysets: Vec<_> = self.keys.lock().unwrap().keys().cloned().collect();
+        keysets.sort();
+        Ok(keysets)
+    }
+
+    async fn replace(&self, old: &WrappedKey, new: &WrappedKey) -> Result<(), KeyError> {
+        let mut keys = self.keys.lock().unwrap();
+        let stored = keys
+            .get_mut(&old.keyset)
+            .and_then(|list| list.iter_mut().find(|key| *key == old))
+            .ok_or(KeyError::Invalid(
+                "a key changed while it was wrapped again",
+            ))?;
+        *stored = new.clone();
+        Ok(())
+    }
 }
 
 /// A source that only reads, as one served over HTTP is.
@@ -708,4 +726,40 @@ fn a_wrapping_key_cannot_be_named_twice() {
     assert!(KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&new)]).is_err());
     assert!(KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old), Arc::clone(&old)]).is_err());
     assert!(KeyWraps::new(new, vec![old]).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_running_keyring_reads_keys_wrapped_again_without_being_restarted() {
+    let source = Arc::new(MemorySource::default());
+    let (old, new) = two_wraps();
+    let wraps = KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old)]).unwrap();
+    Keyring::new(
+        Arc::clone(&source) as Arc<dyn KeySource>,
+        Arc::clone(&old),
+        config(),
+    )
+    .unwrap()
+    .generate(&keyset("acme"))
+    .await
+    .unwrap();
+
+    let running = Keyring::new(
+        Arc::clone(&source) as Arc<dyn KeySource>,
+        wraps.clone(),
+        config(),
+    )
+    .unwrap();
+    opens(&running, "acme").await.unwrap();
+
+    let done = crate::rewrap(source.as_ref(), &wraps, crate::RewrapOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((done.rewrapped, done.left), (1, 0));
+    // Before and after it next reads the source, the keyring opens the same values.
+    opens(&running, "acme").await.unwrap();
+    tokio::time::sleep(config().refresh_interval * 2).await;
+    opens(&running, "acme").await.unwrap();
+    // And what it now holds came from the new wrapping key: the old one is not needed.
+    let after = Keyring::new(Arc::clone(&source) as Arc<dyn KeySource>, new, config()).unwrap();
+    opens(&after, "acme").await.unwrap();
 }

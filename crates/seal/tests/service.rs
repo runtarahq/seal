@@ -924,17 +924,14 @@ fn a_configuration_others_can_write_is_refused() {
 }
 
 #[test]
-fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
+fn rewrap_moves_the_keys_to_a_new_wrapping_key_in_place() {
     use seal_keys::{DirKeySource, FileKeyWrap, Keyring, KeyringConfig, Keys};
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let setup = runtime.block_on(Setup::new(None));
-    let config = write_config(
-        &setup,
-        &setup.config_text(
-            Mode::Unix,
-            &Options::default(),
-            "[listen]\nunix = \"/tmp/x.sock\"\n",
-        ),
+    let config_text = setup.config_text(
+        Mode::Unix,
+        &Options::default(),
+        "[listen]\nunix = \"/tmp/x.sock\"\n",
     );
     let run = |args: &[&std::ffi::OsStr]| {
         Command::new(env!("CARGO_BIN_EXE_seal"))
@@ -943,7 +940,6 @@ fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
             .unwrap()
     };
     let new_kek = setup.dir.path().join("kek-2");
-    let new_keys = setup.dir.path().join("keys-2");
     assert!(
         run(&[
             "keygen".as_ref(),
@@ -953,44 +949,91 @@ fn rewrap_moves_the_keys_to_a_new_wrapping_key() {
         .status
         .success()
     );
-    let rewrap = || {
-        run(&[
-            "rewrap".as_ref(),
-            "--config".as_ref(),
-            config.as_ref(),
-            "--new-wrapping-key".as_ref(),
-            new_kek.as_ref(),
-            "--out".as_ref(),
-            new_keys.as_ref(),
-        ])
+    let rewrap = |config: &std::path::Path, more: &[&str]| {
+        let mut args: Vec<&std::ffi::OsStr> =
+            vec!["rewrap".as_ref(), "--config".as_ref(), config.as_ref()];
+        args.extend(more.iter().map(AsRef::<std::ffi::OsStr>::as_ref));
+        run(&args)
     };
-    let done = rewrap();
-    assert!(
-        done.status.success(),
-        "{}",
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert!(String::from_utf8_lossy(&done.stdout).starts_with("re-wrapped "));
-    assert!(
-        !rewrap().status.success(),
-        "an existing directory is not written into"
-    );
-
-    // The new directory and wrapping key give the keys the old ones gave.
-    let current = |keys: &std::path::Path, kek: &std::path::Path| {
+    let current = |kek: &std::path::Path| {
         let _guard = runtime.enter();
         let keyring = Keyring::new(
-            std::sync::Arc::new(DirKeySource::new(keys, 16)),
+            std::sync::Arc::new(DirKeySource::new(&setup.keys_dir, 16)),
             std::sync::Arc::new(FileKeyWrap::from_file(kek).unwrap()),
             KeyringConfig::default(),
         )
         .unwrap();
         runtime.block_on(keyring.current_public_key(&keyset()))
     };
-    let before = current(&setup.keys_dir, &setup.kek).unwrap();
-    assert_eq!(current(&new_keys, &new_kek).unwrap(), before);
-    assert!(current(&new_keys, &setup.kek).is_err());
-    assert!(current(&setup.keys_dir, &new_kek).is_err());
+    let before = current(&setup.kek).unwrap();
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    assert!(config_text.contains(&kek));
+
+    // With the new wrapping key alone, the keys cannot be read, and nothing is changed.
+    let only_new = write_config(
+        &setup,
+        &config_text.replace(&kek, &format!("wrap = {{ file = {new_kek:?} }}")),
+    );
+    let refused = rewrap(&only_new, &[]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not configured"));
+    assert_eq!(current(&setup.kek).unwrap(), before);
+
+    // The new one current, and the old one still unwrapping.
+    let both = write_config(
+        &setup,
+        &config_text.replace(
+            &kek,
+            &format!(
+                "wrap = {{ file = {new_kek:?} }}\nunwrap_also = [{{ file = {:?} }}]",
+                setup.kek
+            ),
+        ),
+    );
+    let dry = rewrap(&both, &["--dry-run"]);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    assert!(String::from_utf8_lossy(&dry.stdout).contains("would re-wrap 2 keys and leave 0"));
+    assert_eq!(
+        current(&setup.kek).unwrap(),
+        before,
+        "a dry run changes nothing"
+    );
+
+    let done = rewrap(&both, &[]);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(String::from_utf8_lossy(&done.stdout).contains("re-wrapped 2 keys and left 0"));
+
+    // The new wrapping key gives the keys the old one gave, and the old one no longer
+    // does, so it can be taken out of the configuration.
+    assert_eq!(current(&new_kek).unwrap(), before);
+    assert!(current(&setup.kek).is_err());
+    let again = rewrap(&only_new, &[]);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(String::from_utf8_lossy(&again.stdout).contains("re-wrapped 0 keys and left 2"));
+
+    // The same wrapping key cannot be named twice.
+    let twice = write_config(
+        &setup,
+        &config_text.replace(
+            &kek,
+            &format!("{kek}\nunwrap_also = [{{ file = {:?} }}]", setup.kek),
+        ),
+    );
+    let refused = rewrap(&twice, &[]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("twice"));
 }
 
 #[cfg(unix)]
@@ -1036,42 +1079,59 @@ fn rewrap_moves_the_keys_to_a_kms_and_seal_then_wraps_with_it() {
         &Options::default(),
         "[listen]\nunix = \"/tmp/x.sock\"\n",
     );
-    let config = write_config(&setup, &config_text);
+    // The KMS is current, and the wrapping key file still unwraps.
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    assert!(config_text.contains(&kek));
+    let config = write_config(
+        &setup,
+        &config_text.replace(
+            &kek,
+            &format!(
+                "wrap = {new_wrap}\nunwrap_also = [{{ file = {:?} }}]",
+                setup.kek
+            ),
+        ),
+    );
     let run = |args: &[&std::ffi::OsStr]| {
         Command::new(env!("CARGO_BIN_EXE_seal"))
             .args(args)
             .output()
             .unwrap()
     };
-    let rewrap = |out: &std::path::Path| {
-        run(&[
-            "rewrap".as_ref(),
-            "--config".as_ref(),
-            config.as_ref(),
-            "--new-wrap".as_ref(),
-            new_wrap.as_ref(),
-            "--out".as_ref(),
-            out.as_ref(),
-        ])
-    };
+    let rewrap = || run(&["rewrap".as_ref(), "--config".as_ref(), config.as_ref()]);
 
     // A token that others can read is not used, and nothing is sent to the KMS.
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let refused = rewrap(&setup.dir.path().join("keys-refused"));
+    let refused = rewrap();
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("accessible to its group or others"));
     assert!(kms.received().is_empty());
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let new_keys = setup.dir.path().join("keys-kms");
-    let done = rewrap(&new_keys);
+    let file_wrap = || -> std::sync::Arc<dyn KeyWrap> {
+        std::sync::Arc::new(FileKeyWrap::from_file(&setup.kek).unwrap())
+    };
+    let current = |wrap: std::sync::Arc<dyn KeyWrap>, name: &str| {
+        let _guard = runtime.enter();
+        let keyring = Keyring::new(
+            std::sync::Arc::new(DirKeySource::new(&setup.keys_dir, 16)),
+            wrap,
+            KeyringConfig::default(),
+        )
+        .unwrap();
+        runtime.block_on(keyring.current_public_key(&name.parse().unwrap()))
+    };
+    let before = current(file_wrap(), "acme").unwrap();
+
+    let done = rewrap();
     assert!(
         done.status.success(),
         "{}",
         String::from_utf8_lossy(&done.stderr)
     );
-    assert!(String::from_utf8_lossy(&done.stdout).starts_with("re-wrapped 2 keys"));
-    assert_eq!(kms.received().len(), 2);
+    assert!(String::from_utf8_lossy(&done.stdout).contains("re-wrapped 2 keys"));
+    // Each key is wrapped by the KMS, and unwrapped by it again to see that it opens.
+    assert_eq!(kms.received().len(), 4);
 
     // The KMS gives the keys the wrapping key file gave, and the file no longer does.
     let kms_wrap = || -> std::sync::Arc<dyn KeyWrap> {
@@ -1087,33 +1147,13 @@ fn rewrap_moves_the_keys_to_a_kms_and_seal_then_wraps_with_it() {
             .unwrap(),
         )
     };
-    let current = |keys: &std::path::Path, wrap: std::sync::Arc<dyn KeyWrap>, name: &str| {
-        let _guard = runtime.enter();
-        let keyring = Keyring::new(
-            std::sync::Arc::new(DirKeySource::new(keys, 16)),
-            wrap,
-            KeyringConfig::default(),
-        )
-        .unwrap();
-        runtime.block_on(keyring.current_public_key(&name.parse().unwrap()))
-    };
-    let file_wrap = || -> std::sync::Arc<dyn KeyWrap> {
-        std::sync::Arc::new(FileKeyWrap::from_file(&setup.kek).unwrap())
-    };
-    let before = current(&setup.keys_dir, file_wrap(), "acme").unwrap();
-    assert_eq!(current(&new_keys, kms_wrap(), "acme").unwrap(), before);
-    assert!(current(&new_keys, file_wrap(), "acme").is_err());
-    assert!(current(&setup.keys_dir, kms_wrap(), "acme").is_err());
+    assert_eq!(current(kms_wrap(), "acme").unwrap(), before);
+    assert!(current(file_wrap(), "acme").is_err());
 
-    // Configured with the KMS, seal wraps a new keyset's key with it.
-    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
-    let keys = format!("source = {{ dir = {:?} }}", setup.keys_dir);
-    assert!(config_text.contains(&kek) && config_text.contains(&keys));
+    // Configured with the KMS alone, seal wraps a new keyset's key with it.
     let with_kms = write_config(
         &setup,
-        &config_text
-            .replace(&kek, &format!("wrap = {new_wrap}"))
-            .replace(&keys, &format!("source = {{ dir = {new_keys:?} }}")),
+        &config_text.replace(&kek, &format!("wrap = {new_wrap}")),
     );
     let made = run(&[
         "keygen".as_ref(),
@@ -1127,8 +1167,8 @@ fn rewrap_moves_the_keys_to_a_kms_and_seal_then_wraps_with_it() {
         "{}",
         String::from_utf8_lossy(&made.stderr)
     );
-    assert!(current(&new_keys, kms_wrap(), "fresh").is_ok());
-    let stored = std::fs::read_dir(new_keys.join("fresh"))
+    assert!(current(kms_wrap(), "fresh").is_ok());
+    let stored = std::fs::read_dir(setup.keys_dir.join("fresh"))
         .unwrap()
         .next()
         .unwrap()
@@ -1183,38 +1223,38 @@ fn seal_configured_with_aws_kms_wraps_and_re_wraps_with_it() {
         &Options::default(),
         "[listen]\nunix = \"/tmp/x.sock\"\n",
     );
-    let config = write_config(&setup, &config_text);
+    // The KMS is current, and the wrapping key file still unwraps.
+    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
+    assert!(config_text.contains(&kek));
+    let config = write_config(
+        &setup,
+        &config_text.replace(
+            &kek,
+            &format!(
+                "wrap = {new_wrap}\nunwrap_also = [{{ file = {:?} }}]",
+                setup.kek
+            ),
+        ),
+    );
     let run = |args: &[&std::ffi::OsStr]| {
         Command::new(env!("CARGO_BIN_EXE_seal"))
             .args(args)
             .output()
             .unwrap()
     };
-    let new_keys = setup.dir.path().join("keys-kms");
-    let done = run(&[
-        "rewrap".as_ref(),
-        "--config".as_ref(),
-        config.as_ref(),
-        "--new-wrap".as_ref(),
-        new_wrap.as_ref(),
-        "--out".as_ref(),
-        new_keys.as_ref(),
-    ]);
+    let done = run(&["rewrap".as_ref(), "--config".as_ref(), config.as_ref()]);
     assert!(
         done.status.success(),
         "{}",
         String::from_utf8_lossy(&done.stderr)
     );
-    assert_eq!(kms.received().len(), 2);
+    // Each key is wrapped by the KMS, and unwrapped by it again to see that it opens.
+    assert_eq!(kms.received().len(), 4);
 
-    // Configured with the KMS, seal reads the re-wrapped keys and wraps new ones.
-    let kek = format!("wrap = {{ file = {:?} }}", setup.kek);
-    let keys = format!("source = {{ dir = {:?} }}", setup.keys_dir);
+    // Configured with the KMS alone, seal reads the re-wrapped keys and wraps new ones.
     let with_kms = write_config(
         &setup,
-        &config_text
-            .replace(&kek, &format!("wrap = {new_wrap}"))
-            .replace(&keys, &format!("source = {{ dir = {new_keys:?} }}")),
+        &config_text.replace(&kek, &format!("wrap = {new_wrap}")),
     );
     let made = run(&[
         "keygen".as_ref(),
@@ -1228,7 +1268,7 @@ fn seal_configured_with_aws_kms_wraps_and_re_wraps_with_it() {
         "{}",
         String::from_utf8_lossy(&made.stderr)
     );
-    let stored = std::fs::read_dir(new_keys.join("fresh"))
+    let stored = std::fs::read_dir(setup.keys_dir.join("fresh"))
         .unwrap()
         .next()
         .unwrap()
@@ -1236,24 +1276,19 @@ fn seal_configured_with_aws_kms_wraps_and_re_wraps_with_it() {
     let stored = std::fs::read_to_string(stored.path()).unwrap();
     assert!(stored.contains(&format!("aws-kms:{ARN}")), "{stored}");
 
-    // Back to a wrapping key file, which unwraps each key with the KMS.
-    let back = setup.dir.path().join("keys-back");
+    // Back to the wrapping key file, with the KMS unwrapping each key.
+    let back = write_config(
+        &setup,
+        &config_text.replace(&kek, &format!("{kek}\nunwrap_also = [{new_wrap}]")),
+    );
     let before = kms.received().len();
-    let returned = run(&[
-        "rewrap".as_ref(),
-        "--config".as_ref(),
-        with_kms.as_ref(),
-        "--new-wrapping-key".as_ref(),
-        setup.kek.as_ref(),
-        "--out".as_ref(),
-        back.as_ref(),
-    ]);
+    let returned = run(&["rewrap".as_ref(), "--config".as_ref(), back.as_ref()]);
     assert!(
         returned.status.success(),
         "{}",
         String::from_utf8_lossy(&returned.stderr)
     );
-    assert!(String::from_utf8_lossy(&returned.stdout).starts_with("re-wrapped 3 keys"));
+    assert!(String::from_utf8_lossy(&returned.stdout).contains("re-wrapped 3 keys"));
     assert_eq!(kms.received().len(), before + 3);
 }
 
