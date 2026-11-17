@@ -53,6 +53,11 @@ pub fn seal_response_fields(
             fields: BTreeMap::new(),
         });
     }
+    // The body is read as UTF-8. One that says it is written some other way could hold
+    // a field where this reading sees none.
+    if !charset_is_utf8(headers) {
+        return Err(refuse("the response's charset is not UTF-8"));
+    }
     match sealing.format {
         ResponseFormat::Json => {
             if !media_type_is(headers, is_json) {
@@ -74,6 +79,30 @@ pub fn seal_response_fields(
         }
     }
 }
+
+/// Whether the content type names no charset, or one that reads as UTF-8 does.
+fn charset_is_utf8(headers: &HeaderMap) -> bool {
+    let Some(value) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    value.split(';').skip(1).all(|parameter| {
+        let Some((name, charset)) = parameter.split_once('=') else {
+            return true;
+        };
+        if !name.trim().eq_ignore_ascii_case("charset") {
+            return true;
+        }
+        let charset = charset.trim().trim_matches('"');
+        charset.eq_ignore_ascii_case("utf-8") || charset.eq_ignore_ascii_case("us-ascii")
+    })
+}
+
+/// How deep a response's XML may nest. A field to seal is a few elements down, and a
+/// document far deeper than any provider sends costs more to read the deeper it goes.
+const MAX_XML_DEPTH: usize = 64;
 
 /// Whether a media type means XML.
 #[must_use]
@@ -156,6 +185,9 @@ fn seal_xml(
                     return Err(refuse("a sealed response field holds markup"));
                 }
                 path.push(xml_local_name(start.name().as_ref()).to_owned());
+                if path.len() > MAX_XML_DEPTH {
+                    return Err(refuse("the response's XML nests too deeply"));
+                }
                 let joined = path.join("/");
                 if let Some(field) = sealing
                     .fields
@@ -247,7 +279,16 @@ fn seal_xml(
                     }
                 }
             }
-            Event::Comment(_) | Event::Decl(_) | Event::PI(_) => {}
+            // Read as UTF-8, whatever it says: so it may say nothing else.
+            Event::Decl(declaration) => {
+                let utf8 = declaration.encoding().is_none_or(|encoding| {
+                    encoding.is_ok_and(|name| name.eq_ignore_ascii_case("utf-8"))
+                });
+                if !utf8 {
+                    return Err(refuse("the response's XML is not declared as UTF-8"));
+                }
+            }
+            Event::Comment(_) | Event::PI(_) => {}
         }
     }
     if target.is_some() || !path.is_empty() {
@@ -326,6 +367,11 @@ fn seal_form(
     }
     if crate::inject::has_semicolon_separator(body) {
         return Err(refuse("the response separates fields with a semicolon"));
+    }
+    // A byte order mark would become part of the first field's name, and a NUL is no
+    // part of a form: either would hide a field from the comparison below.
+    if body.starts_with(b"\xEF\xBB\xBF") || body.contains(&0) {
+        return Err(refuse("the response is not a plain form"));
     }
     let pairs: Vec<(Zeroizing<String>, Zeroizing<String>)> = form_urlencoded::parse(body)
         .map(|(key, value)| {
@@ -920,6 +966,67 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
+    }
+
+    #[test]
+    fn a_response_written_some_other_way_than_utf8_is_refused() {
+        let public = PrivateKey::generate().1;
+        let refused = |spec: &SealResponse, content_type: &str, body: &[u8]| {
+            seal_response_fields(spec, &headers(content_type), body, sealer(&public))
+                .unwrap_err()
+                .code()
+        };
+        let form = sealing(ResponseFormat::Form, &[("access_token", "access_token")]);
+        for (content_type, body) in [
+            (
+                "application/x-www-form-urlencoded; charset=utf-16",
+                &b"access_token=x"[..],
+            ),
+            (
+                "application/x-www-form-urlencoded",
+                b"\xEF\xBB\xBFaccess_token=x",
+            ),
+            ("application/x-www-form-urlencoded", b"a\0ccess_token=x"),
+        ] {
+            assert_eq!(
+                refused(&form, content_type, body),
+                ErrorCode::ResponseUnparseable,
+                "{content_type}"
+            );
+        }
+        let xml = sealing(ResponseFormat::Xml, &[("A/B", "t")]);
+        assert_eq!(
+            refused(&xml, "text/xml; charset=utf-7", b"<A><B>x</B></A>"),
+            ErrorCode::ResponseUnparseable
+        );
+        assert_eq!(
+            refused(
+                &xml,
+                "text/xml",
+                b"<?xml version=\"1.0\" encoding=\"UTF-7\"?><A><B>x</B></A>"
+            ),
+            ErrorCode::ResponseUnparseable
+        );
+        // Said to be UTF-8, in any case, is fine.
+        for content_type in ["text/xml; charset=UTF-8", "text/xml; charset=\"utf-8\""] {
+            seal_response_fields(
+                &xml,
+                &headers(content_type),
+                b"<?xml version=\"1.0\" encoding=\"utf-8\"?><A><B>x</B></A>",
+                sealer(&public),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn xml_nested_past_any_real_response_is_refused() {
+        let spec = sealing(ResponseFormat::Xml, &[("A/B", "t")]);
+        let deep = "<a>".repeat(MAX_XML_DEPTH + 1) + &"</a>".repeat(MAX_XML_DEPTH + 1);
+        let error = seal_xml_text(&spec, &deep).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::ResponseUnparseable);
+        let fine = "<a>".repeat(MAX_XML_DEPTH) + &"</a>".repeat(MAX_XML_DEPTH);
+        seal_xml_text(&spec, &fine).unwrap();
     }
 
     /// Found by fuzzing: positions after a byte order mark were three bytes short, which
