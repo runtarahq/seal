@@ -64,7 +64,9 @@ every matched rule allows it. The caller's other startup parameters, such as
 
 The user can be a literal, a plain field the rule lists, or a sealed companion. A
 password and a client certificate may be presented together. The rules must then agree
-on the user and on TLS, and a session may use only the databases both allow.
+on the user and on TLS, and a session may use only the databases both allow. How the
+server is verified is the destination's `tls`: a certificate's rule that names its own
+`ca` or `server_name` is refused beside a password.
 
 ## The login
 

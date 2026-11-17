@@ -28,6 +28,12 @@ the body, `range`, and every `x-amz-*` header.
 | `X-Amz-Content-SHA256` | A well-formed hash, where the rule allows the caller's hash |
 | Every other `X-Amz-*` header, including `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Decoded-Content-Length` and `X-Amz-Trailer` | Never: they control signing, or are not on the list yet |
 
+A header that another presented value injects is signed like one the caller set, and
+anyone can seal a value that injects one. So seal holds it to the same table: beside a
+SigV4 rule, another value may inject an `X-Amz-*` header only where the caller could set
+it. An injected `x-amz-copy-source` is always refused, since its value is a secret and
+cannot be checked against the rule's prefix.
+
 A copy reads the object its source names, not the one in the URL. Without a check, a
 secret limited to one bucket could copy another bucket's object into it and read it. So
 seal reads the copy source, `bucket/key` or `/bucket/key` with an optional
@@ -161,6 +167,11 @@ The secret is the private key, in PEM: PKCS#8, PKCS#1 (RSA) or SEC1 (EC), for an
 ECDSA or Ed25519 key. The certificate and any chain may be plain. A rule can name a CA to
 verify the provider with, added to the usual roots for that destination only, and a
 server name to verify instead of the URL's host.
+
+Both hold for the whole connection, so a rule that sets either is used alone, with its
+own certificate and chain: seal refuses it beside any other value, such as a token.
+Anyone can seal a client certificate's rule, and it must not decide how another value's
+provider is verified.
 
 A key that does not match its certificate is refused before seal connects.
 

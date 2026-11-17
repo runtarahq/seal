@@ -416,9 +416,11 @@ fn check_placements(
     primaries: &[(&FieldName, usize, &Rule)],
     head: &RequestHead<'_>,
 ) -> Result<(), BrokerError> {
+    a_certificate_that_changes_verification_is_alone(primaries)?;
     let mut seen = BTreeSet::new();
     for (field, _, rule) in primaries {
         refuse_amz_headers(field, rule, head)?;
+        refuse_injected_amz_headers(field, rule, primaries)?;
         for placement in placements_of(&rule.inject) {
             if let Placement::Header(name) = &placement
                 && head
@@ -507,6 +509,65 @@ fn refuse_amz_headers(
             "the copy source is not within the rule's destination",
             field,
         ));
+    }
+    Ok(())
+}
+
+/// A header another value injects is signed like one the caller set, and anyone can seal
+/// a value that injects one. So beside a SigV4 rule it is held to what that rule lets
+/// the caller set. A copy source is refused outright: its value is a secret, which
+/// cannot be checked against the rule's destination.
+fn refuse_injected_amz_headers(
+    field: &FieldName,
+    rule: &Rule,
+    primaries: &[(&FieldName, usize, &Rule)],
+) -> Result<(), BrokerError> {
+    let Inject::Header { name, .. } = &rule.inject else {
+        return Ok(());
+    };
+    let lower = name.to_ascii_lowercase();
+    if !lower.starts_with("x-amz-") {
+        return Ok(());
+    }
+    for (_, _, other) in primaries {
+        let Inject::AwsSigv4 { allow_headers, .. } = &other.inject else {
+            continue;
+        };
+        if lower == "x-amz-copy-source"
+            || !seal_format::policy::amz_header_allowed(&lower, allow_headers)
+        {
+            return Err(BrokerError::for_field(
+                ErrorCode::Conflict,
+                "this field injects an X-Amz header the signing rule does not allow",
+                field,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A client certificate's rule may name a CA and a server name to verify the provider
+/// with, and they would hold for the whole connection: for every other value sent over
+/// it too. Anyone can seal such a rule, so one that sets either is used alone, with its
+/// own parts.
+fn a_certificate_that_changes_verification_is_alone(
+    primaries: &[(&FieldName, usize, &Rule)],
+) -> Result<(), BrokerError> {
+    if primaries.len() < 2 {
+        return Ok(());
+    }
+    for (field, _, rule) in primaries {
+        if let Inject::ClientCert {
+            ca, server_name, ..
+        } = &rule.inject
+            && (ca.is_some() || server_name.is_some())
+        {
+            return Err(BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "a client certificate that names a CA or a server name is used alone",
+                field,
+            ));
+        }
     }
     Ok(())
 }
