@@ -247,8 +247,10 @@ fn signs_only_for_its_exact_endpoint(rule: &Rule, target: &Target) -> bool {
     match (&rule.inject, &rule.destination) {
         (
             Inject::JwtAssertion { .. },
-            seal_format::policy::Destination::Http { path_prefix, .. },
-        ) => path_prefix.as_deref() == Some(target.path.as_str()),
+            seal_format::policy::Destination::Http {
+                path_prefix, path, ..
+            },
+        ) => path.as_deref().or(path_prefix.as_deref()) == Some(target.path.as_str()),
         (Inject::JwtAssertion { .. }, _) => false,
         _ => true,
     }

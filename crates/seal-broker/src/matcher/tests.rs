@@ -895,6 +895,7 @@ fn reference_allows(rule: &Rule, url: &str) -> bool {
         host,
         port,
         path_prefix,
+        path: exact,
     } = &rule.destination
     else {
         return false;
@@ -912,6 +913,9 @@ fn reference_allows(rule: &Rule, url: &str) -> bool {
         .split_once(':')
         .map_or((authority, default_port), |(h, p)| (h, p.parse().unwrap()));
     if written_host != host.as_str() || written_port != port.unwrap_or(default_port) {
+        return false;
+    }
+    if exact.as_deref().is_some_and(|exact| exact != path) {
         return false;
     }
     match path_prefix {
@@ -1386,4 +1390,49 @@ fn a_required_form_field_cannot_be_put_in_the_query_by_another_value() {
     // A query parameter the rule does not require still goes with it.
     let policies = fields(&[("client_secret", shared), ("mine", injects("api_key"))]);
     assert!(request.decide(&policies).is_ok());
+}
+
+// One endpoint.
+
+#[test]
+fn a_path_below_the_revocation_endpoint_is_not_sent_the_client_secret() {
+    // A shared client secret's token rule checks the grant and seals the response,
+    // and its revocation rule does neither. A path below the revocation endpoint that
+    // the provider reads as the token endpoint would get the secret without them.
+    let policies = builder::oauth_client(&OAuthConfig {
+        token_url: "https://auth.example.com/oauth/token".to_owned(),
+        revoke_url: Some("https://auth.example.com/oauth/revoke".to_owned()),
+        api_base: "https://api.example.com/v2/".to_owned(),
+        auth: OAuthClientAuth::ClientSecretPost,
+        response_format: ResponseFormat::Json,
+        shared: true,
+        access_token_claims: Vec::new(),
+    })
+    .unwrap();
+    let presented = fields(&[("client_secret", policies.client)]);
+    for url in [
+        "https://auth.example.com/oauth/revoke/..;/token",
+        "https://auth.example.com/oauth/revoke/..;x=1/token",
+        "https://auth.example.com/oauth/revoke/%u002e%u002e/token",
+        "https://auth.example.com/oauth/revoke/%252e%252e/token",
+        "https://auth.example.com/oauth/revoke/token",
+        "https://auth.example.com/oauth/token/",
+    ] {
+        let mut request = Request::to(url);
+        request.method = Method::Post;
+        assert_eq!(
+            refusal(request.decide(&presented)),
+            ErrorCode::PolicyDenied,
+            "{url}"
+        );
+    }
+    for (url, rule) in [
+        ("https://auth.example.com/oauth/token", 0),
+        ("https://auth.example.com/oauth/revoke", 1),
+    ] {
+        let mut request = Request::to(url);
+        request.method = Method::Post;
+        let plan = request.decide(&presented).unwrap();
+        assert_eq!(plan.rules[&field("client_secret")], rule, "{url}");
+    }
 }

@@ -457,6 +457,28 @@ fn accepts_ordinary_path_prefixes() {
 }
 
 #[test]
+fn a_destination_may_be_one_path_and_then_has_no_prefix() {
+    let exact = |path: &str| json!({ "scheme": "https", "host": "api.example.com", "path": path });
+    let policy = with_destination(exact("/oauth/token")).unwrap();
+    assert!(matches!(
+        &policy.rules[0].destination,
+        Destination::Http { path: Some(path), path_prefix: None, .. } if path == "/oauth/token"
+    ));
+    // It is written back as it was read.
+    let again = Policy::from_json(&policy.canonical_json().unwrap()).unwrap();
+    assert_eq!(again, policy);
+
+    let mut both = exact("/oauth/token");
+    both["path_prefix"] = json!("/oauth/");
+    with_destination(both).unwrap_err();
+    // A path is held to what a prefix is.
+    for path in ["oauth", "", "/a/../b", "/a%2fb", "/a//b", "/a?x=1", "/a b"] {
+        assert!(with_destination(exact(path)).is_err(), "{path:?}");
+    }
+    postgres(|d| d["path"] = json!("/a")).unwrap_err();
+}
+
+#[test]
 fn refuses_port_zero() {
     with_destination(json!({ "scheme": "https", "host": "a.example.com", "port": 0 })).unwrap_err();
     postgres(|d| d["port"] = json!(0)).unwrap_err();
@@ -470,6 +492,7 @@ fn the_port_defaults_by_scheme() {
         host: host.clone(),
         port,
         path_prefix: None,
+        path: None,
     };
     assert_eq!(destination(Scheme::Https, None).effective_port(), 443);
     assert_eq!(destination(Scheme::Http, None).effective_port(), 80);

@@ -109,6 +109,7 @@ impl Target {
             scheme,
             host,
             path_prefix,
+            path,
             ..
         } = destination
         else {
@@ -117,6 +118,7 @@ impl Target {
         *scheme == self.scheme
             && host.matches(&self.host)
             && destination.effective_port() == self.port
+            && path.as_deref().is_none_or(|path| self.path == path)
             && path_prefix
                 .as_deref()
                 .is_none_or(|prefix| self.path_is_within(prefix))
@@ -125,11 +127,28 @@ impl Target {
     /// Whether the path is within a prefix, on a segment boundary.
     ///
     /// Under a prefix, an encoded dot or separator is refused, because a provider
-    /// could decode it into a path outside the prefix. Without a prefix any path is
-    /// allowed anyway, so object names containing `%2F` still work.
+    /// could decode it into a path outside the prefix. So is a dot segment with path
+    /// parameters, such as `..;`, which some servers read as `..`, and a `%` that does
+    /// not start an escape, such as `%u002e`, which some decode in a way of their own.
+    /// Without a prefix any path is allowed anyway, so object names containing `%2F`
+    /// still work.
     fn path_is_within(&self, prefix: &str) -> bool {
         let lower = self.path.to_ascii_lowercase();
         if ["%2e", "%2f", "%5c"].iter().any(|e| lower.contains(e)) {
+            return false;
+        }
+        let dot_segment = self.path.split('/').any(|segment| {
+            let name = segment.split_once(';').map_or(segment, |(name, _)| name);
+            matches!(name, "." | "..")
+        });
+        let bytes = self.path.as_bytes();
+        let stray_percent = bytes.iter().enumerate().any(|(index, byte)| {
+            *byte == b'%'
+                && !bytes
+                    .get(index + 1..index + 3)
+                    .is_some_and(|escape| escape.iter().all(u8::is_ascii_hexdigit))
+        });
+        if dot_segment || stray_percent {
             return false;
         }
         if prefix.ends_with('/') {
@@ -207,6 +226,7 @@ mod tests {
             host: Host::new(host).unwrap(),
             port,
             path_prefix: prefix.map(str::to_owned),
+            path: None,
         }
     }
 
@@ -417,6 +437,62 @@ mod tests {
             "https://api.example.com/v2/a%2F..%2Fadmin",
             "https://api.example.com/v2/%2e%2e%2fadmin",
             "https://api.example.com/v2/a%5c..%5cadmin",
+        ] {
+            assert!(!matches(url, &destination), "{url}");
+        }
+    }
+
+    #[test]
+    fn under_a_prefix_a_dot_segment_with_parameters_is_refused() {
+        // Tomcat and others drop `;…` from a segment before they resolve `..`.
+        let destination = api(Some("/oauth/revoke"));
+        for url in [
+            "https://api.example.com/oauth/revoke/..;/token",
+            "https://api.example.com/oauth/revoke/..;x=1/token",
+            "https://api.example.com/oauth/revoke/.;/..;/token",
+            // Not an escape, but IIS once decoded it as one.
+            "https://api.example.com/oauth/revoke/%u002e%u002e/token",
+            "https://api.example.com/oauth/revoke/%",
+            "https://api.example.com/oauth/revoke/%4",
+        ] {
+            assert!(Target::parse(url).is_ok(), "{url}");
+            assert!(!matches(url, &destination), "{url}");
+        }
+        for url in [
+            "https://api.example.com/oauth/revoke/a;b=1/c",
+            "https://api.example.com/oauth/revoke/..a;/c",
+            "https://api.example.com/oauth/revoke/100%25",
+        ] {
+            assert!(matches(url, &destination), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_path_matches_itself_and_nothing_below_it() {
+        let destination = Destination::Http {
+            scheme: Scheme::Https,
+            host: Host::new("api.example.com").unwrap(),
+            port: None,
+            path_prefix: None,
+            path: Some("/oauth/revoke".to_owned()),
+        };
+        assert!(matches(
+            "https://api.example.com/oauth/revoke",
+            &destination
+        ));
+        assert!(matches(
+            "https://api.example.com/oauth/revoke?x=1",
+            &destination
+        ));
+        for url in [
+            "https://api.example.com/oauth/revoke/",
+            "https://api.example.com/oauth/revoke/..;/token",
+            "https://api.example.com/oauth/revoke/token",
+            "https://api.example.com/oauth/revoke;x",
+            "https://api.example.com/oauth/Revoke",
+            "https://api.example.com/oauth/revok%65",
+            "https://api.example.com/oauth//revoke",
+            "https://api.example.com/oauth",
         ] {
             assert!(!matches(url, &destination), "{url}");
         }

@@ -190,9 +190,18 @@ fn required_form(rule: &Rule) -> Result<(), FormatError> {
 fn destination(destination: &Destination) -> Result<(), FormatError> {
     match destination {
         Destination::Http {
-            port, path_prefix, ..
+            port,
+            path_prefix,
+            path,
+            ..
         } => {
             require(*port != Some(0), "port is zero")?;
+            require(
+                path_prefix.is_none() || path.is_none(),
+                "a destination has a path or a path prefix, not both",
+            )?;
+            // A path is held to what a prefix is: it is compared as written.
+            path.as_deref().map_or(Ok(()), self::path_prefix)?;
             path_prefix.as_deref().map_or(Ok(()), self::path_prefix)
         }
         Destination::Postgres {
@@ -453,6 +462,7 @@ fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
                 scheme,
                 host,
                 path_prefix,
+                path,
                 ..
             },
             inject,
@@ -470,8 +480,8 @@ fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
             if matches!(inject, Inject::JwtAssertion { .. }) {
                 // The JWT may go only to this exact endpoint.
                 require(
-                    path_prefix
-                        .as_deref()
+                    path.as_deref()
+                        .or(path_prefix.as_deref())
                         .is_some_and(|path| path.len() > 1 && !path.ends_with('/')),
                     "a JWT rule's path prefix must be the token endpoint's full path",
                 )?;
