@@ -7,11 +7,14 @@
 
 #[cfg(feature = "aws-kms")]
 pub mod aws_kms;
+pub mod civil;
+mod credentials;
 mod files;
 mod https;
 pub mod keyring;
 mod kms;
 pub mod ovh_kms;
+pub mod sigv4;
 pub mod source;
 pub mod wrap;
 
