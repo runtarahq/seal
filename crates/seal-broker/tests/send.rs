@@ -293,6 +293,42 @@ async fn a_content_length_that_disagrees_with_the_body_fails_the_request() {
     assert_eq!(provider.received().last().unwrap().body, smuggled);
 }
 
+/// A sealed part of a credential is in the request too, and is no more the caller's to
+/// read than the secret is.
+#[tokio::test]
+async fn a_sealed_part_a_response_repeats_fails_the_response() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    let password = harness.seal(
+        "password",
+        b"a-password",
+        &plain_policy(
+            &provider,
+            &json!({ "basic": { "username": { "field": "username" } } }),
+        ),
+    );
+    let username = harness.seal(
+        "username",
+        b"SEALED-username",
+        &plain_policy(&provider, &json!({ "companion": {} })),
+    );
+    provider.respond(
+        "/whoami",
+        CannedResponse::ok("application/json", b"{\"user\":\"SEALED-username\"}"),
+    );
+    let response = harness
+        .get(
+            &url(&provider, "/whoami"),
+            &[("password", &password), ("username", &username)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read_body(response).await.unwrap_err().code(),
+        ErrorCode::ResponseUnparseable
+    );
+}
+
 /// The secret goes in the path, as Telegram's bot API has it. The audit record has the
 /// path the caller named, and a header that repeats the secret is not passed on.
 #[tokio::test]

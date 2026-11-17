@@ -212,6 +212,11 @@ pub struct CallerConfig {
     /// Whether it may make and rotate keys.
     #[serde(default)]
     pub admin: bool,
+    /// The keysets an admin caller may make, rotate and list the keys of. Absent means
+    /// every keyset, whatever `keysets` lists: a platform makes keysets that do not
+    /// exist yet. `*` means all.
+    #[serde(default)]
+    pub admin_keysets: Option<Vec<String>>,
     /// Whether it may destroy the keysets it may use, which cannot be undone. Separate
     /// from `admin`, so that a caller that makes keysets cannot also end them.
     #[serde(default)]
@@ -687,7 +692,17 @@ impl Config {
             if caller.keysets.is_empty() && !caller.admin {
                 return Err(invalid(format!("caller {} has no keysets", caller.name)));
             }
-            for keyset in &caller.keysets {
+            if caller.admin_keysets.is_some() && !caller.admin {
+                return Err(invalid(format!(
+                    "caller {} has admin_keysets and is not an admin caller",
+                    caller.name
+                )));
+            }
+            for keyset in caller
+                .keysets
+                .iter()
+                .chain(caller.admin_keysets.iter().flatten())
+            {
                 if keyset != "*" && seal_format::KeysetId::new(keyset.clone()).is_err() {
                     return Err(invalid(format!(
                         "caller {} lists a keyset that is not valid",

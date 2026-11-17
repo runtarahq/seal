@@ -131,6 +131,9 @@ fn keyset(name: &str) -> Result<KeysetId, String> {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
+    // Making keys, wrapping them again and resealing all hold keys or opened secrets,
+    // as the service does: none of them leaves a core file behind.
+    seal::hardening::no_core_dumps()?;
     match cli.command {
         Command::Version => {
             println!("seal {}", env!("CARGO_PKG_VERSION"));

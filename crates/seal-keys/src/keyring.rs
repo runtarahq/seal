@@ -256,7 +256,7 @@ impl Keyring {
             return Err(KeyError::TooManyKeys);
         }
         let newest = existing.iter().map(|key| key.created).max().unwrap_or(0);
-        let created = self.add_key(keyset, newest + 1).await?;
+        let created = self.add_key(keyset, newest.saturating_add(1)).await?;
         // This instance uses the new key at once; others within `max_stale`.
         let _ = self.inner.load(keyset, true).await;
         Ok(created)
@@ -276,6 +276,9 @@ impl Keyring {
     pub async fn destroy(&self, keyset: &KeysetId) -> Result<(), KeyError> {
         let existing = self.inner.fetch(keyset).await?;
         if existing.is_empty() {
+            // Nothing current, but an earlier call that failed part of the way may have
+            // left versions behind: finish that before saying there is nothing.
+            let _ = self.inner.source.delete_keyset(keyset).await;
             return Err(KeyError::UnknownKeyset);
         }
         self.inner.source.delete_keyset(keyset).await?;
@@ -347,6 +350,17 @@ impl Keyring {
             Err(error) => Err(error),
         }
     }
+}
+
+/// The time in a key name that seal made, `k-<created>-<eight hex digits>`. A key named
+/// some other way, by hand, has none.
+fn created_in(kid: &KeyId) -> Option<u64> {
+    let (created, suffix) = kid.as_str().strip_prefix("k-")?.split_once('-')?;
+    let made_here = suffix.len() == 8
+        && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !created.is_empty()
+        && created.bytes().all(|byte| byte.is_ascii_digit());
+    made_here.then(|| created.parse().ok()).flatten()
 }
 
 impl Inner {
@@ -480,6 +494,12 @@ impl Inner {
                 return Err(KeyError::Invalid(
                     "the source returned another keyset's key",
                 ));
+            }
+            // The newest key is the current one, and a key's time is stored beside it,
+            // where whoever holds the source could change it. Its name is authenticated
+            // with the wrapped key, and a name seal made has the time in it.
+            if created_in(&key.kid).is_some_and(|created| created != key.created) {
+                return Err(KeyError::Invalid("a key's time is not the one in its name"));
             }
             let fingerprint = (key.wrap_id.clone(), key.wrapped.clone());
             let reusable = previous

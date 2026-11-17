@@ -268,15 +268,29 @@ async fn scenario(version: u32, mode: Mode) {
             &db.policy("app_user", json!({ "pg_password": {} })),
         )
         .await;
-    let mark = records(&instance);
-    let (client, mut notifications) = session(
-        &instance,
-        db.request("password", &password),
-        "app_user",
-        "app",
-    )
-    .await
-    .unwrap_or_else(|error| panic!("Postgres {version}: {error:?}"));
+    // A server answers a request for TLS a moment before it takes logins, and says so
+    // with `cannot_connect_now` until it does.
+    let started = tokio::time::Instant::now();
+    let (mark, (client, mut notifications)) = loop {
+        let mark = records(&instance);
+        let opened = session(
+            &instance,
+            db.request("password", &password),
+            "app_user",
+            "app",
+        )
+        .await;
+        match opened {
+            Ok(session) => break (mark, session),
+            Err(error)
+                if code(&error) == Some(SqlState::CANNOT_CONNECT_NOW)
+                    && started.elapsed() < Duration::from_secs(30) =>
+            {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(error) => panic!("Postgres {version}: {error:?}"),
+        }
+    };
     client
         .batch_execute("CREATE TABLE t (id int, v text)")
         .await

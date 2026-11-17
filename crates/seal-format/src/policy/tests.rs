@@ -1383,6 +1383,18 @@ fn the_size_limit_includes_definitions() {
     }))
     .unwrap_err();
     parse(&json!({ "rules": [padded(15 * 1024)] })).unwrap();
+    // A value sealed from a response gets a definition's rules with every definition:
+    // here 9 KiB twice, though the policy that names it is within the limit.
+    parse(&json!({
+        "rules": [bearer_rule()],
+        "definitions": { "a": { "rules": [padded(9 * 1024)] } }
+    }))
+    .unwrap_err();
+    parse(&json!({
+        "rules": [bearer_rule()],
+        "definitions": { "a": { "rules": [padded(7 * 1024)] } }
+    }))
+    .unwrap();
 }
 
 #[test]

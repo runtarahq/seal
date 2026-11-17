@@ -108,7 +108,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **A provider that returns a credential in another form.** seal drops a response
   header that repeats a secret it put in the request, and fails a response whose body
   repeats one, passing on none of it. It looks for the secret as it was sealed and as
-  it was written in the request, if that is at least eight bytes. A provider that
+  it was written in the request, for a sealed part that went with it, and for a JWT
+  assertion it signed, each if at least eight bytes. A response in two parts, such as
+  two ranges, each holding half of one, is not caught. A provider that
   returns it encoded some other way, compressed, or escaped inside JSON, still gives it
   to the caller, and one that means to can always do so. Policies should name API
   hosts, not services that reflect requests.
@@ -142,8 +144,13 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   can relay the login and then read or change the session, as with libpq's
   `sslmode=require` and `disable`. The login is SCRAM only in those modes, so the
   password and anything that could stand in for it stay with seal, and a server that
-  does not know the password is not logged in to. Channel binding, where the server
-  offers it, catches an impostor under `"unverified"`. `"plaintext"` also needs the
+  does not know the password is not logged in to. Under `"unverified"` only a rule with
+  `require_channel_binding` catches an impostor: without it, one that presents a
+  certificate with no hash to bind to, such as Ed25519, is logged in to unbound, and can
+  relay the login to the real server. Whoever receives a SCRAM proof can try passwords
+  against it offline, at the cost of the iterations the server asked for, so seal
+  refuses fewer than 4096, and a password for such a rule should be generated, not
+  chosen. `"plaintext"` also needs the
   operator's `honour_plaintext_postgres_rules`. Both are the sealer's choice per value,
   and the default verifies.
 - **A credential whose service the caller names is bounded by its own permissions.**
@@ -275,7 +282,14 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   deleted or it is destroyed.
 - **An older wrapping key that is still configured still opens.** While a wrapping key
   is in `keys.unwrap_also`, taking away the current one does not stop seal reading the
-  keys the older one wrapped.
+  keys the older one wrapped. seal reads any stored key that names it, not only those
+  that existed when it was replaced, so someone who has a leaked older wrapping key and
+  can write to the key source can add a key of their own until it is taken out.
+- **A key's place among its keyset's keys is held by its name.** The newest key is the
+  current one, and a key's time is stored beside it in the key source. A name seal made
+  has the time in it and is authenticated with the wrapped key, so a changed time is
+  refused; a key named by hand has no such check, and whoever holds the source can say
+  when it was made.
 - **A wrapping key in a KMS is revoked within `max_unwrap_age`.** seal asks the KMS
   each time it unwraps a key, so taking away its access, or deleting the service key,
   stops it once the keys it has unwrapped are dropped. OVHcloud credentials are read

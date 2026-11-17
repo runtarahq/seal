@@ -70,7 +70,17 @@ pub(super) fn policy(policy: &Policy) -> Result<(), FormatError> {
     require(
         policy.canonical_json()?.len() <= MAX_POLICY_BYTES,
         "serialised policy is too large",
-    )
+    )?;
+    // A value sealed from a response takes a definition's rules with every definition.
+    // That can be larger than this policy, and would be found out only when a response
+    // came to be sealed, after the provider had acted.
+    for name in policy.definitions.keys() {
+        require(
+            policy.for_response_field(name)?.canonical_json()?.len() <= MAX_POLICY_BYTES,
+            "a response field's policy would be too large",
+        )?;
+    }
+    Ok(())
 }
 
 fn rules(

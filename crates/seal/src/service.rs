@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, stream};
@@ -50,6 +51,7 @@ pub struct Service {
     streams: Arc<Semaphore>,
     per_caller: RateLimiter<String>,
     per_keyset: RateLimiter<KeysetId>,
+    head_timeout: Duration,
     info: ServiceInfo,
 }
 
@@ -64,6 +66,8 @@ pub struct ServiceLimits {
     pub rate_per_keyset: Rate,
     /// How many keysets' rate buckets to keep.
     pub max_tracked_keysets: usize,
+    /// How long a stream may take to send its first message.
+    pub head_timeout: Duration,
 }
 
 impl Service {
@@ -85,8 +89,23 @@ impl Service {
             streams: Arc::new(Semaphore::new(limits.max_concurrent_streams)),
             per_caller: RateLimiter::new(limits.rate_per_caller, 4096),
             per_keyset: RateLimiter::new(limits.rate_per_keyset, limits.max_tracked_keysets),
+            head_timeout: limits.head_timeout,
             info,
         }
+    }
+
+    /// A stream's first message, which must come within the idle timeout. A stream
+    /// holds one of the service's places from when it opens, so one that sends nothing
+    /// would otherwise keep it for as long as its connection lasts.
+    async fn first<T>(&self, inbound: &mut Streaming<T>) -> Result<Option<T>, Status> {
+        tokio::time::timeout(self.head_timeout, inbound.message())
+            .await
+            .map_err(|_| {
+                refusal(
+                    ErrorCode::UpstreamTimeout,
+                    "the stream's first message did not arrive in time",
+                )
+            })?
     }
 
     fn caller<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
@@ -98,26 +117,49 @@ impl Service {
             .ok_or_else(|| refusal(ErrorCode::CallerDenied, "the caller is not known"))
     }
 
+    /// A value counts against the rate of the keyset it was sealed to, as well as the
+    /// request's. A caller names the request's keyset, and for a shared value could name
+    /// a new one each time, so that alone would bound nothing: guesses at a token that
+    /// is checked with `verify` least of all.
+    fn charge_value_keysets<'a>(
+        &self,
+        keyset: &KeysetId,
+        values: impl Iterator<Item = &'a KeysetId>,
+    ) -> Result<(), Status> {
+        let mut charged = std::collections::BTreeSet::new();
+        for value in values {
+            if value != keyset && charged.insert(value) && !self.per_keyset.allow(value) {
+                return Err(refusal(ErrorCode::LimitExceeded, "over the keyset's rate"));
+            }
+        }
+        Ok(())
+    }
+
     /// The caller, if it may make administrative calls. One that may not is refused
     /// with an audit record, within its rate, so that it cannot fill the log.
     fn admin(&self, op: &'static str, request: &Request<KeysetRequest>) -> Result<Caller, Status> {
         let caller = self.caller(request)?;
-        if caller.admin {
-            return Ok(caller);
-        }
+        // Within its rate whether or not it may: an administrative call costs the key
+        // source and the KMS a request each.
         if !self.per_caller.allow(&caller.name) {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
+        let keyset = KeysetId::new(request.get_ref().keyset.clone()).ok();
+        // A name that is no keyset's is refused as malformed by the call itself.
+        let allowed = keyset
+            .as_ref()
+            .map_or(caller.admin, |keyset| caller.may_administer(keyset));
+        if allowed {
+            return Ok(caller);
+        }
         // Only a keyset that is an identifier goes in the record.
-        let keyset = KeysetId::new(request.get_ref().keyset.clone())
-            .map(|keyset| keyset.to_string())
-            .unwrap_or_default();
-        Err(self.denied(
-            op,
-            &caller,
-            &keyset,
-            "administrative calls need an admin caller",
-        ))
+        let keyset = keyset.map(|keyset| keyset.to_string()).unwrap_or_default();
+        let reason = if caller.admin {
+            "this caller does not administer this keyset"
+        } else {
+            "administrative calls need an admin caller"
+        };
+        Err(self.denied(op, &caller, &keyset, reason))
     }
 
     /// Refuses a caller something it is not allowed, and leaves an audit record: what
@@ -581,10 +623,10 @@ impl Seal for Service {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
         let mut inbound = request.into_inner();
-        let head = match inbound.message().await {
-            Ok(Some(SendIn {
+        let head = match self.first(&mut inbound).await? {
+            Some(SendIn {
                 f: Some(send_in::F::Head(head)),
-            })) => head,
+            }) => head,
             _ => return Err(bad("the first message must be the head")),
         };
         let ParsedHead {
@@ -619,6 +661,10 @@ impl Seal for Service {
                 "the caller may not use a value's keyset",
             ));
         }
+        self.charge_value_keysets(
+            &keyset,
+            sealed.values().map(|value| value.envelope.keyset()),
+        )?;
         let send = SendRequest {
             caller: caller.name,
             keyset,
@@ -650,10 +696,10 @@ impl Seal for Service {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
         let mut inbound = request.into_inner();
-        let head = match inbound.message().await {
-            Ok(Some(ConnectIn {
+        let head = match self.first(&mut inbound).await? {
+            Some(ConnectIn {
                 f: Some(connect_in::F::Head(head)),
-            })) => head,
+            }) => head,
             _ => return Err(bad("the first message must be the head")),
         };
         let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
@@ -680,6 +726,10 @@ impl Seal for Service {
                 "the caller may not use a value's keyset",
             ));
         }
+        self.charge_value_keysets(
+            &keyset,
+            sealed.values().map(|value| value.envelope.keyset()),
+        )?;
         let request = ConnectRequest {
             caller: caller.name,
             keyset,
@@ -711,10 +761,10 @@ impl Seal for Service {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
         let mut inbound = request.into_inner();
-        let head = match inbound.message().await {
-            Ok(Some(VerifyIn {
+        let head = match self.first(&mut inbound).await? {
+            Some(VerifyIn {
                 f: Some(verify_in::F::Head(head)),
-            })) => head,
+            }) => head,
             _ => return Err(bad("the first message must be the head")),
         };
         let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
@@ -740,6 +790,7 @@ impl Seal for Service {
                 "the caller may not use a value's keyset",
             ));
         }
+        self.charge_value_keysets(&keyset, std::iter::once(envelope.keyset()))?;
         let value_item = (!head.value_item.is_empty())
             .then(|| ItemId::new(head.value_item).map_err(|_| bad("an item is not valid")))
             .transpose()?;
@@ -796,6 +847,10 @@ impl Seal for Service {
                 "the caller may not use a value's keyset",
             ));
         }
+        self.charge_value_keysets(
+            &keyset,
+            sealed.values().map(|value| value.envelope.keyset()),
+        )?;
         let mut url = self
             .broker
             .presign(seal_broker::PresignRequest {

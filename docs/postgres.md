@@ -163,8 +163,13 @@ read or change what follows.
 
 - With `"unverified"`, seal still requires TLS and does not fall back. A server that
   offers `SCRAM-SHA-256-PLUS` is logged in to with channel binding, which fails if the
-  certificate seal saw is not the server's own; `require_channel_binding` insists on
-  it, and then an impostor is caught even though the certificate was not verified.
+  certificate seal saw is not the server's own. An impostor can avoid that by
+  presenting a certificate with no hash to bind to, so only `require_channel_binding`
+  makes it certain: then an impostor is caught even though the certificate was not
+  verified.
+- A SCRAM challenge that asks for fewer than 4096 iterations is refused, in every mode.
+  The proof seal answers with lets its receiver try passwords offline, and a low count
+  makes each try cheap.
 - With `"plaintext"`, seal sends no `SSLRequest`. The operator must allow it, with
   `honour_plaintext_postgres_rules` under `[network]`, or the session is refused before
   any lookup. Keep it for a server on a network that is already private.

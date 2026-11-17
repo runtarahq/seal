@@ -179,6 +179,9 @@ pub fn unix(
     Ok(Incoming { receiver })
 }
 
+/// How many TLS handshakes may be under way for each connection callers may have.
+const HANDSHAKES_PER_CONNECTION: usize = 4;
+
 /// A failed `accept` is no reason to stop listening: the usual cause is too many open
 /// files, which passes as connections close. The pause keeps the loop from spinning
 /// until then.
@@ -250,6 +253,31 @@ impl ReloadingTls {
     }
 }
 
+/// The service's own TLS key lets whoever has it pass as seal to a caller, and be handed
+/// sealed values and requests. One that everyone on the host can read is refused. One
+/// its group can read is often mounted that way by something else, so seal says so and
+/// goes on.
+fn key_is_private_enough(key: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(key)
+            .map_err(|_| format!("{} cannot be read", key.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o007 != 0 {
+            return Err(format!(
+                "{} can be read by everyone on the host, and it is the service's private key",
+                key.display()
+            ));
+        }
+        if mode & 0o070 != 0 {
+            tracing::warn!("the service's TLS key can be read by its group");
+        }
+    }
+    Ok(())
+}
+
 fn read_all(files: &[PathBuf; 3]) -> io::Result<Vec<u8>> {
     let mut all = Vec::new();
     for file in files {
@@ -265,6 +293,7 @@ fn build_tls(files: &[PathBuf; 3]) -> Result<(rustls::ServerConfig, Vec<u8>), St
     let chain = CertificateDer::pem_file_iter(cert)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(|_| format!("{} is not a PEM certificate chain", cert.display()))?;
+    key_is_private_enough(key)?;
     let key = PrivateKeyDer::from_pem_file(key)
         .map_err(|_| format!("{} is not a PEM private key", key.display()))?;
     let mut roots = rustls::RootCertStore::empty();
@@ -340,6 +369,9 @@ pub async fn tcp(
     let local = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel(16);
     let connections = Arc::new(Semaphore::new(max_connections));
+    let handshakes = Arc::new(Semaphore::new(
+        max_connections.saturating_mul(HANDSHAKES_PER_CONNECTION),
+    ));
     tokio::spawn(async move {
         loop {
             let stream = match listener.accept().await {
@@ -349,8 +381,11 @@ pub async fn tcp(
                     continue;
                 }
             };
-            let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
-                metrics::counter!("seal_connections_refused_total", "reason" => "limit")
+            // A peer that has not shown a certificate yet takes a place among the
+            // handshakes, not among the callers' connections, so strangers who connect
+            // and say nothing cannot keep callers out.
+            let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
+                metrics::counter!("seal_connections_refused_total", "reason" => "handshakes")
                     .increment(1);
                 continue;
             };
@@ -358,6 +393,7 @@ pub async fn tcp(
                 return;
             }
             let (tls, callers, sender) = (tls.current(), Arc::clone(&callers), sender.clone());
+            let connections = Arc::clone(&connections);
             // Handshakes run on their own, so one slow peer cannot hold up the others.
             tokio::spawn(async move {
                 let accepted =
@@ -375,6 +411,12 @@ pub async fn tcp(
                         caller_kind = "certificate",
                         "refused a connection from an unknown caller"
                     );
+                    return;
+                };
+                drop(handshake);
+                let Ok(permit) = connections.try_acquire_owned() else {
+                    metrics::counter!("seal_connections_refused_total", "reason" => "limit")
+                        .increment(1);
                     return;
                 };
                 let _ = sender
@@ -432,8 +474,21 @@ mod tests {
         std::fs::write(&files[0], &server.cert_pem).unwrap();
         std::fs::write(&files[1], &server.key_pem).unwrap();
         std::fs::write(&files[2], &pki.ca_pem).unwrap();
+        let mode = |mode| {
+            std::fs::set_permissions(&files[1], std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(0o600);
         let (config, _) = build_tls(&files).unwrap();
         assert_eq!(config.send_tls13_tickets, 0);
         assert!(!config.session_storage.can_cache());
+
+        // The service's key is private: one everyone can read is refused, and one its
+        // group can read, as a mounted secret often is, only warned of.
+        for others in [0o644, 0o604, 0o606] {
+            mode(others);
+            assert!(build_tls(&files).is_err(), "{others:o}");
+        }
+        mode(0o640);
+        build_tls(&files).unwrap();
     }
 }

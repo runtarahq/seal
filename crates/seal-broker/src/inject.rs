@@ -92,6 +92,17 @@ fn remember(injected: &mut Vec<Zeroizing<Vec<u8>>>, written: &[u8]) {
     }
 }
 
+/// A sealed part of a credential goes into the request beside the secret, so a response
+/// that repeats it is caught as one that repeats the secret is. A plain part is the
+/// caller's own, and nothing to keep from it.
+fn remember_sealed(injected: &mut Vec<Zeroizing<Vec<u8>>>, sources: &Sources<'_>, part: &Part) {
+    if let Part::Field(name) = part
+        && let Some(secret) = sources.secrets.get(name)
+    {
+        secret.expose(|bytes| remember(injected, bytes));
+    }
+}
+
 /// A signature still to be made over the final request.
 #[derive(Debug)]
 pub enum Signing {
@@ -257,6 +268,7 @@ pub fn build_head(
                 secret.expose(|bytes| remember(&mut injected, bytes));
             }
             Inject::Basic { username } => {
+                remember_sealed(&mut injected, sources, username);
                 let username = sources.part(username)?;
                 if username.contains(&b':') {
                     return Err(BrokerError::for_field(
@@ -332,6 +344,14 @@ pub fn build_head(
             Inject::FormField { name } => {
                 form.push((name.clone(), secret.expose(|b| Zeroizing::new(b.to_vec()))));
                 secret.expose(|bytes| remember(&mut injected, bytes));
+                // And as the body has it, which is what a provider that echoes the
+                // request returns. Sized up front, as every buffer with a secret is.
+                let written = secret.expose(|bytes| {
+                    let mut written = Zeroizing::new(String::with_capacity(3 * bytes.len()));
+                    written.extend(form_urlencoded::byte_serialize(bytes));
+                    written
+                });
+                remember(&mut injected, written.as_bytes());
             }
             Inject::JsonField { pointer } => {
                 json.push((
@@ -371,6 +391,8 @@ pub fn build_head(
                     now,
                 };
                 let assertion = secret.expose(|key| jwt::sign(&parts, key))?;
+                // The assertion is good for its lifetime wherever it is presented.
+                remember(&mut injected, assertion.as_bytes());
                 form.push((
                     form_field.clone(),
                     Zeroizing::new(assertion.as_bytes().to_vec()),
@@ -391,6 +413,10 @@ pub fn build_head(
                 allow_unsigned_payload,
                 ..
             } => {
+                remember_sealed(&mut injected, sources, access_key_id);
+                if let Some(token) = session_token {
+                    remember_sealed(&mut injected, sources, token);
+                }
                 let access_key_id = sources.part(access_key_id)?;
                 let session_token = session_token
                     .as_ref()
@@ -417,6 +443,7 @@ pub fn build_head(
             Inject::AzureSharedKey {
                 account, service, ..
             } => {
+                remember_sealed(&mut injected, sources, account);
                 let account = sources.part(account)?;
                 let signer =
                     secret.expose(|key| azure::Signer::new(key, &account, *service, now))?;

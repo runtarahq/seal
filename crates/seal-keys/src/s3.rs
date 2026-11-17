@@ -73,6 +73,9 @@ const PAGE: usize = 1000;
 /// How many pages of versions are deleted before a keyset's deletion gives up.
 const MAX_DELETE_ROUNDS: usize = 64;
 
+/// How many pages of keysets are listed before the listing gives up.
+const MAX_LIST_PAGES: usize = 10_000;
+
 const NAMES: Names = Names {
     url: "the key source endpoint",
     not_https: "the key source endpoint must be plain https",
@@ -446,10 +449,13 @@ impl S3KeySource {
 
     /// Deletes one version of an object, or the object where there are no versions.
     async fn delete(&self, entry: &Entry) -> Result<(), KeyError> {
+        // An object written before a bucket kept versions has the version `null`. It
+        // is named like any other: a delete that names no version would only add a
+        // marker in front of it, and leave the key in the bucket.
         let version = entry
             .version
             .as_deref()
-            .filter(|version| !version.is_empty() && *version != "null");
+            .filter(|version| !version.is_empty());
         let query: Vec<(&str, &str)> = version
             .map(|version| ("versionId", version))
             .into_iter()
@@ -568,6 +574,7 @@ impl KeySource for S3KeySource {
     async fn keysets(&self) -> Result<Vec<KeysetId>, KeyError> {
         let mut keysets = Vec::new();
         let mut next = Vec::new();
+        let mut pages = 0_usize;
         loop {
             let listing = self.list(&self.prefix, Some("/"), PAGE, &next).await?;
             for found in &listing.prefixes {
@@ -580,6 +587,12 @@ impl KeySource for S3KeySource {
             }
             if !listing.truncated {
                 break;
+            }
+            // A store that never finishes, or gives the same page again, is not
+            // followed for ever.
+            pages += 1;
+            if pages >= MAX_LIST_PAGES || listing.next == next {
+                return Err(KeyError::Unavailable);
             }
             next = listing.next;
         }

@@ -59,7 +59,7 @@ configuration file that its group or others can write.
 | Setting | Default | |
 |---|---|---|
 | `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
-| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san` |
+| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san`. seal refuses a `key` that everyone on the host can read, and warns of one its group can read |
 | `reload_interval` | `10s` | How often certificate files are checked |
 | `max_connection_age` | `1h` | How long a TLS connection lasts before the caller must connect, and show its certificate, again |
 
@@ -70,7 +70,8 @@ configuration file that its group or others can write.
 | `name` | The name in audit records |
 | `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
-| `admin` | Whether it may generate keysets, rotate and list public keys. Default `false` |
+| `admin` | Whether it may generate keysets, rotate and list public keys. Default `false`. It holds for every keyset, whatever `keysets` lists: `keysets` says which a caller may use, and a platform that makes a keyset for each new tenant could not list one that does not exist yet. So an admin caller can add keys to any keyset, within its rate, though it reads no private key and can destroy nothing |
+| `admin_keysets` | The keysets an admin caller may generate, rotate and list the keys of, where that should not be every one: the names, or `*`. Absent means every keyset. Only for a caller with `admin` |
 | `destroy_keysets` | Whether it may [destroy](#destroying-a-keyset) the keysets it may use, which cannot be undone. Separate from `admin`. Default `false` |
 
 A `cert_subject` is the certificate's whole subject, attribute by attribute and in the
@@ -91,7 +92,7 @@ asked for. A certificate that matches two configured callers is refused.
 |---|---|---|
 | `source` | | `{ dir = "…" }`: the directory that holds the wrapped keys, as `<dir>/<keyset>/<kid>.json`. Or `{ s3 = { … } }`, a bucket that several instances share: see [keys in a bucket](#keys-in-a-bucket) |
 | `wrap` | | The wrapping key that new keys are wrapped with. `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }` or `{ aws_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
-| `unwrap_also` | `[]` | Older wrapping keys, each written as `wrap` is. They only unwrap what they wrapped, while the wrapping key is replaced: see [rotating the wrapping key](#rotating-the-wrapping-key) |
+| `unwrap_also` | `[]` | Older wrapping keys, each written as `wrap` is. They wrap nothing new, and unwrap any stored key that names them, while the wrapping key is replaced. Take one out as soon as `seal rewrap` is done, and at once if it may have leaked: while it is listed, whoever has it and can write to the key source can add a key of their own: see [rotating the wrapping key](#rotating-the-wrapping-key) |
 | `idle_evict` | `15m` | A keyset unused this long is dropped from memory |
 | `refresh_interval` | `60s` | How often a loaded keyset is fetched again |
 | `max_stale` | `5m` | A keyset not fetched successfully this long is dropped |
@@ -134,7 +135,7 @@ least twice `max_keys_per_keyset`.
 | `limits.buffered_total_timeout` | `60s` | For a request holding a capped buffer |
 | `limits.max_stream_duration` | none | An optional total deadline for streams |
 | `limits.rate_per_caller` | `1000/s` | |
-| `limits.rate_per_keyset` | `200/s` | |
+| `limits.rate_per_keyset` | `200/s` | Counted against the request's keyset and against the keyset each presented value was sealed to |
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
 | `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |

@@ -87,6 +87,20 @@ fn failed(sqlstate: &str, detail: &'static str) -> LoginFailed {
 /// `invalid_authorization_specification`.
 const AUTH_SPEC: &str = "28000";
 
+/// The fewest SCRAM iterations a server may ask for: Postgres's own default, and the
+/// least RFC 7677 allows.
+const MIN_SCRAM_ITERATIONS: u32 = 4096;
+
+/// The iteration count in a server's first SCRAM message, `r=…,s=…,i=…`.
+fn scram_iterations(server_first: &[u8]) -> Option<u32> {
+    std::str::from_utf8(server_first)
+        .ok()?
+        .split(',')
+        .find_map(|attribute| attribute.strip_prefix("i="))?
+        .parse()
+        .ok()
+}
+
 fn protocol(detail: &'static str) -> LoginFailed {
     LoginFailed {
         error: BrokerError::new(ErrorCode::UpstreamReset, detail),
@@ -111,7 +125,12 @@ pub async fn login<S: AsyncRead + AsyncWrite + Unpin>(
     loop {
         let message = read(server).await?;
         match message.tag {
-            b'v' => before_ok.extend_from_slice(&wire::message(b'v', &message.body)),
+            // A server says once which protocol version it speaks. More would be held
+            // here for the caller, with no end to how many.
+            b'v' if before_ok.is_empty() => {
+                before_ok.extend_from_slice(&wire::message(b'v', &message.body));
+            }
+            b'v' => return Err(protocol("the server negotiated the protocol twice")),
             // A notice during a login says nothing the caller needs.
             b'N' => {}
             b'E' => {
@@ -299,6 +318,14 @@ async fn scram<S: AsyncRead + AsyncWrite + Unpin>(
     .await?;
 
     let message = expect_sasl(server, 11).await?;
+    // The proof sent next lets whoever receives it try passwords offline, at the cost
+    // of this many rounds each. A server that asks for few is making that cheap.
+    if !scram_iterations(&message).is_some_and(|count| count >= MIN_SCRAM_ITERATIONS) {
+        return Err(failed(
+            AUTH_SPEC,
+            "the server's SCRAM challenge asks for too few iterations",
+        ));
+    }
     exchange
         .update(&message)
         .map_err(|_| failed(AUTH_SPEC, "the server's SCRAM challenge is not valid"))?;

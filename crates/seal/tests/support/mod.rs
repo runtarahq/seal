@@ -641,6 +641,12 @@ pub fn write_tls(setup: &Setup, server: &Issued) -> (PathBuf, PathBuf, PathBuf) 
     let ca = setup.dir.path().join(format!("clients-{suffix}.crt"));
     std::fs::write(&cert, &server.cert_pem).unwrap();
     std::fs::write(&key, &server.key_pem).unwrap();
+    // seal refuses a service key that everyone on the host can read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     std::fs::write(&ca, &setup.pki.ca_pem).unwrap();
     (cert, key, ca)
 }
