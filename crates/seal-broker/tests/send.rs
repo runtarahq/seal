@@ -617,11 +617,10 @@ async fn acceptance_a_malformed_request_causes_no_traffic_at_all() {
 }
 
 #[tokio::test]
-async fn acceptance_a_disallowed_destination_method_or_path_causes_no_dns_or_connection() {
+async fn acceptance_a_disallowed_destination_or_path_causes_no_dns_or_connection() {
     let provider = MockProvider::plain().await;
     let harness = Harness::new();
     let mut limited = plain_rule(&provider, &bearer());
-    limited["methods"] = json!(["GET"]);
     limited["destination"]["path_prefix"] = json!("/allowed/");
     let token = harness.seal("token", b"x", &rule_policy(&limited));
     let port = provider.port();
@@ -630,7 +629,6 @@ async fn acceptance_a_disallowed_destination_method_or_path_causes_no_dns_or_con
         (Method::GET, format!("http://evil.test:{port}/allowed/x")),
         (Method::GET, format!("http://{HOST}:1/allowed/x")),
         (Method::GET, format!("http://{HOST}:{port}/other/x")),
-        (Method::POST, format!("http://{HOST}:{port}/allowed/x")),
     ] {
         let mut send = request(&target, &[("token", &token)]);
         send.method = method;
@@ -641,7 +639,7 @@ async fn acceptance_a_disallowed_destination_method_or_path_causes_no_dns_or_con
     assert_eq!(harness.connects(), 0);
     assert_eq!(
         harness.key_fetches(),
-        4,
+        3,
         "opening needs the key, which is allowed"
     );
     assert_eq!(provider.connections(), 0);

@@ -802,7 +802,7 @@ fn a_sigv4_region_or_service_is_fixed_or_named_by_a_plain_field() {
 }
 
 #[test]
-fn a_named_scope_allows_valid_values_among_those_listed() {
+fn a_named_scope_allows_any_value_written_as_aws_writes_them() {
     let scope = |allowed: &[&str]| NamedScope {
         field: FieldName::new("aws_service").unwrap(),
         allowed: allowed.iter().map(|value| (*value).to_owned()).collect(),
@@ -823,9 +823,11 @@ fn a_named_scope_allows_valid_values_among_those_listed() {
         assert!(!any.allows(value), "{value:?}");
     }
     assert!(!any.allows(&"a".repeat(257)));
+    // A list a value was sealed with is still read, and holds nothing: which services
+    // a credential works with is for its own permissions.
     let some = scope(&["sqs", "sns"]);
-    assert!(some.allows("sqs") && some.allows("sns"));
-    assert!(!some.allows("s3") && !some.allows("sq") && !some.allows("SQS"));
+    assert!(some.allows("sqs") && some.allows("s3"));
+    assert!(!some.allows("SQS"));
 }
 
 #[test]

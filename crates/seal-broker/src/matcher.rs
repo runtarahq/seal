@@ -82,6 +82,9 @@ pub struct RequestHead<'a> {
     pub header_names: &'a [&'a str],
     /// The names of the plain fields the caller supplies.
     pub plain: &'a BTreeSet<FieldName>,
+    /// Whether a presigned URL is asked for, not a request. A URL is a copy the caller
+    /// keeps, so there a rule's `methods` say which kinds it may have.
+    pub presign: bool,
 }
 
 /// Decides whether a request may use these values.
@@ -220,11 +223,14 @@ pub fn decide(
 fn rule_matches(rule: &Rule, head: &RequestHead<'_>) -> bool {
     match head.endpoint {
         Endpoint::Http(target) => {
+            // Which methods a credential may be used with is for its own permissions.
+            // A rule's list bounds only the presigned URLs it hands out.
             target.matches(&rule.destination)
-                && rule
-                    .methods
-                    .as_ref()
-                    .is_none_or(|methods| methods.contains(&head.method))
+                && (!head.presign
+                    || rule
+                        .methods
+                        .as_ref()
+                        .is_none_or(|methods| methods.contains(&head.method)))
                 && signs_only_for_its_exact_endpoint(rule, target)
         }
         Endpoint::Postgres { host, port } => matches!(

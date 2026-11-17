@@ -43,6 +43,7 @@ struct Request {
     method: Method,
     headers: Vec<&'static str>,
     plain: BTreeSet<FieldName>,
+    presign: bool,
 }
 
 impl Request {
@@ -52,6 +53,7 @@ impl Request {
             method: Method::Get,
             headers: Vec::new(),
             plain: BTreeSet::new(),
+            presign: false,
         }
     }
 
@@ -63,6 +65,7 @@ impl Request {
                 method: self.method,
                 header_names: &self.headers,
                 plain: &self.plain,
+                presign: self.presign,
             },
         )
     }
@@ -113,14 +116,20 @@ fn another_destination_is_refused() {
 }
 
 #[test]
-fn a_method_the_rule_does_not_list_is_refused() {
+fn a_rules_methods_bound_presigned_urls_and_not_requests() {
     let mut limited = rule(&json!({ "header": { "name": "A", "format": "{}" } }));
     limited["methods"] = json!(["GET"]);
     let policies = fields(&[("token", policy(&json!({ "rules": [limited] })))]);
     let mut request = Request::to(API);
     assert!(request.decide(&policies).is_ok());
+    // What a credential may do is for its own permissions.
     request.method = Method::Post;
+    assert!(request.decide(&policies).is_ok());
+    // A URL is a copy the caller keeps, so there the list holds.
+    request.presign = true;
     assert_eq!(refusal(request.decide(&policies)), ErrorCode::PolicyDenied);
+    request.method = Method::Get;
+    assert!(request.decide(&policies).is_ok());
 }
 
 #[test]
@@ -128,7 +137,7 @@ fn the_first_matching_rule_is_used() {
     let wide = rule(&json!({ "header": { "name": "First", "format": "{}" } }));
     let later = rule(&json!({ "header": { "name": "Second", "format": "{}" } }));
     let mut limited = rule(&json!({ "header": { "name": "Limited", "format": "{}" } }));
-    limited["methods"] = json!(["POST"]);
+    limited["destination"]["path_prefix"] = json!("/elsewhere/");
     let policies = fields(&[("token", policy(&json!({ "rules": [limited, wide, later] })))]);
     let plan = Request::to(API).decide(&policies).unwrap();
     assert_eq!(plan.injections[0].rule_index, 1);
@@ -880,7 +889,7 @@ fn random_rule() -> impl Strategy<Value = Rule> {
 }
 
 /// Simple, slow and obviously correct, working from the written strings only.
-fn reference_allows(rule: &Rule, url: &str, method: Method) -> bool {
+fn reference_allows(rule: &Rule, url: &str) -> bool {
     let Destination::Http {
         scheme,
         host,
@@ -903,13 +912,6 @@ fn reference_allows(rule: &Rule, url: &str, method: Method) -> bool {
         .split_once(':')
         .map_or((authority, default_port), |(h, p)| (h, p.parse().unwrap()));
     if written_host != host.as_str() || written_port != port.unwrap_or(default_port) {
-        return false;
-    }
-    if rule
-        .methods
-        .as_ref()
-        .is_some_and(|methods| !methods.contains(&method))
-    {
         return false;
     }
     match path_prefix {
@@ -952,9 +954,9 @@ proptest! {
         let plain = BTreeSet::new();
         let result = decide(
             &BTreeMap::from([(field("token"), policy)]),
-            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain },
+            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain, presign: false },
         );
-        prop_assert_eq!(result.is_ok(), reference_allows(&rule, &url, method), "{}", url);
+        prop_assert_eq!(result.is_ok(), reference_allows(&rule, &url), "{}", url);
     }
 
     /// Whatever it accepts really is within the rule.
@@ -974,7 +976,7 @@ proptest! {
         let plain = BTreeSet::new();
         let accepted = decide(
             &BTreeMap::from([(field("token"), policy)]),
-            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain },
+            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain, presign: false },
         ).is_ok();
         if accepted {
             let Destination::Http { host, path_prefix, .. } = &rule.destination else {
@@ -986,9 +988,6 @@ proptest! {
                 prop_assert!(target.path.starts_with(prefix.as_str()));
                 let rest = &target.path[prefix.len()..];
                 prop_assert!(prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/'));
-            }
-            if let Some(methods) = &rule.methods {
-                prop_assert!(methods.contains(&method));
             }
         }
     }
@@ -1006,7 +1005,7 @@ proptest! {
         let (first, second) = (wrap(first), wrap(second));
         prop_assume!(first.validate().is_ok() && second.validate().is_ok());
         let plain = BTreeSet::new();
-        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain };
+        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain, presign: false };
         let alone = decide(&BTreeMap::from([(field("a"), first.clone())]), &head).is_ok();
         let together = decide(&BTreeMap::from([(field("a"), first), (field("b"), second)]), &head).is_ok();
         prop_assert!(alone || !together);
@@ -1025,7 +1024,7 @@ proptest! {
         prop_assume!(attacker.validate().is_ok());
         let target = Target::parse(API).unwrap();
         let plain = BTreeSet::new();
-        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain };
+        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain, presign: false };
         if let Ok(plan) = decide(&BTreeMap::from([(field("a"), attacker), (field("b"), genuine)]), &head) {
             prop_assert!(plan.response.is_some());
         }
@@ -1131,6 +1130,7 @@ fn pg_head<'a>(port: u16, plain: &'a BTreeSet<FieldName>) -> RequestHead<'a> {
         method: Method::Get,
         header_names: &[],
         plain,
+        presign: false,
     }
 }
 

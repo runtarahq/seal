@@ -145,7 +145,9 @@ pub struct Definition {
 pub struct Rule {
     /// Where the secret may go.
     pub destination: Destination,
-    /// The HTTP methods allowed; any method if absent. HTTP only.
+    /// The methods a presigned URL may be for, which a rule that allows presigning
+    /// must list. Requests seal sends are not held to it: what a credential may do is
+    /// for its own permissions. HTTP only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub methods: Option<Vec<Method>>,
     /// How the secret is attached. The caller never places it.
@@ -717,18 +719,18 @@ impl From<&str> for AwsScope {
 pub struct NamedScope {
     /// The plain field that names it, which the rule must list in `plain`.
     pub field: FieldName,
-    /// The values the caller may name; any valid one if empty.
+    /// No longer used: which regions and services a credential works with is for its
+    /// own permissions. Accepted so that a value sealed with it still opens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed: Vec<String>,
 }
 
 impl NamedScope {
-    /// Whether the caller may name this value: one written as AWS writes regions and
-    /// services, and among those allowed if the policy lists any.
+    /// Whether the caller may name this value: any written as AWS writes regions and
+    /// services.
     #[must_use]
     pub fn allows(&self, value: &str) -> bool {
         validate::is_aws_scope(value)
-            && (self.allowed.is_empty() || self.allowed.iter().any(|allowed| allowed == value))
     }
 }
 

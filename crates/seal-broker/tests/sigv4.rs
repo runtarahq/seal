@@ -683,14 +683,10 @@ async fn a_request_names_the_region_and_service_it_is_signed_for() {
 }
 
 #[tokio::test]
-async fn a_region_or_service_that_is_missing_malformed_or_not_allowed_is_refused_before_dns() {
+async fn a_region_or_service_that_is_missing_or_malformed_is_refused_before_dns() {
     let provider = MockProvider::plain().await;
     let harness = Harness::new();
     let any = named(&provider, json!({ "field": "aws_service" }));
-    let listed = named(
-        &provider,
-        json!({ "field": "aws_service", "allowed": ["sqs", "sns"] }),
-    );
 
     for (policy, plain) in [
         // Not named at all.
@@ -718,15 +714,6 @@ async fn a_region_or_service_that_is_missing_malformed_or_not_allowed_is_refused
             &any,
             vec![("aws_region", "us-east-1"), ("aws_service", "sqs\n")],
         ),
-        // Not among those the rule lists.
-        (
-            &any,
-            vec![("aws_region", "ap-south-1"), ("aws_service", "sqs")],
-        ),
-        (
-            &listed,
-            vec![("aws_region", "us-east-1"), ("aws_service", "s3")],
-        ),
     ] {
         let error = harness
             .broker
@@ -739,11 +726,12 @@ async fn a_region_or_service_that_is_missing_malformed_or_not_allowed_is_refused
     assert_eq!((harness.lookups(), harness.connects()), (0, 0));
     assert!(provider.received().is_empty());
 
-    // What the rule lists is signed for.
-    let plain = [("aws_region", "us-east-1"), ("aws_service", "sns")];
+    // Any region and service is signed for, whatever list the value was sealed with:
+    // which ones the credential works with is for its own permissions.
+    let plain = [("aws_region", "ap-south-1"), ("aws_service", "s3")];
     harness
         .broker
-        .send(naming(&harness, &provider, &listed, &plain))
+        .send(naming(&harness, &provider, &any, &plain))
         .await
         .unwrap();
 }

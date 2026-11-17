@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use super::{
     AwsScope, AzureService, Definition, Destination, HmacHash, Host, Inject, JwtAlg, JwtAudience,
-    JwtClaims, JwtHeader, Method, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme,
+    JwtClaims, JwtHeader, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme,
     SealResponse, SealedField, Verify,
 };
 use crate::error::FormatError;
@@ -209,7 +209,6 @@ pub fn registered_webhook_token(
             name: token_field.to_owned(),
         },
     );
-    rule.methods = Some(vec![Method::Post]);
     rule.allow_injected_path = Some(path_prefix.to_owned());
     rule.require_form = BTreeMap::from([(url_field.to_owned(), vec![webhook_url.to_owned()])]);
     finish(Policy {
@@ -806,7 +805,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
-            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path_prefix":"/setWebhook"},"methods":["POST"],"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
+            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path_prefix":"/setWebhook"},"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
         );
         assert!(!policy.shared);
         // It goes with the value `path_secret` makes for the same prefix.

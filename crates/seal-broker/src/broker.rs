@@ -388,6 +388,7 @@ impl Broker {
                 method: seal_format::policy::Method::Get,
                 header_names: &[],
                 plain: &names,
+                presign: false,
             },
         )?;
         record.rules = plan.rules.values().copied().collect();
@@ -545,6 +546,7 @@ impl Broker {
                 method,
                 header_names: &[],
                 plain: &names,
+                presign: true,
             },
         )?;
         audit.update(|record| record.rules = plan.rules.values().copied().collect());
@@ -805,6 +807,7 @@ impl Broker {
                 method: policy_method,
                 header_names: &header_names,
                 plain: &names,
+                presign: false,
             },
         )?;
         audit.update(|record| record.rules = plan.rules.values().copied().collect());
