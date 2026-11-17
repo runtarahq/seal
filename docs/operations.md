@@ -35,7 +35,17 @@ socket is group-readable, so add the application's user to seal's group.
 Use the [container image](../deploy/container/Dockerfile) or the binary, with the
 [configuration](../deploy/config/separate-machine.toml). The image is published as
 `ghcr.io/runtarahq/seal` for amd64 and arm64: a release is tagged with its version, such
-as `0.1.0`, and `latest`; `main` follows the main branch. Callers present a client
+as `0.1.0`, and `latest`; `main` follows the main branch. Those tags move. Every image
+also has the tag `sha-<commit>`, which does not, and a signed statement that the CI
+workflow of this repository built it from that commit. Deploy an image by its digest, and
+check the statement first:
+
+```sh
+gh attestation verify oci://ghcr.io/runtarahq/seal:sha-<commit> --repo runtarahq/seal
+docker pull ghcr.io/runtarahq/seal@sha256:<the digest it printed>
+```
+
+Callers present a client
 certificate from the CA in `listen.tls.client_ca`, and are identified by its subject.
 Certificates are short-lived: seal checks its certificate files every
 `listen.reload_interval` and swaps them in. A change that does not load is logged and
