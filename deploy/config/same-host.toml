@@ -36,7 +36,7 @@ lock_memory = "best_effort"             # off | best_effort | required
 [network]
 deny_cidrs = []
 allow_private_cidrs = []
-honour_private_rules = false
+private_rule_cidrs = []
 honour_plaintext_postgres_rules = false
 
 [pools]

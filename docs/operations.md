@@ -112,9 +112,17 @@ least twice `max_keys_per_keyset`.
 |---|---|---|
 | `deny_cidrs` | `[]` | Always refused |
 | `allow_private_cidrs` | `[]` | Allowed whatever their class |
-| `honour_private_rules` | `false` | Whether a rule's `allow_private_destination` has any effect |
+| `private_rule_cidrs` | `[]` | The internal ranges a rule's `allow_private_destination` may reach. Empty, the option has no effect |
 | `honour_plaintext_postgres_rules` | `false` | Whether a Postgres rule whose `tls` is `"plaintext"` may connect with no TLS. Otherwise such a session is refused |
 | `extra_ca_files` | `[]` | CAs to trust toward providers, besides the public roots |
+
+Anyone with a keyset's public key can seal a value whose rule names any host and sets
+`allow_private_destination`, and a caller can present it. So an internal range in
+`private_rule_cidrs` or `allow_private_cidrs` is one every caller can send requests to
+and read the answers from, with or without a credential of yours. Name the narrowest
+ranges that hold the services credentials are sealed for, such as one database subnet,
+and not seal's own host, management networks or anything that trusts a request for
+coming from inside. `deny_cidrs` wins over both.
 
 ### `[pools]`, `[limits]`, `[audit]`, `[metrics]`
 

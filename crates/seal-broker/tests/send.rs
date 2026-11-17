@@ -778,12 +778,12 @@ async fn a_private_address_in_an_ip_literal_is_refused_with_no_dns() {
 #[tokio::test]
 async fn a_rule_can_allow_a_private_address_only_where_configuration_honours_it() {
     let provider = MockProvider::plain().await;
-    let send = |honour: bool| {
+    let send = |ranges: &'static [&'static str]| {
         let provider = &provider;
         async move {
             let harness = Harness::with(Options {
                 network: NetworkPolicy {
-                    honour_private_rules: honour,
+                    private_rule_cidrs: ranges.iter().map(|r| r.parse().unwrap()).collect(),
                     ..NetworkPolicy::default()
                 },
                 ..Options::default()
@@ -794,11 +794,18 @@ async fn a_rule_can_allow_a_private_address_only_where_configuration_honours_it(
             let result = harness
                 .get(&url(provider, "/echo"), &[("token", &token)])
                 .await;
-            result.map(|_| ()).map_err(|error| error.code())
+            let connects = harness.connects();
+            result.map(|_| ()).map_err(|error| (error.code(), connects))
         }
     };
-    assert_eq!(send(false).await, Err(ErrorCode::DestinationRefused));
-    assert_eq!(send(true).await, Ok(()));
+    assert_eq!(send(&[]).await, Err((ErrorCode::DestinationRefused, 0)));
+    // Anyone can seal such a rule, so it reaches only the ranges the operator named:
+    // another internal range is no more open than before.
+    assert_eq!(
+        send(&["10.20.0.0/16", "192.168.0.0/16"]).await,
+        Err((ErrorCode::DestinationRefused, 0))
+    );
+    assert_eq!(send(&["10.20.0.0/16", "127.0.0.0/8"]).await, Ok(()));
 }
 
 #[tokio::test]

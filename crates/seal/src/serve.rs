@@ -196,7 +196,7 @@ pub fn broker_config(config: &Config) -> Result<BrokerConfig, String> {
         network: NetworkPolicy {
             deny_cidrs: parse(&config.network.deny_cidrs)?,
             allow_private_cidrs: parse(&config.network.allow_private_cidrs)?,
-            honour_private_rules: config.network.honour_private_rules,
+            private_rule_cidrs: parse(&config.network.private_rule_cidrs)?,
             honour_plaintext_postgres_rules: config.network.honour_plaintext_postgres_rules,
         },
         client: ClientConfig {

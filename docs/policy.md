@@ -674,7 +674,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 
 | Option | On | Effect |
 |---|---|---|
-| `allow_private_destination` | A rule | Allows an internal address (loopback, RFC 1918, CGNAT, unique-local), if the deployment's configuration also permits it, and every value presented with this one sets it too. Never a link-local or metadata address |
+| `allow_private_destination` | A rule | Allows an internal address (loopback, RFC 1918, CGNAT, unique-local), if the deployment's configuration names its range in `private_rule_cidrs`, and every value presented with this one sets it too. Never a link-local or metadata address |
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
 | `allow_injected_path` | A rule | Lets the value go with one that [injects into the path](#path) with exactly this prefix. The request is then sent under that prefix, filled by whichever such value is presented |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |

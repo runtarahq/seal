@@ -51,7 +51,7 @@ fn connect_request(server: &MockPostgres, password: &Envelope) -> ConnectRequest
 
 fn harness() -> Harness {
     let mut options = Options::default();
-    options.network.honour_private_rules = true;
+    options.network.private_rule_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
     Harness::with(options)
 }
 
@@ -291,7 +291,7 @@ async fn a_server_that_asks_for_no_password_is_not_logged_in_to() {
 async fn a_server_that_goes_quiet_during_the_login_is_given_up_on() {
     let server = MockPostgres::start_silent(HOST).await;
     let mut options = Options::default();
-    options.network.honour_private_rules = true;
+    options.network.private_rule_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
     options.limits.connect_timeout = std::time::Duration::from_millis(300);
     let harness = Harness::with(options);
     let password = harness.seal("password", b"pw", &password_policy(&server));
@@ -420,7 +420,7 @@ fn tls_policy(server: &MockPostgres, tls: &str) -> Policy {
 
 fn allowing_plaintext() -> Harness {
     let mut options = Options::default();
-    options.network.honour_private_rules = true;
+    options.network.private_rule_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
     options.network.honour_plaintext_postgres_rules = true;
     Harness::with(options)
 }

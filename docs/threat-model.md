@@ -190,6 +190,13 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   public. An account key cannot be scoped at Azure, and seal does not stand in for that:
   a path prefix on a Shared Key rule holds the URL of each request, not what the account
   key can reach. Seal an account key only where the application may have the account.
+- **An internal range the operator opens is open to every caller.** Anyone can seal a
+  value whose rule names an internal host and sets `allow_private_destination`, so a
+  compromised application can send any request to any address in
+  `private_rule_cidrs` or `allow_private_cidrs` and read the answer. Nothing internal
+  is reachable until the operator names a range, and link-local and metadata addresses
+  need `allow_private_cidrs`. The operator names only the ranges that hold services
+  credentials are sealed for.
 - **Sealed values are usable by anyone who can call seal with them,** so applications
   should not expose them in bulk, even though they are not readable.
 - **Anyone with the public key can seal a new value, with any policy.** HPKE's base

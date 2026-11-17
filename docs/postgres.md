@@ -73,7 +73,7 @@ server is verified is the destination's `tls`: a certificate's rule that names i
 ## The login
 
 1. seal connects to an address it has checked, like any destination. A private address
-   needs `allow_private_destination` and an operator who honours it.
+   needs `allow_private_destination` and an operator whose `private_rule_cidrs` hold it.
 2. It sends `SSLRequest`, and refuses a server that does not offer TLS, unless the rule
    says `"plaintext"` ([Servers that cannot be verified](#servers-that-cannot-be-verified)). It reads exactly
    the one-byte answer before the handshake, so nothing unprotected can be slipped in.
