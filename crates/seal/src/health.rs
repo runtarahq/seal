@@ -16,6 +16,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use seal_format::KeysetId;
 use seal_keys::KeySource;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 /// Installs the metrics recorder for the process. Call once.
@@ -123,6 +124,12 @@ fn presents(request: &Request<Incoming>, token: &str) -> bool {
             == 0
 }
 
+/// The most connections to the metrics and health endpoint at once.
+const MAX_CONNECTIONS: usize = 64;
+
+/// How long one such connection may last, whatever it does.
+const CONNECTION_TIME: Duration = Duration::from_secs(30);
+
 /// Serves the endpoints. `/readyz` is ready when the key source answers. With a
 /// token, every request must present it as `Authorization: Bearer`.
 ///
@@ -139,7 +146,20 @@ pub async fn serve(
     let local = listener.local_addr()?;
     let readiness = Arc::new(Readiness::new(source));
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        // Anyone who can reach the address can connect, before any token is read, so
+        // connections are few and short: enough for scrapers and probes.
+        let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(error) => {
+                    crate::listen::accept_failed(&error).await;
+                    continue;
+                }
+            };
+            let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                continue;
+            };
             let (metrics, readiness, token) =
                 (metrics.clone(), Arc::clone(&readiness), token.clone());
             tokio::spawn(async move {
@@ -157,9 +177,10 @@ pub async fn serve(
                         )
                     }
                 });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
+                let connection = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service);
+                let _ = tokio::time::timeout(CONNECTION_TIME, connection).await;
+                drop(permit);
             });
         }
     });

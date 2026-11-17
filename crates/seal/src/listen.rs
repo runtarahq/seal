@@ -140,7 +140,14 @@ pub fn unix(
     let (sender, receiver) = mpsc::channel(16);
     let connections = Arc::new(Semaphore::new(max_connections));
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(error) => {
+                    accept_failed(&error).await;
+                    continue;
+                }
+            };
             let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
                 metrics::counter!("seal_connections_refused_total", "reason" => "limit")
                     .increment(1);
@@ -170,6 +177,15 @@ pub fn unix(
         }
     });
     Ok(Incoming { receiver })
+}
+
+/// A failed `accept` is no reason to stop listening: the usual cause is too many open
+/// files, which passes as connections close. The pause keeps the loop from spinning
+/// until then.
+pub(crate) async fn accept_failed(error: &io::Error) {
+    metrics::counter!("seal_accept_failures_total").increment(1);
+    tracing::warn!(kind = ?error.kind(), "could not accept a connection");
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 /// TLS settings that reload when their files change.
@@ -325,12 +341,22 @@ pub async fn tcp(
     let (sender, receiver) = mpsc::channel(16);
     let connections = Arc::new(Semaphore::new(max_connections));
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(error) => {
+                    accept_failed(&error).await;
+                    continue;
+                }
+            };
             let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
                 metrics::counter!("seal_connections_refused_total", "reason" => "limit")
                     .increment(1);
                 continue;
             };
+            if sender.is_closed() {
+                return;
+            }
             let (tls, callers, sender) = (tls.current(), Arc::clone(&callers), sender.clone());
             // Handshakes run on their own, so one slow peer cannot hold up the others.
             tokio::spawn(async move {

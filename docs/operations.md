@@ -138,7 +138,7 @@ least twice `max_keys_per_keyset`.
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
 | `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |
-| `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz` |
+| `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz`, to at most 64 connections at once, each for at most 30 seconds |
 | `metrics.token_file` | none | A file only seal's user can read, holding a token of at least 16 printable characters. Every request must then send `Authorization: Bearer <token>`. Required unless `metrics.listen` is a loopback address |
 
 A rule in a sealed policy can only tighten a limit, never relax one.
