@@ -10,3 +10,4 @@ pub mod mock_oauth;
 pub mod mock_postgres;
 pub mod mock_provider;
 pub mod pki;
+pub mod tls_proxy;

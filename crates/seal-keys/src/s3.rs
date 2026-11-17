@@ -774,58 +774,27 @@ mod tests {
         assert_eq!(names, ["k-1.json"]);
     }
 
+    use std::sync::Arc;
+
+    use crate::keyring::KeyringConfig;
+    use crate::{FileKeyWrap, KeyWrap, KeyWraps, Keyring, Keys, RewrapOptions, rewrap};
+
     /// RustFS in a container, behind a proxy that gives it the TLS the source insists
     /// on, with a bucket that keeps versions.
     struct Store {
         _container: seal_testkit::containers::Container,
         _directory: tempfile::TempDir,
+        proxy: seal_testkit::tls_proxy::TlsProxy,
         config: S3KeySourceConfig,
-        /// How many connections the proxy has taken: one for each request.
-        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Store {
         async fn start() -> Self {
-            use std::sync::Arc;
-            use std::sync::atomic::{AtomicUsize, Ordering};
-
             use seal_testkit::containers::{RUSTFS_ACCESS_KEY, RUSTFS_SECRET_KEY, rustfs};
-            use seal_testkit::pki::TestPki;
 
             let container = rustfs().await.expect("RustFS starts");
-            let upstream = container.port(9000).unwrap();
-            let pki = TestPki::new("object store CA");
-            let issued = pki.server(&["localhost"]);
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let tls = rustls::ServerConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(vec![issued.cert_der.clone()], issued.key_der())
-                .unwrap();
-            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let requests = Arc::new(AtomicUsize::new(0));
-            let counted = Arc::clone(&requests);
-            tokio::spawn(async move {
-                while let Ok((stream, _)) = listener.accept().await {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                    let acceptor = acceptor.clone();
-                    tokio::spawn(async move {
-                        let Ok(mut caller) = acceptor.accept(stream).await else {
-                            return;
-                        };
-                        let Ok(mut store) =
-                            tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await
-                        else {
-                            return;
-                        };
-                        let _ = tokio::io::copy_bidirectional(&mut caller, &mut store).await;
-                    });
-                }
-            });
-
+            let proxy =
+                seal_testkit::tls_proxy::TlsProxy::start(container.port(9000).unwrap()).await;
             let directory = tempfile::tempdir().unwrap();
             let credentials_file = directory.path().join("credentials");
             std::fs::write(
@@ -845,21 +814,21 @@ mod tests {
                     .unwrap();
             }
             let config = S3KeySourceConfig {
-                endpoint: format!("https://localhost:{port}"),
+                endpoint: format!("https://localhost:{}", proxy.port()),
                 region: "us-east-1".to_owned(),
                 bucket: "seal-keys".to_owned(),
                 prefix: "keys/".to_owned(),
                 credentials_file,
                 profile: "default".to_owned(),
-                ca_pem: Some(pki.ca_pem.clone()),
+                ca_pem: Some(proxy.ca_pem().to_owned()),
                 timeout: Duration::from_secs(20),
-                max_keys: 4,
+                max_keys: 16,
             };
             let store = Self {
                 _container: container,
                 _directory: directory,
+                proxy,
                 config,
-                requests,
             };
             let source = store.source();
             let (status, body) = source
@@ -897,8 +866,9 @@ mod tests {
             S3KeySource::new(&self.config).unwrap()
         }
 
+        /// How many requests the store has had: the source opens a connection for each.
         fn requests(&self) -> usize {
-            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+            self.proxy.connections()
         }
     }
 
@@ -906,70 +876,205 @@ mod tests {
         KeysetId::new(name).unwrap()
     }
 
+    fn file_wrap(byte: u8) -> Arc<dyn KeyWrap> {
+        Arc::new(FileKeyWrap::from_bytes(&[byte; 32]).unwrap())
+    }
+
+    fn keyring(config: &S3KeySourceConfig, wraps: impl Into<KeyWraps>) -> Keyring {
+        Keyring::new(
+            Arc::new(S3KeySource::new(config).unwrap()) as Arc<dyn KeySource>,
+            wraps,
+            KeyringConfig::default(),
+        )
+        .unwrap()
+    }
+
+    /// A key made and wrapped as the keyring does it, and not stored.
+    async fn fresh_key(wrap: &dyn KeyWrap, keyset: &KeysetId, kid: &str) -> WrappedKey {
+        use base64::Engine;
+        let kid = seal_format::id::KeyId::new(kid.to_owned()).unwrap();
+        let (private, public) = seal_format::PrivateKey::generate();
+        let wrapped = wrap.wrap(keyset, &kid, &private).await.unwrap();
+        WrappedKey {
+            keyset: keyset.clone(),
+            kid,
+            public: public.to_base64url(),
+            created: 1,
+            wrap_id: wrap.id().to_owned(),
+            wrapped: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(wrapped),
+        }
+    }
+
+    /// One version of an object, as the store kept it.
+    async fn version_of(source: &S3KeySource, entry: &Entry) -> Option<WrappedKey> {
+        let version = entry.version.as_deref()?;
+        let query: Vec<(&str, &str)> = if version.is_empty() || version == "null" {
+            Vec::new()
+        } else {
+            vec![("versionId", version)]
+        };
+        let (status, body) = source
+            .call(
+                "GET",
+                &source.path(&entry.key),
+                &query,
+                Vec::new(),
+                None,
+                MAX_WRAPPED_KEY_BYTES,
+            )
+            .await
+            .unwrap();
+        // A deletion marker has no content.
+        status
+            .is_success()
+            .then(|| serde_json::from_slice(&body).unwrap())
+    }
+
+    /// Every version the store keeps under a prefix, with what each holds. `None` if
+    /// the store does not list versions.
+    async fn versions(source: &S3KeySource, prefix: &str) -> Option<Vec<(Entry, WrappedKey)>> {
+        let listing = source.list_versions(prefix).await.unwrap()?;
+        let mut kept = Vec::new();
+        for entry in listing.entries {
+            if let Some(key) = version_of(source, &entry).await {
+                kept.push((entry, key));
+            }
+        }
+        Some(kept)
+    }
+
+    /// What every store must do for seal, whichever it is: the one in a container, and
+    /// a real one. `acme` and `beta` are keysets under a prefix nothing else uses. The
+    /// keysets are destroyed at the end.
+    async fn a_store_does_what_seal_needs(
+        config: &S3KeySourceConfig,
+        old: &Arc<dyn KeyWrap>,
+        new: &Arc<dyn KeyWrap>,
+    ) {
+        let (acme, beta) = (keyset("acme"), keyset("beta"));
+        let source = S3KeySource::new(config).unwrap();
+        assert!(
+            source.keysets().await.unwrap().is_empty(),
+            "the prefix is not empty"
+        );
+        assert!(source.wrapped_keys(&acme).await.unwrap().is_empty());
+
+        // One instance makes keys, and another, with nothing but the bucket, has them.
+        let first = keyring(config, Arc::clone(old));
+        let made = first.generate(&acme).await.unwrap();
+        let rotated = first.rotate(&acme).await.unwrap();
+        first.generate(&beta).await.unwrap();
+        let second = keyring(config, Arc::clone(old));
+        assert_eq!(
+            second.current_public_key(&acme).await.unwrap().0,
+            rotated.kid
+        );
+        assert_eq!(second.public_keys(&acme).await.unwrap().len(), 2);
+        assert_eq!(
+            source.keysets().await.unwrap(),
+            [acme.clone(), beta.clone()]
+        );
+
+        // `If-None-Match`: a key is never replaced by storing.
+        assert_eq!(source.store(&made).await, Err(KeyError::AlreadyExists));
+
+        // Stored by several at once, one key is stored once. A store may refuse the
+        // others as already there, or as busy with the same name.
+        let contested = fresh_key(old.as_ref(), &beta, "k-contested").await;
+        let attempts = (0..8).map(|_| {
+            let (source, key) = (S3KeySource::new(config).unwrap(), contested.clone());
+            async move { source.store(&key).await }
+        });
+        let outcomes = futures_util::future::join_all(attempts).await;
+        let stored = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+        assert_eq!(stored, 1, "{outcomes:?}");
+        assert!(
+            outcomes.iter().all(|outcome| matches!(
+                outcome,
+                Ok(()) | Err(KeyError::AlreadyExists | KeyError::Unavailable)
+            )),
+            "{outcomes:?}"
+        );
+        assert!(
+            source
+                .wrapped_keys(&beta)
+                .await
+                .unwrap()
+                .contains(&contested)
+        );
+
+        // `If-Match`: an upload that names another `ETag` than the object's is refused,
+        // and the object is as it was.
+        let changed = WrappedKey {
+            wrapped: "AAAA".to_owned(),
+            ..contested.clone()
+        };
+        let stale = Only::IfStill("\"00000000000000000000000000000000\"".to_owned());
+        assert_eq!(source.put(&changed, &stale).await, Ok(false));
+        assert!(
+            source
+                .wrapped_keys(&beta)
+                .await
+                .unwrap()
+                .contains(&contested)
+        );
+
+        // The wrapping key is replaced in place, while both instances could be running.
+        let both = KeyWraps::new(Arc::clone(new), vec![Arc::clone(old)]).unwrap();
+        let done = rewrap(&source, &both, RewrapOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((done.rewrapped, done.left), (4, 0));
+        assert_eq!(
+            keyring(config, Arc::clone(new))
+                .current_public_key(&acme)
+                .await
+                .unwrap(),
+            second.current_public_key(&acme).await.unwrap()
+        );
+        assert!(
+            keyring(config, Arc::clone(old))
+                .current_public_key(&acme)
+                .await
+                .is_err(),
+            "the old wrapping key alone no longer reads the keys"
+        );
+        let again = rewrap(&source, &both, RewrapOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((again.rewrapped, again.left), (0, 4));
+
+        // A key that is no longer the one that was read is not replaced.
+        assert!(matches!(
+            source.replace(&made, &made).await,
+            Err(KeyError::Invalid(_))
+        ));
+
+        // Destroying a keyset leaves no version of its keys, and no other keyset's.
+        source.delete_keyset(&acme).await.unwrap();
+        if let Some(kept) = versions(&source, &source.keyset_prefix(&acme)).await {
+            assert!(kept.is_empty(), "{} versions were kept", kept.len());
+        }
+        assert!(source.wrapped_keys(&acme).await.unwrap().is_empty());
+        assert_eq!(source.keysets().await.unwrap(), std::slice::from_ref(&beta));
+        assert_eq!(source.wrapped_keys(&beta).await.unwrap().len(), 2);
+        source.delete_keyset(&beta).await.unwrap();
+        assert!(source.keysets().await.unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs Docker"]
     async fn keys_are_stored_shared_wrapped_again_and_destroyed_in_a_bucket() {
-        use std::sync::Arc;
-
-        use crate::keyring::KeyringConfig;
-        use crate::{FileKeyWrap, KeyWrap, KeyWraps, Keyring, Keys, RewrapOptions, rewrap};
-
         let store = Store::start().await;
-        let (old, new): (Arc<dyn KeyWrap>, Arc<dyn KeyWrap>) = (
-            Arc::new(FileKeyWrap::from_bytes(&[7; 32]).unwrap()),
-            Arc::new(FileKeyWrap::from_bytes(&[8; 32]).unwrap()),
-        );
-        let keyring = |wraps: KeyWraps| {
-            Keyring::new(
-                Arc::new(store.source()) as Arc<dyn KeySource>,
-                wraps,
-                KeyringConfig::default(),
-            )
-            .unwrap()
-        };
+        let (old, new) = (file_wrap(7), file_wrap(8));
+        a_store_does_what_seal_needs(&store.config, &old, &new).await;
 
-        // An empty bucket has no keysets, and an unknown keyset no keys.
         let source = store.source();
-        assert!(source.keysets().await.unwrap().is_empty());
-        assert!(
-            source
-                .wrapped_keys(&keyset("acme"))
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let first = keyring(&store.config, Arc::clone(&old));
+        first.generate(&keyset("acme")).await.unwrap();
+        first.rotate(&keyset("acme")).await.unwrap();
 
-        // One instance makes keys, and another, with nothing but the bucket, has them.
-        let first = keyring(Arc::clone(&old).into());
-        let acme = first.generate(&keyset("acme")).await.unwrap();
-        let rotated = first.rotate(&keyset("acme")).await.unwrap();
-        let beta = first.generate(&keyset("beta")).await.unwrap();
-        let second = keyring(Arc::clone(&old).into());
-        assert_eq!(
-            second.current_public_key(&keyset("acme")).await.unwrap().0,
-            rotated.kid
-        );
-        assert_eq!(second.public_keys(&keyset("acme")).await.unwrap().len(), 2);
-        assert_eq!(
-            source.keysets().await.unwrap(),
-            [keyset("acme"), keyset("beta")]
-        );
-
-        // A key is never replaced by storing.
-        assert_eq!(source.store(&acme).await, Err(KeyError::AlreadyExists));
-
-        // A second fetch downloads nothing: one listing, and the keys it remembers.
-        let mut stored = source.wrapped_keys(&keyset("acme")).await.unwrap();
-        let before = store.requests();
-        let mut again = source.wrapped_keys(&keyset("acme")).await.unwrap();
-        assert_eq!(store.requests(), before + 1);
-        stored.sort_by(|a, b| a.kid.cmp(&b.kid));
-        again.sort_by(|a, b| a.kid.cmp(&b.kid));
-        assert_eq!(stored, again);
-        assert_eq!(stored.len(), 2);
-
-        // Something that is not a key, and a key of another keyset under this one's
-        // name, are not keys of it.
+        // Something that is not a key is not a key of the keyset.
         let (status, _) = source
             .call(
                 "PUT",
@@ -984,80 +1089,14 @@ mod tests {
         assert!(status.is_success());
         assert_eq!(source.wrapped_keys(&keyset("acme")).await.unwrap().len(), 2);
 
-        // The wrapping key is replaced in place, while both instances could be running.
-        let both = KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old)]).unwrap();
-        let done = rewrap(&source, &both, RewrapOptions::default())
-            .await
-            .unwrap();
-        assert_eq!((done.rewrapped, done.left), (3, 0));
-        let after = keyring(Arc::clone(&new).into());
-        assert_eq!(
-            after.current_public_key(&keyset("acme")).await.unwrap(),
-            second.current_public_key(&keyset("acme")).await.unwrap()
-        );
-        assert!(
-            keyring(Arc::clone(&old).into())
-                .current_public_key(&keyset("acme"))
-                .await
-                .is_err(),
-            "the old wrapping key alone no longer reads the keys"
-        );
-        let again = rewrap(&source, &both, RewrapOptions::default())
-            .await
-            .unwrap();
-        assert_eq!((again.rewrapped, again.left), (0, 3));
-
-        // A key that is no longer the one that was read is not replaced.
-        let current = source
-            .wrapped_keys(&keyset("beta"))
-            .await
-            .unwrap()
-            .remove(0);
-        assert!(matches!(
-            source.replace(&beta, &current).await,
-            Err(KeyError::Invalid(_))
-        ));
-
-        // Destroying a keyset leaves no version of its keys, and no other keyset's.
-        let versions = |prefix: &'static str| {
-            let source = store.source();
-            async move {
-                source
-                    .list_versions(prefix)
-                    .await
-                    .unwrap()
-                    .expect("the store lists versions")
-                    .entries
-                    .len()
-            }
-        };
-        assert!(
-            versions("keys/acme/").await > 3,
-            "wrapping again left the older versions"
-        );
-        source.delete_keyset(&keyset("acme")).await.unwrap();
-        assert_eq!(versions("keys/acme/").await, 0);
-        assert!(
-            source
-                .wrapped_keys(&keyset("acme"))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(source.keysets().await.unwrap(), [keyset("beta")]);
-        assert_eq!(source.wrapped_keys(&keyset("beta")).await.unwrap().len(), 1);
-
         // More keys than a keyset may have is refused, not cut short.
-        for _ in 0..4 {
-            first.rotate(&keyset("beta")).await.ok();
-        }
         let crowded = S3KeySource::new(&S3KeySourceConfig {
-            max_keys: 2,
+            max_keys: 1,
             ..store.config.clone()
         })
         .unwrap();
         assert_eq!(
-            crowded.wrapped_keys(&keyset("beta")).await,
+            crowded.wrapped_keys(&keyset("acme")).await,
             Err(KeyError::Unavailable)
         );
 
@@ -1068,8 +1107,286 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            wrong.wrapped_keys(&keyset("beta")).await,
+            wrong.wrapped_keys(&keyset("acme")).await,
             Err(KeyError::Unavailable)
         );
+    }
+
+    /// What the operations guide says of the load on the store: one request for each
+    /// loaded keyset every `refresh_interval`, and a download only for a key that is
+    /// new or was wrapped again.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs Docker"]
+    async fn a_refresh_costs_one_request_for_each_loaded_keyset() {
+        const KEYSETS: usize = 5;
+        const REFRESHES: usize = 4;
+        let store = Store::start().await;
+        let (old, new) = (file_wrap(7), file_wrap(8));
+        let names: Vec<KeysetId> = (0..KEYSETS)
+            .map(|index| keyset(&format!("tenant-{index}")))
+            .collect();
+        {
+            let maker = keyring(&store.config, Arc::clone(&old));
+            for name in &names {
+                maker.generate(name).await.unwrap();
+                maker.rotate(name).await.unwrap();
+            }
+        }
+
+        // At the source: a first fetch lists and downloads each key, and a second only
+        // lists.
+        let source = store.source();
+        let before = store.requests();
+        assert_eq!(source.wrapped_keys(&names[0]).await.unwrap().len(), 2);
+        assert_eq!(store.requests() - before, 1 + 2);
+        let before = store.requests();
+        assert_eq!(source.wrapped_keys(&names[0]).await.unwrap().len(), 2);
+        assert_eq!(store.requests() - before, 1);
+
+        // A key wrapped again is downloaded once more, and the others are not.
+        let both = KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old)]).unwrap();
+        let one = source.wrapped_keys(&names[0]).await.unwrap().remove(0);
+        let private = old
+            .unwrap(&one.keyset, &one.kid, &one.wrapped_bytes().unwrap())
+            .await
+            .unwrap();
+        let rewrapped = {
+            use base64::Engine;
+            WrappedKey {
+                wrap_id: new.id().to_owned(),
+                wrapped: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(new.wrap(&one.keyset, &one.kid, &private).await.unwrap()),
+                ..one.clone()
+            }
+        };
+        store.source().replace(&one, &rewrapped).await.unwrap();
+        let before = store.requests();
+        assert!(
+            source
+                .wrapped_keys(&names[0])
+                .await
+                .unwrap()
+                .contains(&rewrapped)
+        );
+        assert_eq!(store.requests() - before, 1 + 1);
+
+        // A running instance, with every keyset loaded and nothing changing.
+        let refresh_interval = Duration::from_secs(1);
+        let running = Keyring::new(
+            Arc::new(store.source()) as Arc<dyn KeySource>,
+            both,
+            KeyringConfig {
+                refresh_interval,
+                max_stale: Duration::from_secs(30),
+                ..KeyringConfig::default()
+            },
+        )
+        .unwrap();
+        for name in &names {
+            running.current_public_key(name).await.unwrap();
+        }
+        // Past the refreshes that the loading itself set off.
+        tokio::time::sleep(refresh_interval * 2).await;
+        let before = store.requests();
+        tokio::time::sleep(refresh_interval * u32::try_from(REFRESHES).unwrap()).await;
+        let requests = store.requests() - before;
+        println!(
+            "{requests} requests for {KEYSETS} loaded keysets over {REFRESHES} refresh intervals"
+        );
+        // At most one for each keyset each interval, and the interval a measurement
+        // starts or ends in: a refresh waits for the maintenance tick after its
+        // interval, so there are fewer. A download for each key would be three times
+        // as many. And the keysets were refreshed, not left alone.
+        let most = KEYSETS * (REFRESHES + 1);
+        assert!(
+            (KEYSETS * REFRESHES / 2..=most).contains(&requests),
+            "{requests} requests, and at most {most} were expected"
+        );
+        for name in &names {
+            running.current_public_key(name).await.unwrap();
+        }
+    }
+
+    /// What the operations guide says of a bucket with versioning when the wrapping
+    /// key is replaced: the earlier versions stay, the old wrapping key still opens
+    /// them, and removing them, as a lifecycle rule does, takes nothing seal needs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs Docker"]
+    async fn earlier_versions_stay_under_the_old_wrapping_key_until_they_are_removed() {
+        let store = Store::start().await;
+        let (old, new) = (file_wrap(7), file_wrap(8));
+        let acme = keyset("acme");
+        let source = store.source();
+        let prefix = source.keyset_prefix(&acme);
+        let maker = keyring(&store.config, Arc::clone(&old));
+        maker.generate(&acme).await.unwrap();
+        maker.rotate(&acme).await.unwrap();
+        let before = keyring(&store.config, Arc::clone(&old))
+            .public_keys(&acme)
+            .await
+            .unwrap();
+
+        let both = KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old)]).unwrap();
+        let done = rewrap(&source, &both, RewrapOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((done.rewrapped, done.left), (2, 0));
+
+        // Each key now has two versions: the one seal reads, under the new wrapping
+        // key, and the earlier one, which the old wrapping key still opens.
+        let kept = versions(&source, &prefix)
+            .await
+            .expect("versions are listed");
+        assert_eq!(kept.len(), 4);
+        let earlier: Vec<_> = kept
+            .iter()
+            .filter(|(_, key)| key.wrap_id == old.id())
+            .collect();
+        assert_eq!(earlier.len(), 2);
+        for (_, key) in &earlier {
+            let private = old
+                .unwrap(&key.keyset, &key.kid, &key.wrapped_bytes().unwrap())
+                .await
+                .expect("the old wrapping key opens the earlier version");
+            assert_eq!(private.public_key().unwrap(), key.public_key().unwrap());
+            assert!(
+                new.unwrap(&key.keyset, &key.kid, &key.wrapped_bytes().unwrap())
+                    .await
+                    .is_err()
+            );
+        }
+        // seal itself reads only the current versions, so it no longer needs the old
+        // wrapping key.
+        assert!(
+            source
+                .wrapped_keys(&acme)
+                .await
+                .unwrap()
+                .iter()
+                .all(|key| key.wrap_id == new.id())
+        );
+        assert_eq!(
+            keyring(&store.config, Arc::clone(&new))
+                .public_keys(&acme)
+                .await
+                .unwrap(),
+            before
+        );
+
+        // The earlier versions are removed, as a lifecycle rule that expires them does.
+        for (entry, _) in &earlier {
+            source.delete(entry).await.unwrap();
+        }
+        let kept = versions(&source, &prefix).await.unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|(_, key)| key.wrap_id == new.id()));
+        // Nothing the old wrapping key opens is left, and seal has what it had.
+        assert_eq!(
+            keyring(&store.config, Arc::clone(&new))
+                .public_keys(&acme)
+                .await
+                .unwrap(),
+            before
+        );
+        let again = rewrap(&source, &both, RewrapOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((again.rewrapped, again.left), (0, 2));
+    }
+
+    fn setting(name: &str) -> Option<String> {
+        std::env::var(name).ok().filter(|value| !value.is_empty())
+    }
+
+    /// The real OVHcloud KMS service key the environment names, as
+    /// `tests/real_kms.rs` reads it.
+    fn real_ovh_kms() -> Option<Arc<dyn KeyWrap>> {
+        use crate::{OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
+        let file = |name: &str| {
+            let path = setting(name)?;
+            Some(std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read {path}")))
+        };
+        let auth = match (
+            file("SEAL_TEST_OVH_KMS_TOKEN_FILE"),
+            file("SEAL_TEST_OVH_KMS_CERT"),
+            file("SEAL_TEST_OVH_KMS_KEY"),
+        ) {
+            (Some(token), _, _) => OvhKmsAuth::Token(Zeroizing::new(token)),
+            (None, Some(cert_pem), Some(key_pem)) => OvhKmsAuth::Certificate {
+                cert_pem,
+                key_pem: Zeroizing::new(key_pem),
+            },
+            _ => return None,
+        };
+        let wrap = OvhKmsWrap::new(&OvhKmsConfig {
+            endpoint: setting("SEAL_TEST_OVH_KMS_ENDPOINT")?,
+            okms_id: setting("SEAL_TEST_OVH_KMS_OKMS_ID")?,
+            key_id: setting("SEAL_TEST_OVH_KMS_KEY_ID")?,
+            auth,
+            ca_pem: None,
+            timeout: Duration::from_secs(10),
+        })
+        .expect("the OVHcloud KMS settings are valid");
+        Some(Arc::new(wrap))
+    }
+
+    /// A real bucket, such as one in OVHcloud Object Storage, with credentials from the
+    /// environment. Skips if they are not there.
+    ///
+    /// - `SEAL_TEST_S3_ENDPOINT`, such as `https://s3.gra.io.cloud.ovh.net`,
+    ///   `SEAL_TEST_S3_REGION` and `SEAL_TEST_S3_BUCKET`. The bucket exists already.
+    /// - `SEAL_TEST_S3_CREDENTIALS_FILE`: a shared credentials file that only its owner
+    ///   can read, and optionally `SEAL_TEST_S3_PROFILE`.
+    ///
+    /// Everything is written under a prefix made for this run, `seal-test-<random>/`,
+    /// and destroyed at the end. With the `SEAL_TEST_OVH_KMS_*` settings of
+    /// `tests/real_kms.rs` as well, the keys are moved from a wrapping key file to that
+    /// service key, as a deployment that starts with a file moves to the KMS.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a bucket in an S3-compatible object store"]
+    async fn a_real_bucket_does_what_seal_needs() {
+        let (Some(endpoint), Some(region), Some(bucket), Some(credentials_file)) = (
+            setting("SEAL_TEST_S3_ENDPOINT"),
+            setting("SEAL_TEST_S3_REGION"),
+            setting("SEAL_TEST_S3_BUCKET"),
+            setting("SEAL_TEST_S3_CREDENTIALS_FILE"),
+        ) else {
+            println!("skipped: SEAL_TEST_S3_* is not set");
+            return;
+        };
+        let mut random = [0_u8; 6];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut random).unwrap();
+        let run: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let config = S3KeySourceConfig {
+            endpoint,
+            region,
+            bucket,
+            prefix: format!("seal-test-{run}/"),
+            credentials_file: PathBuf::from(credentials_file),
+            profile: setting("SEAL_TEST_S3_PROFILE").unwrap_or_else(|| "default".to_owned()),
+            ca_pem: None,
+            timeout: Duration::from_secs(20),
+            max_keys: 16,
+        };
+        let old = file_wrap(7);
+        let new = real_ovh_kms().unwrap_or_else(|| {
+            println!("SEAL_TEST_OVH_KMS_* is not set: wrapping with files only");
+            file_wrap(8)
+        });
+        println!(
+            "under {} in {}, from {} to {}",
+            config.prefix,
+            config.bucket,
+            old.id(),
+            new.id()
+        );
+        a_store_does_what_seal_needs(&config, &old, &new).await;
+
+        // Whether the bucket keeps versions, nothing of this run is left in it.
+        let source = S3KeySource::new(&config).unwrap();
+        match versions(&source, &config.prefix).await {
+            Some(kept) => assert!(kept.is_empty(), "{} versions were left", kept.len()),
+            None => println!("the store does not list versions"),
+        }
     }
 }

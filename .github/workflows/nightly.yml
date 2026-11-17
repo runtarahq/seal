@@ -46,6 +46,29 @@ jobs:
         run: cargo test --package seal --test real_providers --locked -- --ignored google
         env:
           SEAL_TEST_GOOGLE_SA_JSON: ${{ secrets.SEAL_TEST_GOOGLE_SA_JSON }}
+      # Each skips if its secrets are not set.
+      - name: A bucket of keys in OVHcloud Object Storage, and OVHcloud KMS
+        run: |
+          umask 077
+          if [ -n "$S3_CREDENTIALS" ]; then
+            printf '%s\n' "$S3_CREDENTIALS" > "$RUNNER_TEMP/s3-credentials"
+            export SEAL_TEST_S3_CREDENTIALS_FILE="$RUNNER_TEMP/s3-credentials"
+          fi
+          if [ -n "$OVH_KMS_TOKEN" ]; then
+            printf '%s\n' "$OVH_KMS_TOKEN" > "$RUNNER_TEMP/ovh-kms-token"
+            export SEAL_TEST_OVH_KMS_TOKEN_FILE="$RUNNER_TEMP/ovh-kms-token"
+          fi
+          cargo test --package seal-keys --lib --locked s3::tests::a_real_bucket -- --ignored --nocapture
+          cargo test --package seal-keys --test real_kms --locked -- --ignored --nocapture ovh
+        env:
+          SEAL_TEST_S3_ENDPOINT: ${{ secrets.SEAL_TEST_S3_ENDPOINT }}
+          SEAL_TEST_S3_REGION: ${{ secrets.SEAL_TEST_S3_REGION }}
+          SEAL_TEST_S3_BUCKET: ${{ secrets.SEAL_TEST_S3_BUCKET }}
+          S3_CREDENTIALS: ${{ secrets.SEAL_TEST_S3_CREDENTIALS }}
+          SEAL_TEST_OVH_KMS_ENDPOINT: ${{ secrets.SEAL_TEST_OVH_KMS_ENDPOINT }}
+          SEAL_TEST_OVH_KMS_OKMS_ID: ${{ secrets.SEAL_TEST_OVH_KMS_OKMS_ID }}
+          SEAL_TEST_OVH_KMS_KEY_ID: ${{ secrets.SEAL_TEST_OVH_KMS_KEY_ID }}
+          OVH_KMS_TOKEN: ${{ secrets.SEAL_TEST_OVH_KMS_TOKEN }}
       - name: GitHub OAuth app
         if: inputs.github_oauth
         run: cargo test --package seal --test real_providers --locked -- --ignored github

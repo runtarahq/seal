@@ -58,6 +58,8 @@ pub struct Options {
     pub callers: Option<String>,
     /// A shared key directory, for several instances.
     pub keys_dir: Option<PathBuf>,
+    /// The key source, as `keys.source` is written, in place of the key directory.
+    pub source: Option<String>,
     /// Whether to serve metrics.
     pub metrics: bool,
 }
@@ -69,6 +71,7 @@ impl Default for Options {
             keys: String::new(),
             callers: None,
             keys_dir: None,
+            source: None,
             metrics: false,
         }
     }
@@ -80,6 +83,8 @@ pub struct Setup {
     pub keys_dir: PathBuf,
     pub kek: PathBuf,
     pub audit: PathBuf,
+    /// The key source, as `keys.source` is written, if it is not the key directory.
+    pub source: Option<String>,
     pub pki: Arc<TestPki>,
     pub client: Issued,
     pub provider_cas: Vec<PathBuf>,
@@ -90,6 +95,11 @@ pub struct Setup {
 impl Setup {
     /// A key directory with keysets `acme` and `platform`, and a CA for the service and its caller.
     pub async fn new(keys_dir: Option<&Path>) -> Self {
+        Self::with_source(keys_dir, None).await
+    }
+
+    /// The same, with the keysets in another key source than the key directory.
+    pub async fn with_source(keys_dir: Option<&Path>, source: Option<String>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let keys_dir = keys_dir.map_or_else(|| dir.path().join("keys"), Path::to_owned);
         let kek = keys_dir.with_extension("kek");
@@ -97,6 +107,7 @@ impl Setup {
         let client = pki.client("test-app");
         let setup = Self {
             audit: dir.path().join("audit.jsonl"),
+            source,
             dir,
             keys_dir,
             kek,
@@ -157,7 +168,7 @@ impl Setup {
             r#"{listen}
 {callers}
 [keys]
-source = {{ dir = {keys:?} }}
+source = {source}
 wrap = {{ file = {kek:?} }}
 lock_memory = "off"
 {extra_keys}
@@ -173,7 +184,10 @@ extra_ca_files = [{cas}]
 sink = {{ file = {audit:?} }}
 
 {metrics}"#,
-            keys = self.keys_dir.display().to_string(),
+            source = self.source.clone().unwrap_or_else(|| format!(
+                "{{ dir = {:?} }}",
+                self.keys_dir.display().to_string()
+            )),
             kek = self.kek.display().to_string(),
             audit = self.audit.display().to_string(),
             extra_keys = options.keys,
@@ -542,7 +556,7 @@ pub async fn start_trusting(
     options: Options,
     cas: &[rustls::pki_types::CertificateDer<'static>],
 ) -> Instance {
-    let mut setup = Setup::new(options.keys_dir.as_deref()).await;
+    let mut setup = Setup::with_source(options.keys_dir.as_deref(), options.source.clone()).await;
     for ca in cas {
         setup.trust_ca(ca);
     }

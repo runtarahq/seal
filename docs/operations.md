@@ -245,8 +245,8 @@ aws_secret_access_key = …
   still there. [Destroying a keyset](#destroying-a-keyset) deletes every version of
   its keys, so versioning does not keep what was destroyed.
 - The credentials file is read for every request, so a new access key needs no restart.
-- Each instance asks the store once per loaded keyset every `refresh_interval`, and
-  downloads a key only when it is new or was wrapped again. Each request is a new
+- Each instance asks the store at most once per loaded keyset every `refresh_interval`,
+  and downloads a key only when it is new or was wrapped again. Each request is a new
   connection, and may take ten seconds.
 - With several instances, keep the wrapping key in a KMS: a wrapping key file would have
   to be copied to every machine.

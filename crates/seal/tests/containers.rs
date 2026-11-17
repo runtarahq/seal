@@ -537,3 +537,281 @@ container_matrix! {
         assert_eq!(status, StatusCode::FORBIDDEN);
     };
 }
+
+/// A bucket in RustFS for seal's own keys, behind TLS, which the key source insists
+/// on. It keeps versions.
+struct KeyBucket {
+    _container: Container,
+    _proxy: seal_testkit::tls_proxy::TlsProxy,
+    _directory: tempfile::TempDir,
+    /// The key source, as `keys.source` is written.
+    source: String,
+}
+
+/// One signed request to RustFS itself, for what seal never does: making the bucket.
+async fn rustfs_admin(port: u16, method: &str, path: &str, query: &str, body: &[u8]) {
+    use seal_keys::civil::Civil;
+    use seal_keys::sigv4::{
+        ALGORITHM, CanonicalParts, canonical_request, scope, sha256_hex, signature, signing_key,
+        string_to_sign,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let civil = Civil::at(std::time::SystemTime::now());
+    let (amz_date, date_stamp) = (civil.amz_date(), civil.date_stamp());
+    let (host, payload_hash) = (format!("127.0.0.1:{port}"), sha256_hex(body));
+    let headers = [
+        ("host".to_owned(), host.clone()),
+        ("x-amz-content-sha256".to_owned(), payload_hash.clone()),
+        ("x-amz-date".to_owned(), amz_date.clone()),
+    ];
+    let (canonical, signed) = canonical_request(&CanonicalParts {
+        method,
+        uri: path.to_owned(),
+        query: query.to_owned(),
+        headers: &headers,
+        payload_hash: &payload_hash,
+    });
+    let scope = scope(&date_stamp, "us-east-1", "s3");
+    let key = signing_key(RUSTFS_SECRET_KEY.as_bytes(), &date_stamp, "us-east-1", "s3");
+    let signature = signature(&key, &string_to_sign(&amz_date, &scope, &canonical));
+    let target = if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
+    };
+    let head = format!(
+        "{method} {target} HTTP/1.1\r\nHost: {host}\r\nx-amz-content-sha256: {payload_hash}\r\n\
+         x-amz-date: {amz_date}\r\nAuthorization: {ALGORITHM} Credential={RUSTFS_ACCESS_KEY}/{scope}, \
+         SignedHeaders={signed}, Signature={signature}\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_to_end(&mut response),
+    )
+    .await;
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "{method} {target}: {response}"
+    );
+}
+
+async fn key_bucket() -> KeyBucket {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (container, port) = rustfs().await;
+    rustfs_admin(port, "PUT", "/seal-keys", "", b"").await;
+    rustfs_admin(
+        port,
+        "PUT",
+        "/seal-keys",
+        "versioning=",
+        b"<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+          <Status>Enabled</Status></VersioningConfiguration>",
+    )
+    .await;
+    let proxy = seal_testkit::tls_proxy::TlsProxy::start(port).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (credentials, ca) = (
+        directory.path().join("s3-credentials"),
+        directory.path().join("s3-ca.crt"),
+    );
+    std::fs::write(
+        &credentials,
+        format!(
+            "[default]\naws_access_key_id = {RUSTFS_ACCESS_KEY}\n\
+             aws_secret_access_key = {RUSTFS_SECRET_KEY}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&ca, proxy.ca_pem()).unwrap();
+    let source = format!(
+        "{{ s3 = {{ endpoint = \"https://localhost:{}\", region = \"us-east-1\", \
+         bucket = \"seal-keys\", prefix = \"keys/\", credentials_file = {credentials:?}, \
+         ca = {ca:?} }} }}",
+        proxy.port()
+    );
+    KeyBucket {
+        _container: container,
+        _proxy: proxy,
+        _directory: directory,
+        source,
+    }
+}
+
+/// Uses a sealed bearer token through a client, and checks what the provider was sent.
+async fn uses(
+    client: &dyn seal_client::SealClient,
+    provider: &seal_testkit::mock_provider::MockProvider,
+    token: &Envelope,
+    expected: &str,
+) {
+    let response = client
+        .send(get(&url(provider, "/quiet"), &[("token", token)]))
+        .await
+        .unwrap();
+    assert_eq!(response.response.status(), 200);
+    text(response).await;
+    let received = provider.received();
+    assert_eq!(
+        received.last().unwrap().header("authorization"),
+        Some(expected)
+    );
+}
+
+container_matrix! {
+    // seal itself, started as it is deployed, with its keys in a bucket: two instances
+    // that share nothing else, the wrapping key replaced while they run, and a keyset
+    // destroyed.
+    seal_serves_with_its_keys_in_a_bucket => |mode: Mode| async move {
+        use seal_testkit::mock_provider::MockProvider;
+
+        let bucket = key_bucket().await;
+        let provider = MockProvider::plain().await;
+        let options = Options {
+            source: Some(bucket.source.clone()),
+            // So that an instance sees soon what another did.
+            keys: "refresh_interval = \"1s\"\nmax_stale = \"5s\"\n".to_owned(),
+            ..Options::default()
+        };
+        // The setup makes the keysets, which puts their keys in the bucket.
+        let instance = start(mode, options.clone(), &[&provider]).await;
+        let setup = &instance.setup;
+        let keys_dir_is_unused = std::fs::read_dir(&setup.keys_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(keys_dir_is_unused, 0, "the keys are in the bucket, not on disk");
+        let rule = policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }));
+        // An instance uses a credential sealed to a key that is in the bucket.
+        let token = setup.seal("token", b"SEALCANARY-bucket-1", &rule).await;
+        uses(instance.client.as_ref(), &provider, &token, "Bearer SEALCANARY-bucket-1").await;
+
+        // A second instance, with the same bucket and nothing else of the first, uses it
+        // too.
+        let (second, _second_process) = connect(mode, &options, setup).await;
+        uses(second.as_ref(), &provider, &token, "Bearer SEALCANARY-bucket-1").await;
+
+        // A key rotated through one instance is used by the other.
+        let rotated = instance.client.rotate(&keyset()).await.unwrap();
+        assert_eq!(setup.current_key().await.0.as_str(), rotated.kid);
+        let newer = setup.seal("token", b"SEALCANARY-bucket-2", &rule).await;
+        assert_eq!(newer.kid().as_str(), rotated.kid);
+        uses(second.as_ref(), &provider, &newer, "Bearer SEALCANARY-bucket-2").await;
+
+        // The wrapping key is replaced with the command, in the bucket, while instances
+        // run.
+        let run = |arguments: &[&std::ffi::OsStr]| {
+            std::process::Command::new(env!("CARGO_BIN_EXE_seal"))
+                .args(arguments)
+                .output()
+                .unwrap()
+        };
+        let new_kek = setup.dir.path().join("kek-2");
+        assert!(
+            run(&["keygen".as_ref(), "--wrapping-key".as_ref(), new_kek.as_ref()])
+                .status
+                .success()
+        );
+        let text_of = |options: &Options| {
+            setup.config_text(Mode::Unix, options, "[listen]\nunix = \"/unused\"\n")
+        };
+        let old_wrap = format!("wrap = {{ file = {:?} }}", setup.kek.display().to_string());
+        assert!(text_of(&options).contains(&old_wrap));
+        // First, every instance learns the new wrapping key, as the guide says.
+        let knowing = Options {
+            keys: format!(
+                "{}unwrap_also = [{{ file = {new_kek:?} }}]\n",
+                options.keys
+            ),
+            ..options.clone()
+        };
+        let (third, _third_process) = connect(mode, &knowing, setup).await;
+        uses(third.as_ref(), &provider, &newer, "Bearer SEALCANARY-bucket-2").await;
+        // Then the new one is current, and the keys are wrapped again.
+        let both = write_config(
+            setup,
+            &text_of(&options).replace(
+                &old_wrap,
+                &format!(
+                    "wrap = {{ file = {new_kek:?} }}\nunwrap_also = [{{ file = {:?} }}]",
+                    setup.kek.display().to_string()
+                ),
+            ),
+        );
+        let done = run(&["rewrap".as_ref(), "--config".as_ref(), both.as_ref()]);
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        let said = String::from_utf8_lossy(&done.stdout).into_owned();
+        assert!(said.contains("re-wrapped 3 keys and left 0"), "{said}");
+        // The instance that knows both wrapping keys reads the new forms once it has
+        // refreshed, and still uses values sealed before and after the rotation.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        uses(third.as_ref(), &provider, &token, "Bearer SEALCANARY-bucket-1").await;
+        uses(third.as_ref(), &provider, &newer, "Bearer SEALCANARY-bucket-2").await;
+        // With the new wrapping key alone, seal reads every key in the bucket.
+        let only_new = write_config(
+            setup,
+            &text_of(&options).replace(&old_wrap, &format!("wrap = {{ file = {new_kek:?} }}")),
+        );
+        let dry = run(&[
+            "rewrap".as_ref(),
+            "--config".as_ref(),
+            only_new.as_ref(),
+            "--dry-run".as_ref(),
+        ]);
+        assert!(
+            dry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&dry.stderr)
+        );
+        let said = String::from_utf8_lossy(&dry.stdout).into_owned();
+        assert!(said.contains("would re-wrap 0 keys and leave 3"), "{said}");
+
+        // A keyset is destroyed with the command, and nothing of it is left to read.
+        let destroyed = run(&[
+            "destroy-keyset".as_ref(),
+            "--config".as_ref(),
+            only_new.as_ref(),
+            "--keyset".as_ref(),
+            "acme".as_ref(),
+            "--confirm".as_ref(),
+            "acme".as_ref(),
+        ]);
+        assert!(
+            destroyed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&destroyed.stderr)
+        );
+        let config = seal::config::Config::parse(&std::fs::read_to_string(&only_new).unwrap()).unwrap();
+        let (source, _) = seal::serve::key_parts(&config).unwrap();
+        assert!(source.wrapped_keys(&keyset()).await.unwrap().is_empty());
+        assert_eq!(source.keysets().await.unwrap(), [platform()]);
+        // Within `max_stale`, the running instances stop using it.
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        let error = third
+            .send(get(&url(&provider, "/quiet"), &[("token", &newer)]))
+            .await
+            .err()
+            .expect("a destroyed keyset opens nothing");
+        assert!(
+            matches!(
+                error.code,
+                seal_client::ErrorCode::KeysetUnknown | seal_client::ErrorCode::KeysUnavailable
+            ),
+            "{error}"
+        );
+    };
+}
