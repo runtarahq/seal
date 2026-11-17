@@ -137,7 +137,7 @@ coming from inside. `deny_cidrs` wins over both.
 | `limits.buffer_cap` | `1MiB` | The largest buffered body or sealed response |
 | `limits.max_head` | `256KiB` | The largest request head, including envelopes |
 | `limits.max_caller_connections` | `256` | |
-| `limits.idle_timeout` | `60s` | No bytes in either direction |
+| `limits.idle_timeout` | `60s` | No bytes in either direction. Also how long a caller may leave a piece of a streamed response untaken, after which the stream ends and its audit record is written |
 | `limits.connect_timeout` | `10s` | Including DNS and TLS |
 | `limits.first_byte_timeout` | `60s` | Once the request is sent |
 | `limits.buffered_total_timeout` | `60s` | For a request holding a capped buffer |

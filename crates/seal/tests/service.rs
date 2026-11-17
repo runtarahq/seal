@@ -1573,3 +1573,48 @@ fn keygen_makes_wrapping_keys_and_keysets_and_version_prints() {
     let version = run(&["version"]);
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("seal "));
 }
+
+// A caller that stops reading.
+
+#[tokio::test]
+async fn a_caller_that_stops_taking_a_response_does_not_hold_its_audit_record() {
+    // The provider has had the request, and the record of that is written when the
+    // response ends. A caller that takes the head and then nothing would keep it
+    // unwritten, past every deadline, for as long as it held the stream.
+    let provider = MockProvider::plain().await;
+    provider.respond(
+        "/big",
+        CannedResponse::ok("application/octet-stream", &vec![b'a'; 16 * 1024 * 1024]),
+    );
+    let options = Options {
+        limits: "idle_timeout = \"1s\"\nfirst_byte_timeout = \"10s\"\n".to_owned(),
+        ..Options::default()
+    };
+    let instance = start(Mode::Unix, options, &[&provider]).await;
+    let token = instance
+        .setup
+        .seal("token", b"SEALCANARY-token", &token_policy(&provider))
+        .await;
+    let held = instance
+        .client
+        .send(get(&url(&provider, "/big"), &[("token", &token)]))
+        .await
+        .unwrap();
+    eventually(Duration::from_secs(10), || async {
+        instance.setup.audit_records().iter().any(|record| {
+            record["op"] == "send" && record["path"] == "/big" && record["outcome"] == "cancelled"
+        })
+    })
+    .await;
+    // What the caller then reads is cut short, and says so.
+    let error = read(held).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::UpstreamTimeout);
+    // And the place it held is free again.
+    assert!(
+        instance
+            .client
+            .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
+            .await
+            .is_ok()
+    );
+}
