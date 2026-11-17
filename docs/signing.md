@@ -92,7 +92,8 @@ the URL with its signature. seal refuses it unless:
 - the service is `s3`, since a presigned call to another service can be an identity
   rather than a download;
 - the signing value is the only one that would be used, apart from its own parts, such
-  as a session token. A rule with `seal_response` or `require_form` gives no URL.
+  as a session token. A rule with `seal_response` or `require_form` gives no URL. A sealed
+  part goes into the URL only where its own companion rule sets `allow_presign`.
 
 The URL signs the host and nothing of the body (`UNSIGNED-PAYLOAD`), as every presigned
 URL does. The caller's URL may carry only `versionId`, `partNumber`, `uploadId`, `x-id`

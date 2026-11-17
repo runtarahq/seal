@@ -532,7 +532,12 @@ impl<'a> Parts<'a> {
             PartSource::Sealed(field) => {
                 self.companions.insert(
                     field.clone(),
-                    Policy::from_rule(Rule::new(self.destination.clone(), Inject::Companion {})),
+                    Policy::from_rule(Rule::new(
+                        self.destination.clone(),
+                        Inject::Companion {
+                            allow_presign: false,
+                        },
+                    )),
                 );
                 Part::Field(field)
             }
@@ -1016,7 +1021,12 @@ mod tests {
         let policies = basic(API, PartSource::Sealed(name("username"))).unwrap();
         assert!(policies.secret.rules[0].plain.is_empty());
         let companion = &policies.companions[&name("username")].rules[0];
-        assert_eq!(companion.inject, Inject::Companion {});
+        assert_eq!(
+            companion.inject,
+            Inject::Companion {
+                allow_presign: false
+            }
+        );
         assert_eq!(companion.destination, policies.secret.rules[0].destination);
     }
 

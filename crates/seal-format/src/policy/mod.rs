@@ -631,7 +631,12 @@ pub enum Inject {
     },
     /// Not used directly: another field's rule uses this value at this
     /// destination, and it may go nowhere else.
-    Companion {},
+    Companion {
+        /// Lets a rule that presigns write this value into the URL it returns, as a
+        /// session token is. Without it, a value is never part of a presigned URL.
+        #[serde(default, skip_serializing_if = "is_false")]
+        allow_presign: bool,
+    },
 }
 
 /// The longest a presigned URL may last: seven days, which is S3's own limit.

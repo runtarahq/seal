@@ -442,6 +442,11 @@ it may go nowhere else. A sealed session token could have this policy:
 }] }
 ```
 
+A [presigned URL](signing.md#presigned-urls) is returned to the caller with the parts of
+the credential it carries, such as a session token. A sealed companion is written into
+one only with `"companion": { "allow_presign": true }`: the rule that presigns is not
+enough, since anyone can seal one that names this value as its part.
+
 ## Response sealing
 
 A rule with `seal_response` always seals the named fields, and returns the response with

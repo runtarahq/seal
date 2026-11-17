@@ -247,7 +247,7 @@ async fn temporary_credentials_put_their_session_token_in_the_url() {
     });
     let companion = rule_policy(&json!({
         "destination": { "scheme": "https", "host": "s3.eu-west-1.amazonaws.com" },
-        "inject": { "companion": {} }
+        "inject": { "companion": { "allow_presign": true } }
     }));
     let key = harness.seal("secret_key", S3_SECRET, &key_policy);
     let token = harness.seal("session_token", b"SESSION/token+value=", &companion);
@@ -265,6 +265,33 @@ async fn temporary_credentials_put_their_session_token_in_the_url() {
         query_of(&url)["X-Amz-Security-Token"],
         "SESSION/token+value="
     );
+}
+
+#[tokio::test]
+async fn a_companion_that_does_not_allow_presigning_is_never_in_a_url() {
+    // Anyone can seal a rule that presigns and names another value as its session
+    // token. The URL would hand that value to the caller.
+    let harness = Harness::new();
+    let attacker = s3_rule(|rule| {
+        rule["inject"]["aws_sigv4"]["session_token"] = json!({ "field": "session_token" });
+    });
+    let companion = rule_policy(&json!({
+        "destination": { "scheme": "https", "host": "s3.eu-west-1.amazonaws.com" },
+        "inject": { "companion": {} }
+    }));
+    let key = harness.seal("secret_key", b"anything", &attacker);
+    let token = harness.seal("session_token", b"SESSION/token+value=", &companion);
+    let error = harness
+        .broker
+        .presign(presign(
+            &[("secret_key", &key), ("session_token", &token)],
+            Method::GET,
+            OBJECT,
+            60,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::PolicyDenied);
 }
 
 #[tokio::test]

@@ -52,6 +52,9 @@ pub struct Plan {
     /// Form fields the caller's body must have, from every matched rule: each must
     /// appear exactly once with one of the listed values.
     pub form_requirements: Vec<(String, Vec<String>)>,
+    /// Whether every sealed companion in use lets a presigned URL carry it. A URL is
+    /// returned to the caller, and anyone can seal the rule that presigns.
+    pub companions_allow_presign: bool,
 }
 
 /// Where a caller asks to go.
@@ -126,7 +129,7 @@ pub fn decide(
     let mut used_as_companion: BTreeSet<&FieldName> = BTreeSet::new();
     let mut listed_plain: BTreeSet<&FieldName> = BTreeSet::new();
     for (field, (_, rule)) in &matched {
-        if matches!(rule.inject, Inject::Companion {}) {
+        if matches!(rule.inject, Inject::Companion { .. }) {
             continue;
         }
         for part in rule_parts(rule) {
@@ -148,7 +151,7 @@ pub fn decide(
 
     // Step 3: no secrets along for the ride.
     for (field, (_, rule)) in &matched {
-        if matches!(rule.inject, Inject::Companion {}) && !used_as_companion.contains(field) {
+        if matches!(rule.inject, Inject::Companion { .. }) && !used_as_companion.contains(field) {
             return Err(BrokerError::for_field(
                 ErrorCode::PolicyDenied,
                 "no matched rule uses this field",
@@ -169,7 +172,7 @@ pub fn decide(
     // Step 4: conflicts.
     let primaries: Vec<(&FieldName, usize, &Rule)> = matched
         .iter()
-        .filter(|(_, (_, rule))| !matches!(rule.inject, Inject::Companion {}))
+        .filter(|(_, (_, rule))| !matches!(rule.inject, Inject::Companion { .. }))
         .map(|(field, (index, rule))| (*field, *index, *rule))
         .collect();
     if primaries.is_empty() {
@@ -204,6 +207,14 @@ pub fn decide(
             .flat_map(|(_, rule)| rule.require_form.iter())
             .map(|(name, values)| (name.clone(), values.clone()))
             .collect(),
+        companions_allow_presign: matched.values().all(|(_, rule)| {
+            !matches!(
+                rule.inject,
+                Inject::Companion {
+                    allow_presign: false
+                }
+            )
+        }),
     })
 }
 
@@ -288,7 +299,7 @@ fn parts_of(inject: &Inject) -> Vec<&Part> {
         | Inject::JsonField { .. }
         | Inject::JwtAssertion { .. }
         | Inject::PgPassword { .. }
-        | Inject::Companion {} => Vec::new(),
+        | Inject::Companion { .. } => Vec::new(),
     }
 }
 
@@ -316,7 +327,7 @@ fn resolve_part<'a>(
             name,
         )),
         (Some((_, companion)), false) => {
-            if matches!(companion.inject, Inject::Companion {}) {
+            if matches!(companion.inject, Inject::Companion { .. }) {
                 used_as_companion.insert(name);
                 Ok(())
             } else {
@@ -408,7 +419,7 @@ fn placements_of(inject: &Inject) -> Vec<Placement> {
         ],
         Inject::ClientCert { .. } => vec![Placement::Unique("client certificate")],
         Inject::PgPassword { .. } => vec![Placement::Unique("Postgres login")],
-        Inject::Companion {} => Vec::new(),
+        Inject::Companion { .. } => Vec::new(),
     }
 }
 
