@@ -216,8 +216,12 @@ pub struct CallerConfig {
 pub struct KeysConfig {
     /// The key source.
     pub source: SourceConfig,
-    /// The wrapping key.
+    /// The wrapping key that new keys are wrapped with.
     pub wrap: WrapConfig,
+    /// Older wrapping keys, which only unwrap what they wrapped. A wrapping key stays
+    /// here while it is replaced, until `seal rewrap` has wrapped every key again.
+    #[serde(default)]
+    pub unwrap_also: Vec<WrapConfig>,
     /// See the keyring.
     #[serde(default = "defaults::idle_evict")]
     pub idle_evict: Interval,
@@ -581,6 +585,9 @@ impl Config {
             return Err(invalid("there are no callers"));
         }
         self.keys.wrap.check()?;
+        for wrap in &self.keys.unwrap_also {
+            wrap.check()?;
+        }
         let mut names = std::collections::BTreeSet::new();
         let mut uids = std::collections::BTreeSet::new();
         let mut subjects = std::collections::BTreeSet::new();

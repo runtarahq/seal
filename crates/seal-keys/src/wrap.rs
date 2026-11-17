@@ -4,6 +4,7 @@
 //! moved to another keyset or kid does not unwrap.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
@@ -35,6 +36,75 @@ pub trait KeyWrap: Send + Sync {
         kid: &KeyId,
         wrapped: &[u8],
     ) -> Result<PrivateKey, KeyError>;
+}
+
+/// The wrapping key that new keys are wrapped with, and older ones that still unwrap
+/// what they wrapped. This is what lets a wrapping key be replaced while seal runs:
+/// the new one is made current, the old one stays here until every key is wrapped
+/// again, and each stored key is unwrapped by the one its `wrap_id` names.
+#[derive(Clone)]
+pub struct KeyWraps {
+    current: Arc<dyn KeyWrap>,
+    older: Vec<Arc<dyn KeyWrap>>,
+}
+
+impl std::fmt::Debug for KeyWraps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyWraps")
+            .field("current", &self.current.id())
+            .field(
+                "older",
+                &self.older.iter().map(|wrap| wrap.id()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl KeyWraps {
+    /// The current wrapping key, and older ones that only unwrap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyError::Invalid`] if the same wrapping key is there twice.
+    pub fn new(current: Arc<dyn KeyWrap>, older: Vec<Arc<dyn KeyWrap>>) -> Result<Self, KeyError> {
+        for (index, wrap) in older.iter().enumerate() {
+            let repeated = wrap.id() == current.id()
+                || older[..index].iter().any(|other| other.id() == wrap.id());
+            if repeated {
+                return Err(KeyError::Invalid("a wrapping key is named twice"));
+            }
+        }
+        Ok(Self { current, older })
+    }
+
+    /// The wrapping key that new keys are wrapped with.
+    #[must_use]
+    pub fn current(&self) -> &Arc<dyn KeyWrap> {
+        &self.current
+    }
+
+    /// The wrapping key with this id, the current one or an older one.
+    #[must_use]
+    pub fn by_id(&self, id: &str) -> Option<&Arc<dyn KeyWrap>> {
+        std::iter::once(&self.current)
+            .chain(&self.older)
+            .find(|wrap| wrap.id() == id)
+    }
+}
+
+impl From<Arc<dyn KeyWrap>> for KeyWraps {
+    fn from(current: Arc<dyn KeyWrap>) -> Self {
+        Self {
+            current,
+            older: Vec::new(),
+        }
+    }
+}
+
+impl<W: KeyWrap + 'static> From<Arc<W>> for KeyWraps {
+    fn from(current: Arc<W>) -> Self {
+        Self::from(current as Arc<dyn KeyWrap>)
+    }
 }
 
 /// The associated data: `"seal/v1/wrap" || lp(keyset) || lp(kid)`.

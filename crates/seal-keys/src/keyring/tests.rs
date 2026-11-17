@@ -4,7 +4,7 @@ use seal_format::policy::builder;
 use seal_format::{Binding, FieldName, ItemId, seal};
 
 use super::*;
-use crate::wrap::FileKeyWrap;
+use crate::wrap::{FileKeyWrap, KeyWrap};
 
 /// A key source in memory, shared by several keyrings as instances share a store.
 #[derive(Default)]
@@ -648,4 +648,64 @@ fn the_configuration_rules_are_checked() {
         .validate()
         .is_err()
     );
+}
+
+/// Two wrapping keys, as while one replaces the other.
+fn two_wraps() -> (Arc<dyn KeyWrap>, Arc<dyn KeyWrap>) {
+    (
+        Arc::new(FileKeyWrap::from_bytes(&[1; 32]).unwrap()),
+        Arc::new(FileKeyWrap::from_bytes(&[2; 32]).unwrap()),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_older_wrapping_key_still_unwraps_and_new_keys_take_the_current_one() {
+    let source = Arc::new(MemorySource::default());
+    let (old, new) = two_wraps();
+    let before = Keyring::new(
+        Arc::clone(&source) as Arc<dyn KeySource>,
+        Arc::clone(&old),
+        config(),
+    )
+    .unwrap();
+    let first = before.generate(&keyset("acme")).await.unwrap();
+    assert_eq!(first.wrap_id, old.id());
+
+    // The new wrapping key is current, and the old one only unwraps.
+    let wraps = KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old)]).unwrap();
+    let during = Keyring::new(Arc::clone(&source) as Arc<dyn KeySource>, wraps, config()).unwrap();
+    opens(&during, "acme").await.unwrap();
+    let second = during.rotate(&keyset("acme")).await.unwrap();
+    assert_eq!(second.wrap_id, new.id());
+    // A keyset with keys under both opens, to either key.
+    opens(&during, "acme").await.unwrap();
+    assert_eq!(during.public_keys(&keyset("acme")).await.unwrap().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_under_a_wrapping_key_that_is_not_configured_fails_its_keyset() {
+    let source = Arc::new(MemorySource::default());
+    let (old, new) = two_wraps();
+    Keyring::new(
+        Arc::clone(&source) as Arc<dyn KeySource>,
+        Arc::clone(&old),
+        config(),
+    )
+    .unwrap()
+    .generate(&keyset("acme"))
+    .await
+    .unwrap();
+    let after = Keyring::new(Arc::clone(&source) as Arc<dyn KeySource>, new, config()).unwrap();
+    assert_eq!(
+        after.current_public_key(&keyset("acme")).await.map(|_| ()),
+        Err(KeyError::Unavailable)
+    );
+}
+
+#[test]
+fn a_wrapping_key_cannot_be_named_twice() {
+    let (old, new) = two_wraps();
+    assert!(KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&new)]).is_err());
+    assert!(KeyWraps::new(Arc::clone(&new), vec![Arc::clone(&old), Arc::clone(&old)]).is_err());
+    assert!(KeyWraps::new(new, vec![old]).is_ok());
 }

@@ -30,7 +30,7 @@ pub use aws_kms::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
 pub use keyring::{Keyring, KeyringConfig, PublicKeyInfo};
 pub use ovh_kms::{OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
 pub use source::{DirKeySource, KeySource, WrappedKey, rewrap};
-pub use wrap::{FileKeyWrap, KeyWrap};
+pub use wrap::{FileKeyWrap, KeyWrap, KeyWraps};
 
 /// Why keys could not be found or changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
