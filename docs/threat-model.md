@@ -63,8 +63,10 @@ working afterwards.
    startup must name the policy's user and a database it allows.
 6. **Provider's response to the caller.** Response sealing replaces declared fields
    before the response reaches the caller. Everything else passes through.
-7. **seal to key source and KMS.** These supply the private keys. Whoever controls
-   them controls what seal can open. A KMS is reached over TLS, verified against the
+7. **seal to key source and KMS.** These supply the private keys. The key source is a
+   directory on seal's host that holds only wrapped keys: whoever controls it can take
+   keys away from seal or put deleted ones back, and opens nothing without the wrapping
+   key. Whoever controls the KMS controls what seal can open. A KMS is reached over TLS, verified against the
    public roots or a configured CA, and sees each private key it wraps or unwraps. The
    keyset and kid are authenticated with each wrapped key, so the key source cannot
    pass one keyset's key off as another's.

@@ -82,8 +82,8 @@ The first release.
   of its subject alternative names. See [`docs/operations.md`](docs/operations.md).
 - `seal-client` for applications, with `connect_pg` and `cancel_pg` behind its
   `postgres` feature.
-- Key management: keysets, rotation, wrapped keys, key sources, and administrative
-  calls for callers marked `admin`.
+- Key management: keysets, rotation, wrapped keys kept in a directory, and
+  administrative calls for callers marked `admin`.
 - Destroying a keyset when a tenant leaves: `seal destroy-keyset`, or the `DestroyKeyset`
   call for a caller marked `destroy_keysets` that may use the keyset. `admin` does not
   allow it. See [`docs/operations.md`](docs/operations.md#destroying-a-keyset).
@@ -116,7 +116,5 @@ The first release.
   [`docs/dependencies.md`](docs/dependencies.md).
 - The [threat model](docs/threat-model.md) states what seal does and does not protect
   against.
-- A [security audit](docs/security-audit.md) of the source, with what became of each
-  finding.
 
 [0.1.0]: https://github.com/runtarahq/seal/releases/tag/v0.1.0

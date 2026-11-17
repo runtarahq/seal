@@ -14,7 +14,7 @@ dependencies are listed separately.
 |---|---|---|---|
 | `hpke` (`=0.15.1`) | Sealing and opening (RFC 9180: X25519, HKDF-SHA256, AES-256-GCM) | `seal-format` | Pinned exactly: the format depends on its output. RustCrypto, audited. Wipes its X25519 keys |
 | `ring` | Key wrapping (AES-256-GCM), HMAC and SHA-256 for SigV4 (toward providers) and Azure, JWT signatures, TLS's crypto provider | `seal-keys`, `seal-broker`, `seal` | One crypto library for everything but HPKE. Its keys are not wiped from outside |
-| `rustls`, `tokio-rustls` | TLS toward providers, Postgres, key sources and a KMS, and mTLS from callers | `seal-keys`, `seal-broker`, `seal-client`, `seal` | `ring` provider only; no `aws-lc-rs`, so no C build |
+| `rustls`, `tokio-rustls` | TLS toward providers, Postgres and a KMS, and mTLS from callers | `seal-keys`, `seal-broker`, `seal-client`, `seal` | `ring` provider only; no `aws-lc-rs`, so no C build |
 | `webpki-roots` | The public roots providers and a KMS are verified against | `seal-broker`, `seal-keys` | Mozilla's set, compiled in; operators add more |
 | `postgres-protocol` | SCRAM-SHA-256(-PLUS) and the MD5 hash for Postgres logins | `seal-broker` | From the `rust-postgres` project; its SCRAM state is not wiped (threat model) |
 | `zeroize` | Wiping buffers that hold secrets | all but `seal-proto` | |
@@ -41,7 +41,7 @@ image is built with it. With it the binary's tree has about 50 more crates.
 | `serde`, `serde_json` | Envelopes, policies, configuration and JSON bodies; `raw_value` in the broker keeps what seal does not change in a body as it was written. Not `arbitrary_precision`, which Cargo would turn on for every crate an application that embeds seal builds | all |
 | `base64` | Envelope fields, keys, basic auth, Shared Key | `seal-format`, `seal-keys`, `seal-broker` |
 | `url` | Parsing URLs, which seal refuses if parsing would rewrite them | `seal-format`, `seal-keys`, `seal-broker` |
-| `percent-encoding`, `form_urlencoded` | Query, form and SigV4 encoding | `seal-keys`, `seal-broker` |
+| `percent-encoding`, `form_urlencoded` | Query, form and SigV4 encoding | `seal-broker` |
 | `quick-xml` | Sealing XML response fields (STS) | `seal-broker` |
 | `toml` | Configuration | `seal` |
 
@@ -50,7 +50,7 @@ image is built with it. With it the binary's tree has about 50 more crates.
 | Crate | For | Used in |
 |---|---|---|
 | `tokio` | The runtime | all but `seal-format` and `seal-proto` |
-| `hyper`, `hyper-util`, `http`, `http-body`, `http-body-util`, `bytes` | HTTP toward providers, the HTTP key source and a KMS, and the metrics endpoint | `seal-keys`, `seal-broker`, `seal-client`, `seal` |
+| `hyper`, `hyper-util`, `http`, `http-body`, `http-body-util`, `bytes` | HTTP toward providers and a KMS, and the metrics endpoint | `seal-keys`, `seal-broker`, `seal-client`, `seal` |
 | `hickory-resolver` | DNS, so seal sees every address it will connect to and checks each one | `seal-broker` |
 | `tonic`, `tonic-prost`, `prost`, `tower` | The gRPC service and client | `seal-proto`, `seal-client`, `seal` |
 | `futures-util` | Streams of request and response bodies | `seal-client`, `seal` |

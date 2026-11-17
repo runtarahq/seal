@@ -8,7 +8,6 @@
 #[cfg(feature = "aws-kms")]
 pub mod aws_kms;
 mod files;
-pub mod http_source;
 mod https;
 pub mod keyring;
 mod kms;
@@ -28,7 +27,6 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[cfg(feature = "aws-kms")]
 pub use aws_kms::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
-pub use http_source::{HttpKeySource, HttpKeySourceConfig};
 pub use keyring::{Keyring, KeyringConfig, PublicKeyInfo};
 pub use ovh_kms::{OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
 pub use source::{DirKeySource, KeySource, WrappedKey, rewrap};

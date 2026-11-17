@@ -105,9 +105,8 @@ for this request or this long.
 ## Administrative calls
 
 `GenerateKeyset`, `Rotate` and `PublicKeys` need a caller with `admin = true`, and every
-call is audited. `GenerateKeyset` and `Rotate` return the wrapped key, which the
-application stores if seal's key source is read-only. No private key leaves seal
-unwrapped.
+call is audited. `GenerateKeyset` and `Rotate` store the wrapped key in seal's key
+source and return it. No private key leaves seal unwrapped.
 
 `DestroyKeyset` deletes every key of a keyset from the key source, and cannot be undone.
 It needs a caller with `destroy_keysets = true` that may use the keyset; `admin` is

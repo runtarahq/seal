@@ -98,15 +98,9 @@ pub async fn destroy_keyset(config: &Config, keyset: &KeysetId) -> Result<(), St
 ///
 /// # Errors
 ///
-/// Returns a message if the key source is not a directory, the new directory exists,
-/// or a key cannot be re-wrapped. Nothing is said of any key's contents.
+/// Returns a message if the new directory exists, or a key cannot be re-wrapped. Nothing is said of any key's contents.
 pub async fn rewrap(config: &Config, new_wrap: &WrapConfig, out: &Path) -> Result<usize, String> {
-    let SourceConfig::Dir(keys) = &config.keys.source else {
-        return Err(
-            "rewrap needs a directory key source; re-wrap the keys where the key service keeps them"
-                .to_owned(),
-        );
-    };
+    let SourceConfig::Dir(keys) = &config.keys.source;
     if out.exists() {
         return Err(format!("{} must not exist", out.display()));
     }

@@ -18,7 +18,7 @@ keysets = []
 admin = true
 
 [keys]
-source = { http = { url = "https://keys.internal.example/v1", ca = "/etc/seal/keys-ca.crt", cert = "/etc/seal/keys-client.crt", key = "/etc/seal/keys-client.key" } }
+source = { dir = "/var/lib/seal/keys" }
 wrap = { file = "/etc/seal/kek" }
 lock_memory = "required"
 
