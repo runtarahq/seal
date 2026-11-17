@@ -19,6 +19,7 @@ working afterwards.
 | Private keys of keysets | In seal's memory, unwrapped; wrapped in the key source | Open every value sealed to them, including those in backups |
 | Key-wrapping key | A file readable only by seal's user, or a KMS (OVHcloud KMS or AWS KMS), which it never leaves | Unwraps the private keys |
 | KMS credentials | An access certificate's key, a token or an AWS secret access key, in a file readable only by seal's user; in seal's memory for the life of the process (OVHcloud) or of one request (AWS). Or, for AWS, whatever the SDK finds: a key in the environment or the shared files, or a role's temporary credentials from the host, which the SDK keeps in memory until they are about to expire | Ask the KMS to unwrap any private key seal has a wrapped copy of |
+| Key source credentials | An access key for the bucket that holds the wrapped keys, in a file readable only by seal's user; in seal's memory during one request | Read, add and delete wrapped keys: take keys away from seal or put deleted ones back. They open nothing |
 | Opened secrets | In seal's memory, during one `send`, or a Postgres session until its login ends | The credentials themselves |
 | Client-certificate private keys | In a TLS configuration, while its identity exists | Credentials kept beyond one request (see Residual risks) |
 | SigV4 signing keys | In seal's memory, during one request or chunked upload | Sign requests for one day, region and service |
@@ -64,9 +65,9 @@ working afterwards.
 6. **Provider's response to the caller.** Response sealing replaces declared fields
    before the response reaches the caller. Everything else passes through.
 7. **seal to key source and KMS.** These supply the private keys. The key source is a
-   directory on seal's host that holds only wrapped keys: whoever controls it can take
-   keys away from seal or put deleted ones back, and opens nothing without the wrapping
-   key. Whoever controls the KMS controls what seal can open. A KMS is reached over TLS, verified against the
+   directory on seal's host, or a bucket reached over TLS with an access key, and holds
+   only wrapped keys: whoever controls it can take keys away from seal or put deleted
+   ones back, and opens nothing without the wrapping key. Whoever controls the KMS controls what seal can open. A KMS is reached over TLS, verified against the
    public roots or a configured CA, and sees each private key it wraps or unwraps. The
    keyset and kid are authenticated with each wrapped key, so the key source cannot
    pass one keyset's key off as another's.
@@ -257,11 +258,15 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   within `max_stale`, and an unwrapped key is dropped after `max_unwrap_age`.
 - **The wrapping key file is read once.** seal holds it for the life of the process,
   so deleting or replacing the file takes effect only at a restart, and
-  `max_unwrap_age` does not revoke it. A different wrapping key has a different
-  `wrap_id`, and no key wrapped with the old one can then be read, so the wrapping
-  key is rotated by re-wrapping every key with `seal rewrap` and restarting. Copies of
-  the keys wrapped with the old wrapping key stay readable to whoever has it, until
-  they are deleted.
+  `max_unwrap_age` does not revoke it. Each stored key names the wrapping key that
+  wrapped it, and seal reads it only with that one, so the wrapping key is replaced by
+  configuring the new one beside the old and wrapping every key again with
+  `seal rewrap`. Copies of the keys wrapped with the old wrapping key, in backups or in
+  the earlier versions a bucket keeps, stay readable to whoever has it, until they are
+  deleted or it is destroyed.
+- **An older wrapping key that is still configured still opens.** While a wrapping key
+  is in `keys.unwrap_also`, taking away the current one does not stop seal reading the
+  keys the older one wrapped.
 - **A wrapping key in a KMS is revoked within `max_unwrap_age`.** seal asks the KMS
   each time it unwraps a key, so taking away its access, or deleting the service key,
   stops it once the keys it has unwrapped are dropped. OVHcloud credentials are read
