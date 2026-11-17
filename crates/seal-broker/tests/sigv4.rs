@@ -372,8 +372,8 @@ async fn caller_set_amz_headers_are_refused_before_dns() {
     let cases: [(&[&str], &str, &str, ErrorCode); 7] = [
         (
             &["computed"],
-            "x-amz-acl",
-            "public-read",
+            "x-amz-trailer",
+            "x-amz-checksum-crc32",
             ErrorCode::Conflict,
         ),
         (
@@ -589,49 +589,30 @@ async fn ordinary_amz_headers_are_signed_and_sent() {
 }
 
 #[tokio::test]
-async fn a_copy_within_the_prefix_is_signed_and_one_outside_is_refused_before_dns() {
+async fn a_copy_is_signed_whatever_its_source() {
+    // What a copy may read is for the credential's own permissions, not for seal.
     let provider = MockProvider::plain().await;
     let harness = Harness::new();
     let mut rule = aws(&provider, &["computed"], false);
     rule["destination"]["path_prefix"] = json!("/bucket/");
-    rule["inject"]["aws_sigv4"]["allow_headers"] = json!(["x-amz-copy-source"]);
     let policy = policy(&rule);
-    let copy = |source: &'static str| {
+    for (index, source) in ["/bucket/original", "/other/object"]
+        .into_iter()
+        .enumerate()
+    {
         let mut send = put(&harness, &provider, &policy, support::request_body(b""));
         send.url = url(&provider, "/bucket/copy");
         send.headers
             .insert("x-amz-copy-source", HeaderValue::from_static(source));
         send.headers
-            .insert("x-amz-metadata-directive", HeaderValue::from_static("COPY"));
-        send
-    };
-    read_body(harness.broker.send(copy("/bucket/original")).await.unwrap())
-        .await
-        .unwrap();
-    let received = &provider.received()[0];
-    assert_eq!(
-        received.header("x-amz-copy-source"),
-        Some("/bucket/original")
-    );
-    assert_signed_as_the_sdk_would(received, provider.port());
-
-    let lookups = harness.lookups();
-    let error = harness
-        .broker
-        .send(copy("/other/secret"))
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(error.code(), ErrorCode::PolicyDenied);
-    let mut twice = copy("/bucket/original");
-    twice.headers.append(
-        "x-amz-copy-source",
-        HeaderValue::from_static("/other/secret"),
-    );
-    let error = harness.broker.send(twice).await.err().unwrap();
-    assert_eq!(error.code(), ErrorCode::BadRequest);
-    assert_eq!(harness.lookups(), lookups);
-    assert_eq!(provider.received().len(), 1);
+            .insert("x-amz-acl", HeaderValue::from_static("private"));
+        read_body(harness.broker.send(send).await.unwrap())
+            .await
+            .unwrap();
+        let received = &provider.received()[index];
+        assert_eq!(received.header("x-amz-copy-source"), Some(source));
+        assert_signed_as_the_sdk_would(received, provider.port());
+    }
 }
 
 /// A rule whose region and service the caller names with each request.

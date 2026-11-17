@@ -388,7 +388,6 @@ impl Broker {
                 method: seal_format::policy::Method::Get,
                 header_names: &[],
                 plain: &names,
-                copy_source: None,
             },
         )?;
         record.rules = plan.rules.values().copied().collect();
@@ -546,7 +545,6 @@ impl Broker {
                 method,
                 header_names: &[],
                 plain: &names,
-                copy_source: None,
             },
         )?;
         audit.update(|record| record.rules = plan.rules.values().copied().collect());
@@ -800,7 +798,6 @@ impl Broker {
 
         let names: BTreeSet<FieldName> = plain.keys().cloned().collect();
         let header_names: Vec<&str> = headers.keys().map(http::HeaderName::as_str).collect();
-        let copy_source = copy_source(&headers)?;
         let plan = decide(
             &policies,
             &RequestHead {
@@ -808,7 +805,6 @@ impl Broker {
                 method: policy_method,
                 header_names: &header_names,
                 plain: &names,
-                copy_source,
             },
         )?;
         audit.update(|record| record.rules = plan.rules.values().copied().collect());
@@ -1202,26 +1198,6 @@ struct KeyOrigin {
     origin: Vec<u8>,
     /// The sealing key, which the keyring holds while it is loaded.
     sealing_key: std::sync::Weak<seal_keys::LiveKey>,
-}
-
-/// The caller's `x-amz-copy-source`, which must be one printable value.
-fn copy_source(headers: &HeaderMap) -> Result<Option<&str>, BrokerError> {
-    let mut values = headers.get_all("x-amz-copy-source").iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    if values.next().is_some() {
-        return Err(BrokerError::new(
-            ErrorCode::BadRequest,
-            "x-amz-copy-source is repeated",
-        ));
-    }
-    value.to_str().map(Some).map_err(|_| {
-        BrokerError::new(
-            ErrorCode::BadRequest,
-            "x-amz-copy-source is not printable ASCII",
-        )
-    })
 }
 
 /// Each required form field must appear exactly once, with one of its allowed values.

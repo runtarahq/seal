@@ -300,7 +300,7 @@ container_matrix! {
         let (status, _) = status_and_text(&instance, send_request(Method::PUT, &local(port, &format!("/{bucket}-other/secret")), &[("secret_key", &admin)], b"other".to_vec(), &[])).await;
         assert_eq!(status, StatusCode::OK);
 
-        // A secret limited to one bucket, which may copy within it.
+        // A secret sent to one bucket's paths.
         let scoped = policy(&json!({ "rules": [{
             "destination": { "scheme": "http", "host": HOST, "port": port, "path_prefix": format!("/{bucket}/") },
             "allow_plain_http": true,
@@ -308,7 +308,6 @@ container_matrix! {
                 "region": "us-east-1", "service": "s3",
                 "access_key_id": { "literal": RUSTFS_ACCESS_KEY },
                 "payload": ["computed"],
-                "allow_headers": ["x-amz-copy-source"],
             } },
         }] }));
         let secret = instance.setup.seal("secret_key", RUSTFS_SECRET_KEY.as_bytes(), &scoped).await;
@@ -327,12 +326,13 @@ container_matrix! {
         let (status, text) = status_and_text(&instance, get(&object("copy"), &sealed)).await;
         assert_eq!((status, text.as_str()), (StatusCode::OK, "data"));
 
-        // The credential could read the other bucket, but this rule cannot copy from it.
+        // The credential can read the other bucket, so a copy from it works: what a
+        // credential may read is its own permissions' to say, not the rule's path.
         let outside = format!("/{bucket}-other/secret");
-        let refused = instance.client.send(send_request(Method::PUT, &object("stolen"), &sealed, Vec::new(), &[("x-amz-copy-source", &outside)])).await;
-        assert_eq!(refused.err().unwrap().code, seal_client::ErrorCode::PolicyDenied);
-        let (status, _) = status_and_text(&instance, get(&object("stolen"), &sealed)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, text) = status_and_text(&instance, send_request(Method::PUT, &object("elsewhere"), &sealed, Vec::new(), &[("x-amz-copy-source", &outside)])).await;
+        assert_eq!(status, StatusCode::OK, "copy from another bucket: {text}");
+        let (status, text) = status_and_text(&instance, get(&object("elsewhere"), &sealed)).await;
+        assert_eq!((status, text.as_str()), (StatusCode::OK, "other"));
     };
 }
 

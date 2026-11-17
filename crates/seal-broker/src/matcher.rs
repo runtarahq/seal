@@ -82,8 +82,6 @@ pub struct RequestHead<'a> {
     pub header_names: &'a [&'a str],
     /// The names of the plain fields the caller supplies.
     pub plain: &'a BTreeSet<FieldName>,
-    /// The caller's `x-amz-copy-source`, which names an object to read.
-    pub copy_source: Option<&'a str>,
 }
 
 /// Decides whether a request may use these values.
@@ -498,59 +496,37 @@ fn check_placements(
     json_pointers_do_not_overlap(&seen)
 }
 
-/// `X-Amz-*` headers that control signing are SigV4's own, so a caller cannot choose
-/// what is signed or how. A caller may set those that only change what the request
-/// does, and those its rule allows; `X-Amz-Content-SHA256` only where the rule allows
-/// the caller's hash, its form checked when the payload mode is chosen. A copy reads
-/// the object its source names, so the source must be within the rule's destination.
+/// `X-Amz-*` headers that say how a request is signed are SigV4's own, so a caller
+/// cannot choose what is signed or how: `X-Amz-Content-SHA256` only where the rule
+/// allows the caller's hash, its form checked when the payload mode is chosen. Every
+/// other `X-Amz-*` header says what the request does, and that is for the credential's
+/// own permissions.
 fn refuse_amz_headers(
     field: &FieldName,
     rule: &Rule,
     head: &RequestHead<'_>,
 ) -> Result<(), BrokerError> {
-    let Inject::AwsSigv4 {
-        payload,
-        allow_headers,
-        allow_copy_from_any_bucket,
-        ..
-    } = &rule.inject
-    else {
+    let Inject::AwsSigv4 { payload, .. } = &rule.inject else {
         return Ok(());
     };
     let caller_hash = payload.contains(&seal_format::policy::PayloadMode::CallerHash);
     for name in head.header_names {
         let lower = name.to_ascii_lowercase();
-        let allowed = (caller_hash && lower == "x-amz-content-sha256")
-            || seal_format::policy::amz_header_allowed(&lower, allow_headers);
-        if lower.starts_with("x-amz-") && !allowed {
+        let allowed = caller_hash && lower == "x-amz-content-sha256";
+        if seal_format::policy::amz_header_controls_signing(&lower) && !allowed {
             return Err(BrokerError::for_field(
                 ErrorCode::Conflict,
-                "the caller set an X-Amz header this rule does not allow",
+                "the caller set an X-Amz header that says how the request is signed",
                 field,
             ));
         }
-    }
-    if let (Some(source), Endpoint::Http(target)) = (head.copy_source, head.endpoint)
-        && !copy_source_within(
-            source,
-            &rule.destination,
-            target,
-            *allow_copy_from_any_bucket,
-        )
-    {
-        return Err(BrokerError::for_field(
-            ErrorCode::PolicyDenied,
-            "the copy source is not within the rule's destination",
-            field,
-        ));
     }
     Ok(())
 }
 
 /// A header another value injects is signed like one the caller set, and anyone can seal
-/// a value that injects one. So beside a SigV4 rule it is held to what that rule lets
-/// the caller set. A copy source is refused outright: its value is a secret, which
-/// cannot be checked against the rule's destination.
+/// a value that injects one. So beside a SigV4 rule it may not be one that says how the
+/// request is signed, any more than a caller's may.
 fn refuse_injected_amz_headers(
     field: &FieldName,
     rule: &Rule,
@@ -559,23 +535,15 @@ fn refuse_injected_amz_headers(
     let Inject::Header { name, .. } = &rule.inject else {
         return Ok(());
     };
-    let lower = name.to_ascii_lowercase();
-    if !lower.starts_with("x-amz-") {
-        return Ok(());
-    }
-    for (_, _, other) in primaries {
-        let Inject::AwsSigv4 { allow_headers, .. } = &other.inject else {
-            continue;
-        };
-        if lower == "x-amz-copy-source"
-            || !seal_format::policy::amz_header_allowed(&lower, allow_headers)
-        {
-            return Err(BrokerError::for_field(
-                ErrorCode::Conflict,
-                "this field injects an X-Amz header the signing rule does not allow",
-                field,
-            ));
-        }
+    let signs = primaries
+        .iter()
+        .any(|(_, _, other)| matches!(other.inject, Inject::AwsSigv4 { .. }));
+    if signs && seal_format::policy::amz_header_controls_signing(&name.to_ascii_lowercase()) {
+        return Err(BrokerError::for_field(
+            ErrorCode::Conflict,
+            "this field injects an X-Amz header that says how the request is signed",
+            field,
+        ));
     }
     Ok(())
 }
@@ -604,49 +572,6 @@ fn a_certificate_that_changes_verification_is_alone(
         }
     }
     Ok(())
-}
-
-/// Whether `x-amz-copy-source`, `bucket/key` or `/bucket/key` with an optional
-/// `?versionId=`, names an object within the destination. It is read as a path at the
-/// request's own scheme, host and port, with the same refusals as a request's URL.
-/// A destination with no path prefix has nothing to hold the source to, so it allows
-/// one only where the rule says its host is every bucket's (`any_bucket`).
-fn copy_source_within(
-    source: &str,
-    destination: &seal_format::policy::Destination,
-    target: &Target,
-    any_bucket: bool,
-) -> bool {
-    let path = if source.starts_with('/') {
-        source.to_owned()
-    } else {
-        format!("/{source}")
-    };
-    let (path, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
-    let only_a_version =
-        query.is_empty() || (query.starts_with("versionId=") && !query[10..].contains(['&', '=']));
-    let scheme = match target.scheme {
-        seal_format::policy::Scheme::Https => "https",
-        seal_format::policy::Scheme::Http => "http",
-    };
-    let prefix = match destination {
-        seal_format::policy::Destination::Http { path_prefix, .. } => path_prefix.as_deref(),
-        seal_format::policy::Destination::Postgres { .. } => return false,
-    };
-    let held = match prefix {
-        Some(prefix) => prefix.len() > 1,
-        // The source must still name a bucket and a key.
-        None => {
-            any_bucket
-                && path
-                    .strip_prefix('/')
-                    .and_then(|path| path.split_once('/'))
-                    .is_some_and(|(bucket, key)| !bucket.is_empty() && !key.is_empty())
-        }
-    };
-    held && only_a_version
-        && Target::parse(&format!("{scheme}://{}{path}", target.authority()))
-            .is_ok_and(|source| source.matches(destination))
 }
 
 /// `/a` and `/a/b` conflict: one would overwrite or be nested in the other.
