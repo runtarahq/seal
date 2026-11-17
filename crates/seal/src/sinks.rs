@@ -1,6 +1,7 @@
 //! Audit sinks: one JSON line per record, written by seal so a compromised caller
 //! cannot hide its use. A failed write fails the request, unless configured otherwise.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -85,12 +86,22 @@ fn line(record: &AuditRecord) -> Result<Vec<u8>, AuditFailed> {
 pub struct Policy<S> {
     inner: S,
     on_failure: AuditFailure,
+    /// Records that could not be written, to write before anything else is used.
+    missed: Mutex<VecDeque<AuditRecord>>,
 }
+
+/// The most unwritten records kept. Past it the earliest are kept, which are the uses
+/// that went ahead; the rest are refusals made while the sink could not write.
+const MAX_MISSED: usize = 1024;
 
 impl<S> Policy<S> {
     /// Wraps a sink.
     pub fn new(inner: S, on_failure: AuditFailure) -> Self {
-        Self { inner, on_failure }
+        Self {
+            inner,
+            on_failure,
+            missed: Mutex::new(VecDeque::new()),
+        }
     }
 }
 
@@ -104,9 +115,25 @@ impl<S: AuditSink> AuditSink for Policy<S> {
             }
             (Err(error), AuditFailure::FailClosed) => {
                 metrics::counter!("seal_audit_failures_total").increment(1);
+                let mut missed = self.missed.lock().unwrap_or_else(PoisonError::into_inner);
+                if missed.len() < MAX_MISSED {
+                    missed.push_back(record.clone());
+                }
                 Err(error)
             }
         }
+    }
+
+    /// A record is written when its request ends, so the one that finds the sink
+    /// broken has already used its credential. From then on nothing is used until the
+    /// records that were missed have been written.
+    fn ready(&self) -> Result<(), AuditFailed> {
+        let mut missed = self.missed.lock().unwrap_or_else(PoisonError::into_inner);
+        while let Some(record) = missed.front() {
+            self.inner.record(record)?;
+            missed.pop_front();
+        }
+        Ok(())
     }
 }
 
@@ -196,6 +223,46 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
             assert_eq!(FileSink::open(&path).is_ok(), is_allowed, "{mode:o}");
         }
+    }
+
+    /// Fails while told to, and keeps what it wrote.
+    #[derive(Default)]
+    struct Flaky {
+        broken: Mutex<bool>,
+        written: Mutex<Vec<String>>,
+    }
+    impl AuditSink for &Flaky {
+        fn record(&self, record: &AuditRecord) -> Result<(), AuditFailed> {
+            if *self.broken.lock().unwrap() {
+                return Err(AuditFailed);
+            }
+            self.written.lock().unwrap().push(record.caller.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn after_a_record_is_missed_nothing_is_ready_until_it_is_written() {
+        let sink = Flaky::default();
+        let policy = Policy::new(&sink, AuditFailure::FailClosed);
+        assert_eq!(policy.ready(), Ok(()));
+        *sink.broken.lock().unwrap() = true;
+        // A sink is only found broken by a write.
+        assert_eq!(policy.ready(), Ok(()));
+        assert_eq!(policy.record(&record("a")), Err(AuditFailed));
+        assert_eq!(policy.record(&record("b")), Err(AuditFailed));
+        assert_eq!(policy.ready(), Err(AuditFailed));
+        *sink.broken.lock().unwrap() = false;
+        assert_eq!(policy.ready(), Ok(()));
+        assert_eq!(*sink.written.lock().unwrap(), ["a", "b"], "written late");
+        assert_eq!(policy.ready(), Ok(()));
+        assert_eq!(sink.written.lock().unwrap().len(), 2, "and once");
+
+        // Best effort never holds anything up.
+        let policy = Policy::new(&sink, AuditFailure::BestEffort);
+        *sink.broken.lock().unwrap() = true;
+        assert_eq!(policy.record(&record("c")), Ok(()));
+        assert_eq!(policy.ready(), Ok(()));
     }
 
     #[test]

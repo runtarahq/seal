@@ -83,6 +83,17 @@ pub trait AuditSink: Send + Sync {
     ///
     /// Returns [`AuditFailed`] if the record could not be written.
     fn record(&self, record: &AuditRecord) -> Result<(), AuditFailed>;
+
+    /// Whether records can be written now. A record is written when a request ends,
+    /// which is after its credential was used, so a sink that could not write one says
+    /// so here, and nothing more is used until it can.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuditFailed`] while records cannot be written.
+    fn ready(&self) -> Result<(), AuditFailed> {
+        Ok(())
+    }
 }
 
 /// Where the time comes from.

@@ -1820,6 +1820,29 @@ async fn an_audit_failure_fails_the_request_rather_than_leaving_it_unaudited() {
     assert_eq!(error.code(), ErrorCode::Internal);
 }
 
+#[tokio::test]
+async fn nothing_is_sent_while_the_audit_sink_cannot_write() {
+    let provider = MockProvider::plain().await;
+    let harness = Harness::new();
+    *harness.audit.not_ready.lock().unwrap() = true;
+    let token = harness.seal("token", b"x", &plain_policy(&provider, &bearer()));
+    let error = harness
+        .get(&url(&provider, "/echo"), &[("token", &token)])
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), ErrorCode::Internal);
+    assert!(provider.received().is_empty(), "the credential stayed here");
+
+    *harness.audit.not_ready.lock().unwrap() = false;
+    let response = harness
+        .get(&url(&provider, "/echo"), &[("token", &token)])
+        .await
+        .unwrap();
+    read_body(response).await.unwrap();
+    assert_eq!(provider.received().len(), 1);
+}
+
 // Canaries.
 
 #[tokio::test]

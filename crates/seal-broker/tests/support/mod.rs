@@ -96,6 +96,8 @@ impl Connect for RecordingConnect {
 pub struct MemoryAudit {
     pub records: Mutex<Vec<AuditRecord>>,
     pub fail: Mutex<bool>,
+    /// Says it cannot write, as a sink does once it has missed a record.
+    pub not_ready: Mutex<bool>,
 }
 
 impl MemoryAudit {
@@ -112,6 +114,14 @@ impl AuditSink for MemoryAudit {
     fn record(&self, record: &AuditRecord) -> Result<(), AuditFailed> {
         self.records.lock().unwrap().push(record.clone());
         if *self.fail.lock().unwrap() {
+            Err(AuditFailed)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ready(&self) -> Result<(), AuditFailed> {
+        if *self.not_ready.lock().unwrap() {
             Err(AuditFailed)
         } else {
             Ok(())

@@ -510,6 +510,14 @@ is someone guessing. A `presign` record has `expires_s`, how long the URL lasts:
 done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
+A record is written when its request ends, with what happened, so the request that finds
+the sink broken has already used its credential: a streamed response has been delivered
+before it fails, and a Postgres session has run. seal keeps that record, up to 1024 of
+them, and refuses every request after it with `INTERNAL`, before opening a value, until
+the missed records are written. What goes unrecorded while the sink is broken is
+therefore the requests under way when it broke, and their records follow once it works
+again. `seal_audit_failures_total` counts each failed write: alert on it.
+
 A caller refused a keyset, a value's keyset or an administrative call leaves a record
 too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an
 application trying what it was not given. Two refusals leave none: a request over a
