@@ -133,6 +133,12 @@ seal sets `x-ms-date`, `Date` as well for Table, `x-ms-version` (`2021-12-02`) i
 caller sent none, and `Authorization`. A caller cannot set `Authorization`, `x-ms-date` or
 `Date`. Shared Key refuses a repeated header, so seal refuses one too.
 
+Every other `x-ms-*` header passes and is signed, including `x-ms-copy-source`, the
+rename sources and `x-ms-blob-public-access`. Unlike SigV4's copy source, they are not
+checked against the rule: an account key is good for the whole account and cannot be
+scoped at Azure, so a rule's path prefix holds each request's URL and not what a copy
+can read. The [threat model](threat-model.md) lists this among the accepted risks.
+
 seal sets `Content-Length` before signing whenever the body's length is known, because
 the service signs it whenever the request carries it.
 
