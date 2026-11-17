@@ -146,10 +146,16 @@ pub struct Cidr {
 }
 
 impl Cidr {
-    /// Whether the range contains an address, after unembedding it.
+    /// Whether the range contains an address, as written or after unembedding it: an
+    /// IPv4 range holds an IPv4 address inside an IPv6 one, and an IPv6 range, such as
+    /// the NAT64 prefix, holds the IPv6 address itself.
     #[must_use]
     pub fn contains(&self, address: IpAddr) -> bool {
-        match (self.network, unembed(address)) {
+        self.holds(address) || self.holds(unembed(address))
+    }
+
+    fn holds(&self, address: IpAddr) -> bool {
+        match (self.network, address) {
             (IpAddr::V4(network), IpAddr::V4(address)) => {
                 let shift = 32 - u32::from(self.prefix);
                 let (network, address) = (u32::from(network), u32::from(address));
@@ -458,6 +464,18 @@ mod tests {
         assert!(!policy.permits(ip("10.1.2.3"), true));
         assert!(policy.permits(ip("10.1.2.4"), true));
         assert!(policy.permits(ip("8.8.9.8"), false));
+
+        // A range written in IPv6 holds the addresses in it, though they embed IPv4.
+        let policy = NetworkPolicy {
+            deny_cidrs: vec![
+                "64:ff9b::/96".parse().unwrap(),
+                "2002::/16".parse().unwrap(),
+            ],
+            ..NetworkPolicy::default()
+        };
+        assert!(!policy.permits(ip("64:ff9b::808:808"), false));
+        assert!(!policy.permits(ip("2002:808:808::"), false));
+        assert!(policy.permits(ip("8.8.8.8"), false));
     }
 
     #[test]

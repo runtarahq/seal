@@ -319,6 +319,11 @@ fn blob_of(account: &str, host: &str, path: &str) -> Result<String, BrokerError>
     let decoded = percent_decode_str(resource)
         .decode_utf8()
         .map_err(|_| bad("the path does not decode as UTF-8"))?;
+    // The name is signed on a line of its own. A line break in it would move every
+    // field signed after it.
+    if decoded.chars().any(char::is_control) {
+        return Err(bad("the path has a control character"));
+    }
     let names_a_blob = decoded
         .split_once('/')
         .is_some_and(|(container, blob)| !container.is_empty() && !blob.is_empty());
@@ -746,6 +751,8 @@ mod tests {
             ("account.blob.core.windows.net", "/container/"),
             ("account.blob.core.windows.net", "//blob"),
             ("account.blob.core.windows.net", "/c/%ff"),
+            ("account.blob.core.windows.net", "/c/b%0Ahttps"),
+            ("account.blob.core.windows.net", "/c/b%00"),
             ("files.example.com", "/container/blob"),
             ("accountx.blob.core.windows.net", "/container/blob"),
             ("127.0.0.1", "/other/container/blob"),

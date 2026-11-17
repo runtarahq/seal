@@ -108,7 +108,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **A provider that returns a credential in another form.** seal drops a response
   header that repeats a secret it put in the request, and fails a response whose body
   repeats one, passing on none of it. It looks for the secret as it was sealed and as
-  it was written in the request, if that is at least eight bytes. A provider that
+  it was written in the request, for a sealed part that went with it, and for a JWT
+  assertion it signed, each if at least eight bytes. A response in two parts, such as
+  two ranges, each holding half of one, is not caught. A provider that
   returns it encoded some other way, compressed, or escaped inside JSON, still gives it
   to the caller, and one that means to can always do so. Policies should name API
   hosts, not services that reflect requests.
