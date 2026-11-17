@@ -4,12 +4,12 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use seal_format::{Binding, Envelope, FieldName, ItemId, KeysetId, Policy, seal};
-use seal_keys::{DirKeySource, FileKeyWrap, Keyring, Keys};
+use seal_keys::{FileKeyWrap, Keyring, Keys, RewrapOptions, Rewrapped};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, SourceConfig, WrapConfig};
+use crate::config::Config;
 use crate::limits;
-use crate::serve::{key_parts, key_wrap};
+use crate::serve::key_parts;
 
 /// Writes how the memory ceiling adds up. Returns whether it fits the budget.
 ///
@@ -90,30 +90,20 @@ pub async fn destroy_keyset(config: &Config, keyset: &KeysetId) -> Result<(), St
         .map_err(|error| error.to_string())
 }
 
-/// Wraps every key in the configured key directory again, under a new wrapping key,
-/// into a new directory. The new wrapping key may be of another kind: this is also how
-/// keys move from a wrapping key file to a KMS, or back. The configured directory and
-/// wrapping key are left as they are; seal uses the new ones once its configuration
-/// names them and it is restarted. Returns how many keys were written.
+/// Wraps again, with `keys.wrap`, every key in the key source that one of
+/// `keys.unwrap_also` wrapped, in place. This is how a wrapping key is replaced, and
+/// how keys move from a wrapping key file to a KMS, or back. A running seal that has
+/// both wrapping keys keeps working throughout, and a run can be repeated.
 ///
 /// # Errors
 ///
-/// Returns a message if the new directory exists, or a key cannot be re-wrapped. Nothing is said of any key's contents.
-pub async fn rewrap(config: &Config, new_wrap: &WrapConfig, out: &Path) -> Result<usize, String> {
-    let SourceConfig::Dir(keys) = &config.keys.source;
-    if out.exists() {
-        return Err(format!("{} must not exist", out.display()));
-    }
-    let old = key_wrap(&config.keys.wrap)?;
-    let new = key_wrap(new_wrap)?;
-    seal_keys::rewrap(
-        &DirKeySource::new(keys, usize::MAX),
-        &DirKeySource::new(out, usize::MAX),
-        old.as_ref(),
-        new.as_ref(),
-    )
-    .await
-    .map_err(|error| format!("cannot re-wrap the keys: {error}"))
+/// Returns a message if a key's wrapping key is not configured, or a key cannot be
+/// re-wrapped. Nothing is said of any key's contents.
+pub async fn rewrap(config: &Config, options: RewrapOptions) -> Result<Rewrapped, String> {
+    let (source, wraps) = key_parts(config)?;
+    seal_keys::rewrap(source.as_ref(), &wraps, options)
+        .await
+        .map_err(|error| format!("cannot re-wrap the keys: {error}"))
 }
 
 /// One line of `reseal`'s input and output.

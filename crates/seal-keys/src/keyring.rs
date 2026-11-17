@@ -18,7 +18,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 use crate::source::{KeySource, WrappedKey};
-use crate::wrap::KeyWrap;
+use crate::wrap::KeyWraps;
 use crate::{KeyError, Keys, LiveKey};
 
 /// The keyring's bounds and timings.
@@ -155,7 +155,7 @@ struct State {
 
 struct Inner {
     source: Arc<dyn KeySource>,
-    wrap: Arc<dyn KeyWrap>,
+    wraps: KeyWraps,
     config: KeyringConfig,
     state: Mutex<State>,
     live: Arc<Semaphore>,
@@ -184,13 +184,13 @@ impl Keyring {
     /// Returns [`KeyError::Invalid`] if the configuration is not valid.
     pub fn new(
         source: Arc<dyn KeySource>,
-        wrap: Arc<dyn KeyWrap>,
+        wraps: impl Into<KeyWraps>,
         config: KeyringConfig,
     ) -> Result<Self, KeyError> {
         config.validate()?;
         let inner = Arc::new(Inner {
             source,
-            wrap,
+            wraps: wraps.into(),
             config,
             state: Mutex::new(State::default()),
             live: Arc::new(Semaphore::new(config.max_live_keys)),
@@ -316,14 +316,15 @@ impl Keyring {
         let kid = KeyId::new(format!("k-{created}-{suffix}"))
             .map_err(|_| KeyError::Invalid("generated kid"))?;
         let (private, public) = PrivateKey::generate();
-        let wrapped = self.inner.wrap.wrap(keyset, &kid, &private).await?;
+        let wrap = self.inner.wraps.current();
+        let wrapped = wrap.wrap(keyset, &kid, &private).await?;
         drop(private);
         let key = WrappedKey {
             keyset: keyset.clone(),
             kid,
             public: public.to_base64url(),
             created,
-            wrap_id: self.inner.wrap.id().to_owned(),
+            wrap_id: wrap.id().to_owned(),
             wrapped: URL_SAFE_NO_PAD.encode(wrapped),
         };
         match self.inner.source.store(&key).await {
@@ -516,9 +517,10 @@ impl Inner {
         key: &WrappedKey,
         permit: OwnedSemaphorePermit,
     ) -> Result<Unwrapped, KeyError> {
-        if key.wrap_id != self.wrap.id() {
+        // A key wrapped with a wrapping key that is not configured cannot be opened.
+        let Some(wrap) = self.wraps.by_id(&key.wrap_id) else {
             return Err(KeyError::Unavailable);
-        }
+        };
         let public = key.public_key()?;
         let wrapped = key.wrapped_bytes()?;
         let _slot = self
@@ -529,7 +531,7 @@ impl Inner {
         let started = Instant::now();
         let private = tokio::time::timeout(
             self.config.fetch_timeout,
-            self.wrap.unwrap(&key.keyset, &key.kid, &wrapped),
+            wrap.unwrap(&key.keyset, &key.kid, &wrapped),
         )
         .await
         .map_err(|_| KeyError::Unavailable)??;

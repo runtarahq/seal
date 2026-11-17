@@ -18,8 +18,10 @@ keysets = []
 admin = true
 
 [keys]
-source = { dir = "/var/lib/seal/keys" }
-wrap = { file = "/etc/seal/kek" }
+# Several instances on separate machines share the wrapped keys in a bucket, and a
+# wrapping key that stays in a KMS.
+source = { s3 = { endpoint = "https://s3.gra.io.cloud.ovh.net", region = "gra", bucket = "example-seal-keys", prefix = "keys/", credentials_file = "/etc/seal/s3-credentials" } }
+wrap = { ovh_kms = { endpoint = "https://eu-west-rbx.okms.ovh.net", okms_id = "11111111-2222-3333-4444-555555555555", key_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", cert = "/etc/seal/kms.crt", key = "/etc/seal/kms.key" } }
 lock_memory = "required"
 
 [limits]

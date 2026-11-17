@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use seal::config::{Config, WrapConfig};
+use seal::config::Config;
 use seal_format::KeysetId;
+use seal_keys::RewrapOptions;
 
 #[derive(Parser)]
 #[command(
@@ -72,23 +73,20 @@ enum Command {
         #[arg(long)]
         confirm: String,
     },
-    /// Rotates the wrapping key, or moves to another kind of one: wraps every key in
-    /// the configured key directory again, under a new wrapping key, into a new
-    /// directory. Nothing configured is changed; point the configuration at the new
-    /// directory and wrapping key, and restart seal.
+    /// Replaces the wrapping key, or moves to another kind of one: wraps again, with
+    /// `keys.wrap`, every key that one of `keys.unwrap_also` wrapped, in place. seal
+    /// may be running. When no key is left under an older wrapping key, take it out of
+    /// `keys.unwrap_also`.
     Rewrap {
         #[arg(long)]
         config: PathBuf,
-        /// The new wrapping key, a file made with `keygen --wrapping-key`.
-        #[arg(long, required_unless_present = "new_wrap")]
-        new_wrapping_key: Option<PathBuf>,
-        /// The new wrapping key, as `keys.wrap` is written in the configuration, such
-        /// as `{ ovh_kms = { … } }`.
-        #[arg(long, conflicts_with = "new_wrapping_key")]
-        new_wrap: Option<String>,
-        /// Where the re-wrapped keys go. It must not exist.
-        #[arg(long = "out")]
-        output: PathBuf,
+        /// Changes nothing, and prints how many keys each wrapping key has.
+        #[arg(long)]
+        dry_run: bool,
+        /// Wraps again the keys already under `keys.wrap` too, for a KMS that keeps a
+        /// key's id when it rotates what is behind it.
+        #[arg(long)]
+        include_current: bool,
     },
     /// Prints the version.
     Version,
@@ -220,20 +218,26 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Command::Rewrap {
             config,
-            new_wrapping_key,
-            new_wrap,
-            output,
+            dry_run,
+            include_current,
         } => {
             let config = Config::load(&config).map_err(|error| error.to_string())?;
-            let new_wrap = match (new_wrapping_key, new_wrap) {
-                (Some(path), None) => WrapConfig::File(path),
-                (None, Some(text)) => {
-                    WrapConfig::parse(&text).map_err(|error| format!("--new-wrap: {error}"))?
-                }
-                _ => return Err("rewrap needs --new-wrapping-key or --new-wrap".to_owned()),
+            let options = RewrapOptions {
+                include_current,
+                dry_run,
             };
-            let keys = runtime()?.block_on(seal::cli::rewrap(&config, &new_wrap, &output))?;
-            println!("re-wrapped {keys} keys into {}", output.display());
+            let done = runtime()?.block_on(seal::cli::rewrap(&config, options))?;
+            for (wrap, keys) in &done.before {
+                println!("{keys} keys under {wrap}");
+            }
+            if dry_run {
+                println!(
+                    "would re-wrap {} keys and leave {}",
+                    done.rewrapped, done.left
+                );
+            } else {
+                println!("re-wrapped {} keys and left {}", done.rewrapped, done.left);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Serve { config } => {

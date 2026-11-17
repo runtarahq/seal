@@ -14,7 +14,8 @@ use seal_broker::{Broker, BrokerConfig, Environment, Limits};
 #[cfg(feature = "aws-kms")]
 use seal_keys::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
 use seal_keys::{
-    DirKeySource, FileKeyWrap, KeySource, KeyWrap, Keyring, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
+    DirKeySource, FileKeyWrap, KeySource, KeyWrap, KeyWraps, Keyring, OvhKmsAuth, OvhKmsConfig,
+    OvhKmsWrap, S3KeySource, S3KeySourceConfig,
 };
 use seal_proto::MAX_BODY_CHUNK;
 use seal_proto::v1::seal_server::SealServer;
@@ -36,19 +37,65 @@ pub enum Listening {
     Tcp(SocketAddr),
 }
 
-/// A key source and wrapping key.
-pub type KeyParts = (Arc<dyn KeySource>, Arc<dyn KeyWrap>);
+/// How long one request to a key source in a bucket may take.
+const KEY_SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Builds the key source and wrapping key.
+/// A key source and the wrapping keys.
+pub type KeyParts = (Arc<dyn KeySource>, KeyWraps);
+
+/// Builds the key source and the wrapping keys.
 ///
 /// # Errors
 ///
 /// Returns a message naming what could not be loaded.
 pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
-    let SourceConfig::Dir(path) = &config.keys.source;
-    let source: Arc<dyn KeySource> =
-        Arc::new(DirKeySource::new(path, config.keys.max_keys_per_keyset));
-    Ok((source, key_wrap(&config.keys.wrap)?))
+    let source: Arc<dyn KeySource> = match &config.keys.source {
+        SourceConfig::Dir(path) => {
+            Arc::new(DirKeySource::new(path, config.keys.max_keys_per_keyset))
+        }
+        SourceConfig::S3(s3) => {
+            let ca_pem = match &s3.ca {
+                Some(path) => Some(
+                    std::fs::read_to_string(path)
+                        .map_err(|_| format!("cannot read {}", path.display()))?,
+                ),
+                None => None,
+            };
+            Arc::new(
+                S3KeySource::new(&S3KeySourceConfig {
+                    endpoint: s3.endpoint.clone(),
+                    region: s3.region.clone(),
+                    bucket: s3.bucket.clone(),
+                    prefix: s3.prefix.clone(),
+                    credentials_file: s3.credentials_file.clone(),
+                    profile: s3.profile.clone().unwrap_or_else(|| "default".to_owned()),
+                    ca_pem,
+                    timeout: KEY_SOURCE_TIMEOUT,
+                    max_keys: config.keys.max_keys_per_keyset,
+                })
+                .map_err(|error| error.to_string())?,
+            )
+        }
+    };
+    Ok((source, key_wraps(config)?))
+}
+
+/// Builds the wrapping keys: the current one, and the older ones that only unwrap.
+/// Connects to nothing.
+///
+/// # Errors
+///
+/// Returns a message naming what could not be loaded, or that a wrapping key is named
+/// twice.
+pub fn key_wraps(config: &Config) -> Result<KeyWraps, String> {
+    let older = config
+        .keys
+        .unwrap_also
+        .iter()
+        .map(key_wrap)
+        .collect::<Result<Vec<_>, _>>()?;
+    KeyWraps::new(key_wrap(&config.keys.wrap)?, older)
+        .map_err(|_| "keys.unwrap_also names a wrapping key twice, or names keys.wrap".to_owned())
 }
 
 /// How long one request to a KMS may take.

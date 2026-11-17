@@ -100,9 +100,42 @@ python3 vectors/verify.py
 cargo test --release --package seal-broker --test memory --locked -- --ignored --test-threads=1
 cargo test --release --package seal --test memory --locked -- --ignored --test-threads=1
 
+# Docker: providers in containers, and seal with its keys in a bucket
+cargo test --package seal --test containers --locked -- --ignored
+cargo test --package seal --test postgres --locked -- --ignored
+cargo test --package seal-keys --lib --locked s3::tests -- --ignored
+
 # A nightly toolchain and cargo-fuzz
 mkdir -p fuzz/corpus/policy_parse
 cargo +nightly fuzz run policy_parse fuzz/corpus/policy_parse fuzz/seeds/policy_parse -- -max_total_time=60
 ```
+
+Two tests run against real services, with credentials from the environment, and skip
+without them. Run them before relying on a store or a KMS that seal has not been run
+against, and after changing how seal talks to either:
+
+```sh
+# A bucket that exists, in an S3-compatible object store such as OVHcloud Object
+# Storage. Everything is written under a prefix made for the run, and destroyed.
+export SEAL_TEST_S3_ENDPOINT=https://s3.gra.io.cloud.ovh.net
+export SEAL_TEST_S3_REGION=gra
+export SEAL_TEST_S3_BUCKET=…
+export SEAL_TEST_S3_CREDENTIALS_FILE=…   # readable only by you; optionally SEAL_TEST_S3_PROFILE
+
+# A service key in OVHcloud KMS. With it, the bucket test also moves the keys from a
+# wrapping key file to that service key.
+export SEAL_TEST_OVH_KMS_ENDPOINT=https://eu-central-waw.okms.ovh.net
+export SEAL_TEST_OVH_KMS_OKMS_ID=…
+export SEAL_TEST_OVH_KMS_KEY_ID=…
+export SEAL_TEST_OVH_KMS_TOKEN_FILE=…    # or SEAL_TEST_OVH_KMS_CERT and SEAL_TEST_OVH_KMS_KEY
+
+cargo test --package seal-keys --lib --locked s3::tests::a_real_bucket -- --ignored --nocapture
+cargo test --package seal-keys --test real_kms --locked -- --ignored --nocapture ovh
+```
+
+The bucket test checks what seal depends on a store for: a key is stored only where
+there is none, also when several store it at once; a key is replaced only if it is still
+the one that was read; the wrapping key is replaced in place; and a destroyed keyset
+leaves no version behind. The nightly workflow runs both, with the repository's secrets.
 
 Contributions are licensed under [Apache-2.0](LICENSE).

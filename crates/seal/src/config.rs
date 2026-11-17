@@ -216,8 +216,12 @@ pub struct CallerConfig {
 pub struct KeysConfig {
     /// The key source.
     pub source: SourceConfig,
-    /// The wrapping key.
+    /// The wrapping key that new keys are wrapped with.
     pub wrap: WrapConfig,
+    /// Older wrapping keys, which only unwrap what they wrapped. A wrapping key stays
+    /// here while it is replaced, until `seal rewrap` has wrapped every key again.
+    #[serde(default)]
+    pub unwrap_also: Vec<WrapConfig>,
     /// See the keyring.
     #[serde(default = "defaults::idle_evict")]
     pub idle_evict: Interval,
@@ -253,6 +257,32 @@ pub struct KeysConfig {
 pub enum SourceConfig {
     /// A directory of `<keyset>/<kid>.json` files.
     Dir(PathBuf),
+    /// A bucket of an S3-compatible object store, with the same files as objects, for
+    /// several instances on separate machines.
+    S3(S3SourceConfig),
+}
+
+/// A bucket that holds the wrapped keys, and seal's credentials for it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3SourceConfig {
+    /// The store's endpoint, such as `https://s3.gra.io.cloud.ovh.net`.
+    pub endpoint: String,
+    /// The region requests are signed for.
+    pub region: String,
+    /// The bucket.
+    pub bucket: String,
+    /// What every object's name starts with: a path that ends in `/`. Empty if not
+    /// given.
+    #[serde(default)]
+    pub prefix: String,
+    /// A file in the AWS shared credentials format that only seal's user can read,
+    /// with an access key id and a secret access key.
+    pub credentials_file: PathBuf,
+    /// The profile in that file. `default` if not given.
+    pub profile: Option<String>,
+    /// The CA that issued the endpoint's certificate, if it is not a public one.
+    pub ca: Option<PathBuf>,
 }
 
 /// A wrapping key.
@@ -581,6 +611,9 @@ impl Config {
             return Err(invalid("there are no callers"));
         }
         self.keys.wrap.check()?;
+        for wrap in &self.keys.unwrap_also {
+            wrap.check()?;
+        }
         let mut names = std::collections::BTreeSet::new();
         let mut uids = std::collections::BTreeSet::new();
         let mut subjects = std::collections::BTreeSet::new();
@@ -782,6 +815,55 @@ mod tests {
             let text = std::fs::read_to_string(&path).unwrap();
             Config::parse(&text).unwrap_or_else(|error| panic!("{name}: {error}"));
         }
+    }
+
+    #[test]
+    fn keys_may_be_in_a_bucket_and_older_wrapping_keys_may_still_unwrap() {
+        let source = "source = { dir = \"/var/lib/seal/keys\" }";
+        assert!(MINIMAL.contains(source));
+        let s3 = |more: &str| {
+            MINIMAL.replace(
+                source,
+                &format!(
+                    "source = {{ s3 = {{ endpoint = \"https://s3.gra.io.cloud.ovh.net\", \
+                     region = \"gra\", bucket = \"seal-keys\", \
+                     credentials_file = \"/etc/seal/s3-credentials\"{more} }} }}"
+                ),
+            )
+        };
+        let config = Config::parse(&s3("")).unwrap();
+        let SourceConfig::S3(bucket) = &config.keys.source else {
+            panic!("not a bucket");
+        };
+        assert_eq!((bucket.prefix.as_str(), &bucket.profile), ("", &None));
+        Config::parse(&s3(
+            ", prefix = \"keys/\", profile = \"seal\", ca = \"/etc/seal/s3-ca.crt\"",
+        ))
+        .unwrap();
+        assert!(Config::parse(&s3(", secret = \"x\"")).is_err());
+        assert!(config.keys.unwrap_also.is_empty());
+
+        let wrap = "wrap = { file = \"/etc/seal/kek\" }";
+        assert!(MINIMAL.contains(wrap));
+        let older = |list: &str| {
+            Config::parse(&MINIMAL.replace(wrap, &format!("{wrap}\nunwrap_also = {list}")))
+        };
+        let config = older(
+            "[{ file = \"/etc/seal/kek-1\" }, { ovh_kms = { endpoint = \"https://eu-west-rbx.okms.ovh.net\", \
+             okms_id = \"11111111-2222-3333-4444-555555555555\", \
+             key_id = \"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\", token_file = \"/etc/seal/t\" } }]",
+        )
+        .unwrap();
+        assert_eq!(config.keys.unwrap_also.len(), 2);
+        // An older wrapping key is checked as the current one is.
+        assert!(
+            older(
+                "[{ ovh_kms = { endpoint = \"https://eu-west-rbx.okms.ovh.net\", \
+                 okms_id = \"11111111-2222-3333-4444-555555555555\", \
+                 key_id = \"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\" } }]"
+            )
+            .is_err()
+        );
     }
 
     #[test]

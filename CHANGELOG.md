@@ -90,13 +90,16 @@ The first release.
 - `seal reseal` moves stored values to a keyset's current key, and with
   `--rewrite-policies` gives them new policies, so that a change of destination does not
   mean entering every secret again. Only whoever runs seal can do this.
-- `seal rewrap` rotates the wrapping key, by wrapping every key again into a new
-  directory.
+- The wrapped keys can be in a bucket of an S3-compatible object store,
+  `keys.source = { s3 = { … } }`, which several instances on separate machines share.
+  See [`docs/operations.md`](docs/operations.md#keys-in-a-bucket).
+- `seal rewrap` replaces the wrapping key while seal runs: the new one is `keys.wrap`,
+  the old one stays in `keys.unwrap_also`, and every key is wrapped again in place.
 - The wrapping key can stay in a KMS. OVHcloud KMS: `keys.wrap = { ovh_kms = { … } }`,
   with an access certificate or a personal access token. AWS KMS:
   `keys.wrap = { aws_kms = { … } }`, in a seal built with the `aws-kms` feature, which
   links the AWS SDK: with a credentials file, or with what the SDK finds, such as the
-  role of the EC2 instance, ECS task or EKS pod seal runs in. `seal rewrap --new-wrap`
+  role of the EC2 instance, ECS task or EKS pod seal runs in. `seal rewrap`
   moves existing keys to either. See [`docs/operations.md`](docs/operations.md#wrapping-with-a-kms).
 - Audit records for every use and for every caller refused, Prometheus metrics, and process hardening (no core dumps,
   not dumpable, memory locked as configured, never as root).

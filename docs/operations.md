@@ -82,8 +82,9 @@ asked for. A certificate that matches two configured callers is refused.
 
 | Setting | Default | |
 |---|---|---|
-| `source` | | `{ dir = "…" }`: the directory that holds the wrapped keys, as `<dir>/<keyset>/<kid>.json` |
-| `wrap` | | `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }` or `{ aws_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
+| `source` | | `{ dir = "…" }`: the directory that holds the wrapped keys, as `<dir>/<keyset>/<kid>.json`. Or `{ s3 = { … } }`, a bucket that several instances share: see [keys in a bucket](#keys-in-a-bucket) |
+| `wrap` | | The wrapping key that new keys are wrapped with. `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }` or `{ aws_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
+| `unwrap_also` | `[]` | Older wrapping keys, each written as `wrap` is. They only unwrap what they wrapped, while the wrapping key is replaced: see [rotating the wrapping key](#rotating-the-wrapping-key) |
 | `idle_evict` | `15m` | A keyset unused this long is dropped from memory |
 | `refresh_interval` | `60s` | How often a loaded keyset is fetched again |
 | `max_stale` | `5m` | A keyset not fetched successfully this long is dropped |
@@ -194,14 +195,61 @@ it has not seen. So:
 - An unwrapped key is dropped after `max_unwrap_age` and unwrapped again when needed.
 - The wrapping key file is read once, at start-up. Deleting or replacing it takes
   effect at the next restart, and a restart with a different wrapping key cannot read
-  any key wrapped with the old one. To change it, see
-  [rotating the wrapping key](#rotating-the-wrapping-key).
+  any key wrapped with the old one, unless the old one is in `keys.unwrap_also`. To
+  change it, see [rotating the wrapping key](#rotating-the-wrapping-key).
 - A wrapping key in a KMS is asked for each time a key is unwrapped. Taking away
   seal's access to it stops every instance opening anything within `max_unwrap_age`.
 - None of these interrupts a request already running.
 
 If the key source is unreachable, loaded keysets keep working for `max_stale`, then return
 `KEYS_UNAVAILABLE`.
+
+### Keys in a bucket
+
+Instances on separate machines need the same wrapped keys. Keep them in a bucket of an
+S3-compatible object store, and every instance reads and writes the same ones:
+
+```toml
+[keys]
+source = { s3 = { endpoint = "https://s3.gra.io.cloud.ovh.net", region = "gra", bucket = "example-seal-keys", prefix = "keys/", credentials_file = "/etc/seal/s3-credentials" } }
+```
+
+| Setting | |
+|---|---|
+| `endpoint` | The store's endpoint, `https` only. Objects are addressed as `<endpoint>/<bucket>/<name>` |
+| `region` | The region requests are signed for |
+| `bucket` | The bucket. seal does not create it |
+| `prefix` | What every object's name starts with: a path that ends in `/`. Empty if not given |
+| `credentials_file` | An access key id and a secret access key, in the AWS shared credentials format, in a file readable only by seal's user |
+| `profile` | The profile in that file. `default` if not given |
+| `ca` | The CA of the endpoint's certificate, if it is not a public one |
+
+```ini
+[default]
+aws_access_key_id = …
+aws_secret_access_key = …
+```
+
+- The objects are the files of a key directory, `<prefix><keyset>/<kid>.json`, so a
+  directory and a bucket are copied into each other with any S3 tool. To move from a
+  directory, copy it to the bucket and change `keys.source`.
+- The bucket holds only wrapped keys. Whoever can write to it can delete keys, or put
+  deleted ones back, and opens nothing without the wrapping key. Give seal's access key
+  this bucket and nothing else: listing it, and reading, writing and deleting its
+  objects and their versions.
+- The store must support conditional writes, `If-None-Match` and `If-Match` on an
+  upload. seal stores a key only where there is none, and replaces one, when it is
+  wrapped again, only if it is still the one it read. A store without them refuses
+  every new key.
+- Turn on versioning for the bucket: a key deleted or overwritten by mistake is then
+  still there. [Destroying a keyset](#destroying-a-keyset) deletes every version of
+  its keys, so versioning does not keep what was destroyed.
+- The credentials file is read for every request, so a new access key needs no restart.
+- Each instance asks the store at most once per loaded keyset every `refresh_interval`,
+  and downloads a key only when it is new or was wrapped again. Each request is a new
+  connection, and may take ten seconds.
+- With several instances, keep the wrapping key in a KMS: a wrapping key file would have
+  to be copied to every machine.
 
 ### Wrapping with a KMS
 
@@ -341,34 +389,61 @@ key's ARN and needs nothing from seal.
 
 ### Rotating the wrapping key
 
-1. Make the new wrapping key, and wrap every key again into a new directory:
+seal reads a stored key with whichever configured wrapping key wrapped it, so the
+wrapping key is replaced while seal runs, without a moment when keys cannot be made.
+The same steps move the keys from a wrapping key file to a KMS, from one KMS key to
+another, or back.
+
+1. Make the new wrapping key: a file, or a key in a KMS.
 
    ```sh
    seal keygen --wrapping-key /etc/seal/kek-2 && chown seal: /etc/seal/kek-2
-   seal rewrap --config /etc/seal/seal.toml --new-wrapping-key /etc/seal/kek-2 --out /var/lib/seal/keys-2
    ```
 
-   To move to another kind of wrapping key, such as from the file to a KMS or to a
-   new service key, name it with `--new-wrap` instead, written as `keys.wrap` is:
+2. With several instances on one key source, first add the new wrapping key to
+   `keys.unwrap_also` on every instance, and restart each. An instance cannot load a
+   keyset that has a key under a wrapping key it does not know, so every instance must
+   know the new one before any instance wraps with it. With one instance, skip this.
+
+3. Make the new one current, and keep the old one for unwrapping, on every instance,
+   and restart each:
+
+   ```toml
+   [keys]
+   wrap = { file = "/etc/seal/kek-2" }
+   unwrap_also = [{ file = "/etc/seal/kek" }]
+   ```
+
+   From now on new keys are wrapped with the new wrapping key, and the old one only
+   unwraps.
+
+4. Wrap the existing keys again, in place. seal may be running:
 
    ```sh
-   seal rewrap --config /etc/seal/seal.toml --out /var/lib/seal/keys-2 \
-     --new-wrap '{ ovh_kms = { endpoint = "…", okms_id = "…", key_id = "…", cert = "…", key = "…" } }'
+   seal rewrap --config /etc/seal/seal.toml --dry-run   # how many keys each wrapping key has
+   seal rewrap --config /etc/seal/seal.toml
    ```
 
-   The old wrapping key is the configured one, of whatever kind, so the same command
-   moves keys from one KMS to another, or back to a file.
+   Before anything is changed, every key's wrapping key must be configured. Each key
+   is then unwrapped and checked against its public key, wrapped with `keys.wrap`,
+   and unwrapped again from its new form and checked once more, before it replaces
+   the old form. A run that stops part way has changed some keys and not others, all
+   of them readable: run it again. Running instances read the new forms at their next
+   refresh.
 
-   Each key is unwrapped, checked against its public key and wrapped again. The
-   configured directory and wrapping key are not touched, the new directory must not
-   exist, and a run that fails part way leaves nothing in use: delete the new directory
-   and run it again.
-2. Point `keys.source` and `keys.wrap` at the new directory and the new wrapping key on
-   every instance, and restart. Keys made between step 1 and the restart are in the old
-   directory only, so do not generate or rotate keys in between.
-3. Delete the old directory and the old wrapping key, and any backups that hold them:
-   until then the old wrapping key still opens the old copies. For a service key in a
-   KMS, deleting it there is enough.
+5. When `--dry-run` shows no key under the old wrapping key, take it out of
+   `keys.unwrap_also`, at any later restart, and destroy it: delete the file, or the
+   service key in the KMS. Until then it still opens older copies of the keys: backups
+   of a key directory, and the earlier versions a bucket with versioning keeps. In
+   OVHcloud KMS, deactivate the old service key for a while before deleting it, so
+   that a key that was missed can still be recovered.
+
+During step 4, seal's identity at a KMS needs to decrypt with the old key and to
+encrypt and decrypt with the new one.
+
+AWS KMS's automatic rotation keeps the key's ARN, and needs none of this. Keys wrapped
+before it stay under what was behind the ARN then, which AWS keeps. To move them to
+what is behind it now, run `seal rewrap --include-current`.
 
 ### Changing policies
 
@@ -405,7 +480,7 @@ Delete every wrapped key of the keyset from the key source, including any copies
 backups, or destroy the wrapping key. Once that has taken effect, within `max_stale` or
 `max_unwrap_age`, every value sealed to those keys, in every backup, is unreadable.
 
-seal deletes the keyset's wrapped keys itself:
+seal deletes the keyset's wrapped keys itself, and in a bucket every version of them:
 
 ```sh
 seal destroy-keyset --config /etc/seal/seal.toml --keyset acme --confirm acme
