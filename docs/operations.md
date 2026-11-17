@@ -91,7 +91,7 @@ asked for. A certificate that matches two configured callers is refused.
 |---|---|---|
 | `source` | | `{ dir = "…" }`: the directory that holds the wrapped keys, as `<dir>/<keyset>/<kid>.json`. Or `{ s3 = { … } }`, a bucket that several instances share: see [keys in a bucket](#keys-in-a-bucket) |
 | `wrap` | | The wrapping key that new keys are wrapped with. `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }` or `{ aws_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
-| `unwrap_also` | `[]` | Older wrapping keys, each written as `wrap` is. They only unwrap what they wrapped, while the wrapping key is replaced: see [rotating the wrapping key](#rotating-the-wrapping-key) |
+| `unwrap_also` | `[]` | Older wrapping keys, each written as `wrap` is. They wrap nothing new, and unwrap any stored key that names them, while the wrapping key is replaced. Take one out as soon as `seal rewrap` is done, and at once if it may have leaked: while it is listed, whoever has it and can write to the key source can add a key of their own: see [rotating the wrapping key](#rotating-the-wrapping-key) |
 | `idle_evict` | `15m` | A keyset unused this long is dropped from memory |
 | `refresh_interval` | `60s` | How often a loaded keyset is fetched again |
 | `max_stale` | `5m` | A keyset not fetched successfully this long is dropped |

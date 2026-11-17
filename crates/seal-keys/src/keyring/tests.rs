@@ -814,3 +814,41 @@ async fn a_running_keyring_reads_keys_wrapped_again_without_being_restarted() {
     let after = Keyring::new(Arc::clone(&source) as Arc<dyn KeySource>, new, config()).unwrap();
     opens(&after, "acme").await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_key_whose_time_was_changed_in_the_source_is_refused() {
+    // Whoever holds the source could otherwise say which key is the newest, and so
+    // which one new values are sealed to.
+    let setup = Setup::new();
+    let keyring = setup.keyring(config());
+    keyring.generate(&keyset("acme")).await.unwrap();
+    keyring.rotate(&keyset("acme")).await.unwrap();
+    {
+        let mut keys = setup.source.keys.lock().unwrap();
+        let stored = keys.get_mut(&keyset("acme")).unwrap();
+        stored[0].created = u64::MAX;
+    }
+    let other = setup.keyring(config());
+    assert!(matches!(
+        other.current_public_key(&keyset("acme")).await,
+        Err(KeyError::Invalid(_))
+    ));
+}
+
+#[test]
+fn only_a_name_seal_made_has_a_time_in_it() {
+    let kid = |name: &str| KeyId::new(name.to_owned()).unwrap();
+    assert_eq!(
+        created_in(&kid("k-1700000000-0a1b2c3d")),
+        Some(1_700_000_000)
+    );
+    for name in [
+        "k3",
+        "k-1",
+        "k-1700000000-xyz",
+        "k-17x-0a1b2c3d",
+        "k--0a1b2c3d",
+    ] {
+        assert_eq!(created_in(&kid(name)), None, "{name}");
+    }
+}

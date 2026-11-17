@@ -280,7 +280,14 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   deleted or it is destroyed.
 - **An older wrapping key that is still configured still opens.** While a wrapping key
   is in `keys.unwrap_also`, taking away the current one does not stop seal reading the
-  keys the older one wrapped.
+  keys the older one wrapped. seal reads any stored key that names it, not only those
+  that existed when it was replaced, so someone who has a leaked older wrapping key and
+  can write to the key source can add a key of their own until it is taken out.
+- **A key's place among its keyset's keys is held by its name.** The newest key is the
+  current one, and a key's time is stored beside it in the key source. A name seal made
+  has the time in it and is authenticated with the wrapped key, so a changed time is
+  refused; a key named by hand has no such check, and whoever holds the source can say
+  when it was made.
 - **A wrapping key in a KMS is revoked within `max_unwrap_age`.** seal asks the KMS
   each time it unwraps a key, so taking away its access, or deleting the service key,
   stops it once the keys it has unwrapped are dropped. OVHcloud credentials are read
