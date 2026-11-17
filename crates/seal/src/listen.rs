@@ -179,6 +179,9 @@ pub fn unix(
     Ok(Incoming { receiver })
 }
 
+/// How many TLS handshakes may be under way for each connection callers may have.
+const HANDSHAKES_PER_CONNECTION: usize = 4;
+
 /// A failed `accept` is no reason to stop listening: the usual cause is too many open
 /// files, which passes as connections close. The pause keeps the loop from spinning
 /// until then.
@@ -340,6 +343,9 @@ pub async fn tcp(
     let local = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel(16);
     let connections = Arc::new(Semaphore::new(max_connections));
+    let handshakes = Arc::new(Semaphore::new(
+        max_connections.saturating_mul(HANDSHAKES_PER_CONNECTION),
+    ));
     tokio::spawn(async move {
         loop {
             let stream = match listener.accept().await {
@@ -349,8 +355,11 @@ pub async fn tcp(
                     continue;
                 }
             };
-            let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
-                metrics::counter!("seal_connections_refused_total", "reason" => "limit")
+            // A peer that has not shown a certificate yet takes a place among the
+            // handshakes, not among the callers' connections, so strangers who connect
+            // and say nothing cannot keep callers out.
+            let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
+                metrics::counter!("seal_connections_refused_total", "reason" => "handshakes")
                     .increment(1);
                 continue;
             };
@@ -358,6 +367,7 @@ pub async fn tcp(
                 return;
             }
             let (tls, callers, sender) = (tls.current(), Arc::clone(&callers), sender.clone());
+            let connections = Arc::clone(&connections);
             // Handshakes run on their own, so one slow peer cannot hold up the others.
             tokio::spawn(async move {
                 let accepted =
@@ -375,6 +385,12 @@ pub async fn tcp(
                         caller_kind = "certificate",
                         "refused a connection from an unknown caller"
                     );
+                    return;
+                };
+                drop(handshake);
+                let Ok(permit) = connections.try_acquire_owned() else {
+                    metrics::counter!("seal_connections_refused_total", "reason" => "limit")
+                        .increment(1);
                     return;
                 };
                 let _ = sender

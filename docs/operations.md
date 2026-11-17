@@ -134,7 +134,7 @@ least twice `max_keys_per_keyset`.
 | `limits.buffered_total_timeout` | `60s` | For a request holding a capped buffer |
 | `limits.max_stream_duration` | none | An optional total deadline for streams |
 | `limits.rate_per_caller` | `1000/s` | |
-| `limits.rate_per_keyset` | `200/s` | |
+| `limits.rate_per_keyset` | `200/s` | Counted against the request's keyset and against the keyset each presented value was sealed to |
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
 | `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |

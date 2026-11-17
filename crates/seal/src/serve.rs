@@ -278,6 +278,7 @@ pub async fn run(
             rate_per_caller: limits.rate_per_caller,
             rate_per_keyset: limits.rate_per_keyset,
             max_tracked_keysets: config.keys.max_tracked_keysets,
+            head_timeout: limits.idle_timeout.0,
         },
         ServiceInfo {
             mode,

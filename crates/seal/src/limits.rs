@@ -9,8 +9,8 @@ use tokio::time::Instant;
 use crate::config::{Config, Rate};
 
 /// Token buckets keyed by a name callers choose, so the table is bounded: past
-/// `capacity`, the least recently used bucket is dropped, which only ever forgets a
-/// limit, never invents one.
+/// `capacity`, the least recently used bucket that has filled again is dropped, which
+/// forgets nothing, and if none has, a new name is refused until one does.
 pub struct RateLimiter<K> {
     rate: Rate,
     capacity: usize,
@@ -41,13 +41,22 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
         let per_second = burst / self.rate.per.as_secs_f64();
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
         if !buckets.contains_key(key) && buckets.len() >= self.capacity {
-            let oldest = buckets
+            // Only a bucket that has filled again is forgotten: a new one starts full,
+            // so that forgets nothing. Forgetting one in use would hand its name a
+            // fresh burst, and with no bucket to spare a new name waits.
+            let refilled = |bucket: &Bucket| {
+                bucket.tokens + now.duration_since(bucket.updated).as_secs_f64() * per_second
+                    >= burst
+            };
+            let spare = buckets
                 .iter()
+                .filter(|(_, bucket)| refilled(bucket))
                 .min_by_key(|(_, bucket)| bucket.updated)
                 .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                buckets.remove(&oldest);
-            }
+            match spare {
+                Some(spare) => buckets.remove(&spare),
+                None => return false,
+            };
         }
         let bucket = buckets.entry(key.clone()).or_insert(Bucket {
             tokens: burst,
@@ -199,10 +208,18 @@ mod tests {
             },
             2,
         );
-        for key in ["a", "b", "c"] {
+        for key in ["a", "b"] {
             assert!(limiter.allow(&key.to_owned()));
             tokio::time::advance(Duration::from_millis(1)).await;
         }
+        // Both are in use, so neither is forgotten to make room: that would hand its
+        // name a new burst.
+        assert!(!limiter.allow(&"c".to_owned()));
+        assert!(!limiter.allow(&"a".to_owned()), "a kept its bucket");
+        assert_eq!(limiter.buckets.lock().unwrap().len(), 2);
+        // Once one has filled again there is room, and nothing is lost by taking it.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(limiter.allow(&"c".to_owned()));
         assert_eq!(limiter.buckets.lock().unwrap().len(), 2);
     }
 
