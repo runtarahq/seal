@@ -49,6 +49,13 @@ pub(crate) fn presigned_url(
     if plan.response.is_some() || !plan.form_requirements.is_empty() {
         return Err(denied("a rule here needs seal to send the request"));
     }
+    // The URL goes to the caller, with whatever parts of the credential it carries. A
+    // sealed part is in it only where that value's own rule says so.
+    if !plan.companions_allow_presign {
+        return Err(denied(
+            "a sealed part of the credential does not allow presigning",
+        ));
+    }
     let [injection] = plan.injections.as_slice() else {
         return Err(denied("one value presigns a URL, and no other may be used"));
     };

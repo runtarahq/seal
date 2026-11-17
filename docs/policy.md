@@ -442,6 +442,11 @@ it may go nowhere else. A sealed session token could have this policy:
 }] }
 ```
 
+A [presigned URL](signing.md#presigned-urls) is returned to the caller with the parts of
+the credential it carries, such as a session token. A sealed companion is written into
+one only with `"companion": { "allow_presign": true }`: the rule that presigns is not
+enough, since anyone can seal one that names this value as its part.
+
 ## Response sealing
 
 A rule with `seal_response` always seals the named fields, and returns the response with
@@ -606,6 +611,10 @@ the caller's form body before sending: each listed field must appear exactly onc
 of the listed values. Here a shared client secret may only be used for the grants that act
 for a user who consented, never for `client_credentials`, which would act as the app
 itself.
+
+A required field may not be named in the URL's query either. Some providers read
+parameters from both and prefer the query, which would put the caller's value in place of
+the one seal checked.
 
 ```json
 {

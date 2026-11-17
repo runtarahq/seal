@@ -1471,3 +1471,31 @@ fn a_postgres_certificate_cannot_change_how_a_passwords_server_is_verified() {
         assert!(decide(&policies, &pg_head(5432, &plain)).is_ok(), "{extra}");
     }
 }
+
+// Required form fields.
+
+#[test]
+fn a_required_form_field_cannot_also_be_in_the_query() {
+    let shared = policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "api.example.com" },
+        "inject": { "form_field": { "name": "client_secret" } },
+        "require_form": { "grant_type": ["authorization_code", "refresh_token"] },
+    }] }));
+    let policies = fields(&[("client_secret", shared)]);
+    for url in [
+        "https://api.example.com/oauth/token?grant_type=client_credentials",
+        "https://api.example.com/oauth/token?a=b&grant%5Ftype=client_credentials",
+        "https://api.example.com/oauth/token?grant_type",
+    ] {
+        let mut request = Request::to(url);
+        request.method = Method::Post;
+        assert_eq!(
+            refusal(request.decide(&policies)),
+            ErrorCode::PolicyDenied,
+            "{url}"
+        );
+    }
+    let mut request = Request::to("https://api.example.com/oauth/token?api-version=2");
+    request.method = Method::Post;
+    assert!(request.decide(&policies).is_ok());
+}

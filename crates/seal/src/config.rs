@@ -168,10 +168,18 @@ pub struct Listen {
     /// How often certificate files are checked for changes.
     #[serde(default = "default_reload")]
     pub reload_interval: Interval,
+    /// How long a caller's TLS connection lasts before it must connect again, and so
+    /// present a certificate that is still valid.
+    #[serde(default = "default_connection_age")]
+    pub max_connection_age: Interval,
 }
 
 fn default_reload() -> Interval {
     Interval(Duration::from_secs(10))
+}
+
+fn default_connection_age() -> Interval {
+    Interval(Duration::from_secs(3600))
 }
 
 /// Certificate files, in PEM, reloaded when they change.

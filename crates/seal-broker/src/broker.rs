@@ -369,6 +369,7 @@ impl Broker {
         request: ConnectRequest,
         record: &mut AuditRecord,
     ) -> Result<PgSession, BrokerError> {
+        self.audit_ready()?;
         let ConnectRequest {
             keyset,
             item,
@@ -519,6 +520,7 @@ impl Broker {
         request: PresignRequest,
         audit: &mut AuditGuard,
     ) -> Result<zeroize::Zeroizing<String>, BrokerError> {
+        self.audit_ready()?;
         let PresignRequest {
             keyset,
             item,
@@ -615,6 +617,7 @@ impl Broker {
         mac: &[u8],
         progress: &Progress,
     ) -> Result<bool, BrokerError> {
+        self.audit_ready()?;
         let (secrets, policies, _) = self.open_all(keyset, item, sealed).await?;
         let verify = policies.get(field).and_then(|policy| policy.verify);
         drop(policies);
@@ -711,6 +714,13 @@ impl Broker {
         }
     }
 
+    /// Refuses while the audit sink cannot write, before anything is opened or sent.
+    fn audit_ready(&self) -> Result<(), BrokerError> {
+        self.audit
+            .ready()
+            .map_err(|_| BrokerError::new(ErrorCode::Internal, "the audit log cannot be written"))
+    }
+
     /// The record of a request that has only just arrived: a cancellation, until it
     /// ends some other way.
     fn first_record(
@@ -765,6 +775,7 @@ impl Broker {
         progress: &Arc<Progress>,
         contacted: &mut bool,
     ) -> Result<Sent, BrokerError> {
+        self.audit_ready()?;
         let SendRequest {
             keyset,
             item,

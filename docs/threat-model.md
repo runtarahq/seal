@@ -171,9 +171,15 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **A caller can read data with a credential it can use.** seal limits where a
   credential goes, not what the provider returns for an allowed request, nor what an
   allowed request does there: it may, for example, set S3 metadata or storage class.
-  Headers that would reach outside the destination, such as a copy source, are checked
-  against the rule, and those that could widen access, such as ACLs, need the rule to
-  allow them.
+  For SigV4, headers that would reach outside the destination, such as a copy source,
+  are checked against the rule, and those that could widen access, such as ACLs, need
+  the rule to allow them.
+- **An Azure account key is good for its whole account, whatever the rule's path.** With
+  Shared Key a caller may set any `x-ms-*` header but the date, so a copy or rename can
+  read a blob outside the rule's path prefix into it, and a container can be made
+  public. An account key cannot be scoped at Azure, and seal does not stand in for that:
+  a path prefix on a Shared Key rule holds the URL of each request, not what the account
+  key can reach. Seal an account key only where the application may have the account.
 - **Sealed values are usable by anyone who can call seal with them,** so applications
   should not expose them in bulk, even though they are not readable.
 - **Anyone with the public key can seal a new value, with any policy.** HPKE's base

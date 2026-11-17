@@ -452,7 +452,7 @@ pub fn build_head(
                     &injection.field,
                 ));
             }
-            Inject::Companion {} => {}
+            Inject::Companion { .. } => {}
         }
     }
 

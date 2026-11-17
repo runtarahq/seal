@@ -49,10 +49,10 @@ pub type KeyParts = (Arc<dyn KeySource>, KeyWraps);
 ///
 /// Returns a message naming what could not be loaded.
 pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
+    // Twice what `rotate` allows, as the keyring reads: see `KeyringConfig::max_keys_read`.
+    let max_keys = config.keys.max_keys_per_keyset.saturating_mul(2);
     let source: Arc<dyn KeySource> = match &config.keys.source {
-        SourceConfig::Dir(path) => {
-            Arc::new(DirKeySource::new(path, config.keys.max_keys_per_keyset))
-        }
+        SourceConfig::Dir(path) => Arc::new(DirKeySource::new(path, max_keys)),
         SourceConfig::S3(s3) => {
             let ca_pem = match &s3.ca {
                 Some(path) => Some(
@@ -71,7 +71,7 @@ pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
                     profile: s3.profile.clone().unwrap_or_else(|| "default".to_owned()),
                     ca_pem,
                     timeout: KEY_SOURCE_TIMEOUT,
-                    max_keys: config.keys.max_keys_per_keyset,
+                    max_keys,
                 })
                 .map_err(|error| error.to_string())?,
             )
@@ -337,8 +337,11 @@ pub async fn run(
             .map_err(|_| format!("cannot listen on {address}"))?;
             listening(&Listening::Tcp(local));
             tracing::info!(mode, "seal is listening");
+            // A certificate is checked when a connection opens. Ending connections at
+            // an age makes a caller show one again; requests under way finish first.
             builder
                 .clone()
+                .max_connection_age(config.listen.max_connection_age.0)
                 .add_service(server)
                 .serve_with_incoming_shutdown(incoming, shutdown)
                 .await

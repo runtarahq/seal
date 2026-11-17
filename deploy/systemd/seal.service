@@ -62,5 +62,9 @@ LimitCORE=0
 MemoryMax=2G
 LimitMEMLOCK=2G
 
+# A file for every caller's and provider's connection, with room to spare: more than
+# limits.max_caller_connections and pools.max_upstream_connections together.
+LimitNOFILE=65536
+
 [Install]
 WantedBy=multi-user.target

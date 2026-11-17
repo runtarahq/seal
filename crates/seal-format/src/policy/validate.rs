@@ -101,12 +101,12 @@ fn rule(rule: &Rule, definitions: &BTreeMap<PolicyName, Definition>) -> Result<(
             "only HTTP rules seal responses",
         )?;
         require(
-            !matches!(rule.inject, Inject::Companion {}),
+            !matches!(rule.inject, Inject::Companion { .. }),
             "a companion rule cannot seal responses",
         )?;
         seal_response(response, definitions)?;
     }
-    if matches!(rule.inject, Inject::Companion {}) {
+    if matches!(rule.inject, Inject::Companion { .. }) {
         require(
             rule.plain.is_empty(),
             "a companion rule has no plain fields",
@@ -393,7 +393,7 @@ fn inject(inject: &Inject) -> Result<(), FormatError> {
             !(*require_channel_binding && (*allow_md5 || *allow_cleartext_password)),
             "require_channel_binding cannot go with allow_md5 or allow_cleartext_password",
         ),
-        Inject::Companion {} => Ok(()),
+        Inject::Companion { .. } => Ok(()),
     }
 }
 
@@ -448,7 +448,9 @@ fn injection_fits_destination(rule: &Rule) -> Result<(), FormatError> {
             tls.verifies_the_server(),
             "a client certificate needs a verified server",
         ),
-        (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion {}) => Ok(()),
+        (Destination::Postgres { .. } | Destination::Http { .. }, Inject::Companion { .. }) => {
+            Ok(())
+        }
         (Destination::Postgres { .. }, _) => {
             refuse("a Postgres rule injects a password or a client certificate")
         }

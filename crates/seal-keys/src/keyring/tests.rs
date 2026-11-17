@@ -470,9 +470,22 @@ async fn keys_per_keyset_are_bounded() {
         Err(KeyError::TooManyKeys)
     );
 
-    // A source that holds more than the limit is refused, not truncated.
+    // A keyset over the limit still loads: rotations on separate instances can leave
+    // one there, and it must not become unreadable.
     let other = setup.keyring(KeyringConfig {
         max_keys_per_keyset: 2,
+        max_live_keys: 8,
+        ..config()
+    });
+    other.current_public_key(&keyset("acme")).await.unwrap();
+    assert_eq!(
+        other.rotate(&keyset("acme")).await,
+        Err(KeyError::TooManyKeys)
+    );
+
+    // A source that holds more than twice the limit is refused, not truncated.
+    let other = setup.keyring(KeyringConfig {
+        max_keys_per_keyset: 1,
         max_live_keys: 8,
         ..config()
     });
@@ -480,6 +493,44 @@ async fn keys_per_keyset_are_bounded() {
         other.current_public_key(&keyset("acme")).await,
         Err(KeyError::Unavailable)
     );
+}
+
+/// A source whose answer is already old when it arrives, as a real one's is: it reads
+/// the keys, and only then takes its time.
+struct SlowAnswer(Arc<MemorySource>);
+
+#[async_trait]
+impl KeySource for SlowAnswer {
+    async fn wrapped_keys(&self, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
+        let keys = self.0.wrapped_keys(keyset).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        keys
+    }
+
+    async fn store(&self, key: &WrappedKey) -> Result<(), KeyError> {
+        self.0.store(key).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rotations_at_once_do_not_pass_the_limit_together() {
+    let setup = Setup::new();
+    let keyring = Keyring::new(
+        Arc::new(SlowAnswer(Arc::clone(&setup.source))) as Arc<dyn KeySource>,
+        Arc::clone(&setup.wrap) as Arc<dyn KeyWrap>,
+        config(),
+    )
+    .unwrap();
+    keyring.generate(&keyset("acme")).await.unwrap();
+    let name = keyset("acme");
+    let (a, b, c, d) = tokio::join!(
+        keyring.rotate(&name),
+        keyring.rotate(&name),
+        keyring.rotate(&name),
+        keyring.rotate(&name),
+    );
+    let added = [a, b, c, d].iter().filter(|result| result.is_ok()).count();
+    assert_eq!(added, 2, "three keys in all, as the limit says");
 }
 
 #[tokio::test(start_paused = true)]

@@ -42,6 +42,12 @@ Certificates are short-lived: seal checks its certificate files every
 the old certificates kept, so a half-written renewal cannot take seal down. Connections
 already open keep the certificate they started with.
 
+A caller's certificate is checked when it connects, and seal never resumes a TLS session,
+so every connection is a full handshake with a certificate that is valid then. A
+connection ends at `listen.max_connection_age`, once the requests on it have finished, and
+the caller connects again. An expired or replaced certificate therefore stops working
+within that time, plus the longest request still running.
+
 ## Configuration reference
 
 Unknown settings are errors. Durations are written like `100ms`, `60s`, `15m` or `8h`,
@@ -55,6 +61,7 @@ configuration file that its group or others can write.
 | `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
 | `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san` |
 | `reload_interval` | `10s` | How often certificate files are checked |
+| `max_connection_age` | `1h` | How long a TLS connection lasts before the caller must connect, and show its certificate, again |
 
 ### `[[callers]]`
 
@@ -90,7 +97,7 @@ asked for. A certificate that matches two configured callers is refused.
 | `max_stale` | `5m` | A keyset not fetched successfully this long is dropped |
 | `max_unwrap_age` | `1h` | A key not unwrapped this long is dropped |
 | `max_loaded_keysets` | `1024` | The least recently used goes first |
-| `max_keys_per_keyset` | `16` | `rotate` refuses past this |
+| `max_keys_per_keyset` | `16` | `rotate` refuses past this. A keyset is read with up to twice as many, so one left over the limit by rotations on separate instances at once still loads; more than that is refused |
 | `max_live_keys` | `4096` | Every private key in memory, including ones a request still holds |
 | `max_tracked_keysets` | `4096` | Unknown keysets remembered, and rate buckets |
 | `lock_memory` | `best_effort` | `off`, `best_effort` or `required` |
@@ -131,7 +138,7 @@ least twice `max_keys_per_keyset`.
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
 | `audit.sink` | `"stdout"` | Or `{ file = "…" }`, created readable only by seal's user. A file already there is refused if its group can write it or others can reach it |
 | `audit.on_failure` | `fail_closed` | `best_effort` is for development only |
-| `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz` |
+| `metrics.listen` | none | Serves `/metrics`, `/healthz` and `/readyz`, to at most 64 connections at once, each for at most 30 seconds |
 | `metrics.token_file` | none | A file only seal's user can read, holding a token of at least 16 printable characters. Every request must then send `Authorization: Bearer <token>`. Required unless `metrics.listen` is a loopback address |
 
 A rule in a sealed policy can only tighten a limit, never relax one.
@@ -502,6 +509,14 @@ each way, duration, outcome (`ok`, `refused`, `failed` or `cancelled`) and error
 is someone guessing. A `presign` record has `expires_s`, how long the URL lasts: what is
 done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
+
+A record is written when its request ends, with what happened, so the request that finds
+the sink broken has already used its credential: a streamed response has been delivered
+before it fails, and a Postgres session has run. seal keeps that record, up to 1024 of
+them, and refuses every request after it with `INTERNAL`, before opening a value, until
+the missed records are written. What goes unrecorded while the sink is broken is
+therefore the requests under way when it broke, and their records follow once it works
+again. `seal_audit_failures_total` counts each failed write: alert on it.
 
 A caller refused a keyset, a value's keyset or an administrative call leaves a record
 too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an
