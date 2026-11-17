@@ -65,6 +65,7 @@ hostssl all all all scram-sha-256
 const INIT_SQL: &str = "CREATE USER app_user PASSWORD 'app-secret';
 CREATE DATABASE app OWNER app_user;
 CREATE DATABASE other;
+REVOKE CONNECT ON DATABASE other FROM PUBLIC;
 CREATE USER cert_user;
 SET password_encryption = 'md5';
 CREATE USER md5_user PASSWORD 'md5-secret';
@@ -348,7 +349,8 @@ async fn scenario(version: u32, mode: Mode) {
     assert_eq!(code(&error), Some(SqlState::INVALID_PASSWORD));
     assert!(!format!("{error:?}").contains("app_user\""), "{error:?}");
 
-    // A database the policy does not allow is refused by seal.
+    // A database the role may not connect to is the server's refusal: seal holds no
+    // list of its own.
     let error = session(
         &instance,
         db.request("password", &password),
@@ -358,7 +360,7 @@ async fn scenario(version: u32, mode: Mode) {
     .await
     .err()
     .unwrap();
-    assert_eq!(code(&error), Some(SqlState::INVALID_CATALOG_NAME));
+    assert_eq!(code(&error), Some(SqlState::INSUFFICIENT_PRIVILEGE));
     let error = session(
         &instance,
         db.request("password", &password),
@@ -493,7 +495,8 @@ async fn scenario(version: u32, mode: Mode) {
         "ok"
     );
 
-    // Replication, logical and physical, where every rule allows it; refused otherwise.
+    // Replication, logical and physical: the role's own attribute allows it, whatever
+    // the rule says of it.
     let replication = |allow: bool| {
         policy(&json!({ "rules": [{
             "destination": {
@@ -518,13 +521,13 @@ async fn scenario(version: u32, mode: Mode) {
         .await
         .unwrap_or_else(|state| panic!("Postgres {version}, physical replication: {state}"));
     assert_eq!(physical, system_id);
-    let refused = setup
+    let unmarked = setup
         .seal("password", b"repl-secret", &replication(false))
         .await;
-    let state = identify_system(&instance, db.request("password", &refused), "database")
+    let again = identify_system(&instance, db.request("password", &unmarked), "database")
         .await
-        .unwrap_err();
-    assert_eq!(state, "28000");
+        .unwrap_or_else(|state| panic!("Postgres {version}, a rule without the option: {state}"));
+    assert_eq!(again, system_id);
 
     let mut registry = seal_testkit::canary::CanaryRegistry::new();
     for secret in ["app-secret", "md5-secret", "clear-secret", "repl-secret"] {

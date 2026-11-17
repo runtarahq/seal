@@ -40,31 +40,33 @@ the cancel may go through any seal instance.
 
 ## The policy
 
-A Postgres destination names the host and port exactly, the databases a session may use,
-the user, and how the server's certificate is checked. [`policy.md`](policy.md#postgres)
+A Postgres destination names the host and port exactly, the user, and how the server's
+certificate is checked. [`policy.md`](policy.md#postgres)
 has every option.
 
 ```json
 { "rules": [{
   "destination": {
     "scheme": "postgres", "host": "db.example.com", "port": 5432,
-    "databases": ["app"], "user": { "literal": "app_user" },
+    "user": { "literal": "app_user" },
     "tls": "verify_full"
   },
   "inject": { "pg_password": {} }
 }] }
 ```
 
-The builder makes this: `builder::postgres(host, port, databases, user)`.
+The builder makes this: `builder::postgres(host, port, user)`.
 
-A session's startup must name the policy's user, and a database the policy allows: a
-missing `database` means the user's name, as in Postgres. Replication is refused unless
-every matched rule allows it. The caller's other startup parameters, such as
-`application_name`, go to the server as they are.
+A session's startup must name the policy's user. The database is the caller's to name,
+and a missing `database` means the user's name, as in Postgres; so is whether the session
+replicates. Which databases the role may connect to, and whether it may replicate, are
+the server's own privileges to say, not seal's. The audit record has the database. The
+caller's other startup parameters, such as `application_name`, go to the server as they
+are.
 
 The user can be a literal, a plain field the rule lists, or a sealed companion. A
 password and a client certificate may be presented together. The rules must then agree
-on the user and on TLS, and a session may use only the databases both allow. How the
+on the user and on TLS. How the
 server is verified is the destination's `tls`: a certificate's rule that names its own
 `ca` or `server_name` is refused beside a password.
 
@@ -178,9 +180,9 @@ Postgres 14, 15, 16, 17 and 18, in all three modes, with `tokio-postgres`
 
 - SCRAM with channel binding, a client certificate, MD5 and cleartext;
 - queries, transactions, `LISTEN`/`NOTIFY` and `COPY` both ways;
-- a wrong password, and a user or database the policy does not allow;
+- a wrong password, a user the policy does not allow, and a database the role may not
+  connect to, which is the server's refusal;
 - a `pg_sleep` cancelled through another seal instance;
-- logical and physical replication sessions running `IDENTIFY_SYSTEM` where the rule
-  allows replication, and refused where it does not.
+- logical and physical replication sessions running `IDENTIFY_SYSTEM`.
 
 A nightly test copies 1 GB in and out within the memory limit.

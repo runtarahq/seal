@@ -24,7 +24,6 @@ instead.
 {
   "rules": [{
     "destination": { "scheme": "https", "host": "api.example.com", "port": 443, "path_prefix": "/v2/" },
-    "methods": ["GET", "POST"],
     "inject": { "header": { "name": "Authorization", "format": "Bearer {}" } }
   }]
 }
@@ -37,7 +36,7 @@ rule's secret. An injection names only the other parts of a credential, each as
 | Option | Meaning |
 |---|---|
 | `destination` | Where the secret may go |
-| `methods` | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or `OPTIONS`. Any of them if absent. HTTP only. `CONNECT` and `TRACE` cannot be allowed |
+| `methods` | The methods a [presigned URL](#aws_sigv4) may be for, which a rule that allows presigning must list. Requests seal sends are not held to it: any of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` and `OPTIONS` goes, and `CONNECT` and `TRACE` never do. HTTP only |
 | `inject` | How the secret is attached |
 | `plain` | Plain fields the caller may supply as parts of the credential |
 | `seal_response` | Response fields that are always sealed |
@@ -93,10 +92,8 @@ certificate's `server_name` take one host and no pattern.
   "rules": [{
     "destination": {
       "scheme": "postgres", "host": "db.example.com", "port": 5432,
-      "databases": ["app", "reports"],
       "user": { "literal": "app_user" },
-      "tls": { "ca": "-----BEGIN CERTIFICATE-----\nexample\n-----END CERTIFICATE-----" },
-      "allow_replication": true
+      "tls": { "ca": "-----BEGIN CERTIFICATE-----\nexample\n-----END CERTIFICATE-----" }
     },
     "inject": { "pg_password": {} }
   }]
@@ -105,10 +102,8 @@ certificate's `server_name` take one host and no pattern.
 
 | Option | Meaning |
 |---|---|
-| `databases` | The databases a session may use. At least one |
 | `user` | The user a session logs in as |
 | `tls` | `"verify_full"` (the default) checks the configured roots and the host name, or `{ "ca": "…" }` a specific CA in PEM. `"unverified"` and `"plaintext"` are [weakening options](#weakening-options) |
-| `allow_replication` | Allows a replication session. Off by default |
 
 ## Injections
 
@@ -175,7 +170,6 @@ webhook's `secret_token` in the body:
 ```json
 { "rules": [{
   "destination": { "scheme": "https", "host": "api.telegram.org", "path_prefix": "/setWebhook" },
-  "methods": ["POST"],
   "inject": { "form_field": { "name": "secret_token" } },
   "allow_injected_path": "/bot{}",
   "require_form": { "url": ["https://app.example.com/telegram"] }
@@ -250,52 +244,22 @@ among them, and which headers a caller may not set.
 }] }
 ```
 
-`allow_headers` lets the caller set ACL, grant and copy headers, which are refused
-otherwise. A copy source must be within the path prefix, which such a rule needs:
-
-```json
-{ "rules": [{
-  "destination": { "scheme": "https", "host": "s3.eu-west-1.amazonaws.com", "path_prefix": "/tenant-a/" },
-  "inject": { "aws_sigv4": {
-    "region": "eu-west-1",
-    "service": "s3",
-    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
-    "payload": ["computed"],
-    "allow_headers": ["x-amz-acl", "x-amz-copy-source"]
-  } }
-}] }
-```
-
-A rule for a whole endpoint has no path prefix to hold a copy's source to. Where the
-endpoint is addressed by path, so that its host is every bucket's,
-`allow_copy_from_any_bucket` lets a copy read any object there. It is a
-[weakening option](#weakening-options), and wrong for a host that is one bucket's, as
-with virtual-hosted URLs: a copy could then read the others.
-
-```json
-{ "rules": [{
-  "destination": { "scheme": "https", "host": "storage.example.com" },
-  "inject": { "aws_sigv4": {
-    "region": "us-east-1",
-    "service": "s3",
-    "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
-    "payload": ["computed"],
-    "allow_headers": ["x-amz-copy-source"],
-    "allow_copy_from_any_bucket": true
-  } }
-}] }
-```
+What a request does at its destination is not seal's to limit. A caller may set any
+`X-Amz-*` header but those that say [how the request is signed](signing.md#headers-a-caller-may-set),
+so ACLs, grants and copy sources pass and are signed, and the credential's own IAM policy
+says which of them work.
 
 `region` and `service` are usually fixed, so that a signature is good for one service in
 one region. A credential used for whatever service each request is for, such as one an
 agent uses across an account, has them named by the caller instead: each is then a plain
-field the rule lists, with the values `allowed` if they can be listed.
+field the rule lists. Any region or service written as AWS writes them is signed for:
+which ones the credential works with is for its own permissions.
 
 ```json
 { "rules": [{
   "destination": { "scheme": "https", "host": "*.amazonaws.com" },
   "inject": { "aws_sigv4": {
-    "region": { "field": "aws_region", "allowed": ["eu-west-1", "us-east-1"] },
+    "region": { "field": "aws_region" },
     "service": { "field": "aws_service" },
     "access_key_id": { "literal": "AKIAIOSFODNN7EXAMPLE" },
     "payload": ["computed"]
@@ -409,7 +373,7 @@ SCRAM-SHA-256 is always allowed. The others only run over TLS.
 { "rules": [{
   "destination": {
     "scheme": "postgres", "host": "db.example.com", "port": 5432,
-    "databases": ["app"], "user": { "field": "user" }
+    "user": { "field": "user" }
   },
   "inject": { "pg_password": { "allow_md5": true, "allow_cleartext_password": true } },
   "plain": ["user"]
@@ -424,7 +388,7 @@ options above.
 { "rules": [{
   "destination": {
     "scheme": "postgres", "host": "db.example.com", "port": 5432,
-    "databases": ["app"], "user": { "literal": "app_user" }
+    "user": { "literal": "app_user" }
   },
   "inject": { "pg_password": { "require_channel_binding": true } }
 }] }
@@ -703,15 +667,12 @@ Options that weaken a guarantee are named for it, and are off by default.
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
 | `allow_injected_path` | A rule | Lets the value go with one that [injects into the path](#path) with exactly this prefix. The request is then sent under that prefix, filled by whichever such value is presented |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |
-| `allow_headers` | `aws_sigv4` | Lets the caller set ACL, grant or copy headers |
-| `allow_copy_from_any_bucket` | `aws_sigv4` | Lets a copy read any object on the rule's host, for a rule with no path prefix. Only for an endpoint addressed by path |
 | `allow_presign` | `aws_sigv4`, `azure_shared_key` | Lets the caller have a presigned URL or shared access signature for one object, lasting at most `max_expiry_s`. The caller can copy it and pass it on, and it works without seal, unaudited, until it expires |
 | `tls: "unverified"` | A Postgres destination | TLS with whatever certificate the server presents, as libpq's `sslmode=require`. Anyone on the path can pass as the server and read the session. SCRAM only |
 | `tls: "plaintext"` | A Postgres destination | No TLS, as libpq's `sslmode=disable`. Anyone on the path can read and change the session. SCRAM only, and only where the operator sets `honour_plaintext_postgres_rules` |
 | `allow_md5` | `pg_password` | Allows MD5 authentication |
 | `allow_cleartext_password` | `pg_password` | Allows a cleartext password |
 | `require_channel_binding` | `pg_password` | Not a weakening: refuses any login but SCRAM-SHA-256-PLUS. Cannot go with the two above |
-| `allow_replication` | A Postgres destination | Allows a replication session |
 
 ```json
 { "rules": [{
@@ -721,6 +682,26 @@ Options that weaken a guarantee are named for it, and are off by default.
   "allow_plain_http": true
 }] }
 ```
+
+## Options no longer used
+
+seal seals credentials and decides where they go. What a request does once it is there
+is for the credential's own permissions at the provider: IAM, an API key's scopes, a
+Postgres role's privileges. These options once limited that, and seal no longer acts on
+them. They are still read, so that a value sealed with one opens, and the builders no
+longer write them.
+
+| Option | On | Once |
+|---|---|---|
+| `allow_headers` | `aws_sigv4` | Let the caller set ACL, grant and copy headers. Every `X-Amz-*` header but the signing ones now passes |
+| `allow_copy_from_any_bucket` | `aws_sigv4` | Let a copy read from outside the rule's path prefix. A copy's source is no longer checked |
+| The `allowed` list of a named `region` or `service` | `aws_sigv4` | Held the caller to listed regions or services |
+| `methods`, for requests | A rule | Held requests to the listed methods. It now bounds only presigned URLs |
+| `databases` | A Postgres destination | Listed the databases a session might name |
+| `allow_replication` | A Postgres destination | Allowed a replication session, refused otherwise |
+
+A value sealed with one of these was sealed with a limit seal no longer keeps. If the
+limit matters, set it where the credential is issued.
 
 ## The builder
 
@@ -744,8 +725,8 @@ plain HTTP and private addresses have to be written out. An endpoint's host may 
 | `webhook_hmac(hash)` | A webhook signing secret, which only verifies |
 | `webhook_token()` | A token a provider sends back with each webhook, which only verifies |
 | `registered_webhook_token(register_url, path_prefix, token_field, url_field, webhook_url)` | Such a token that is also sent when the webhook is registered, with a secret [in the path](#path), and only for that webhook's URL: Telegram's `setWebhook` |
-| `postgres(host, port, databases, user)` | A Postgres password, with SCRAM only and the server verified |
-| `postgres_with_tls(host, port, databases, user, tls)` | A Postgres password, with SCRAM only, for a server verified against its own CA or [not verified](postgres.md#servers-that-cannot-be-verified) |
+| `postgres(host, port, user)` | A Postgres password, with SCRAM only and the server verified |
+| `postgres_with_tls(host, port, user, tls)` | A Postgres password, with SCRAM only, for a server verified against its own CA or [not verified](postgres.md#servers-that-cannot-be-verified) |
 
 A part of a composite credential comes from a `PartSource`: `Literal` fixes it in the policy,
 `Plain` lists it in `plain`, and `Sealed` generates a companion policy for that field, returned

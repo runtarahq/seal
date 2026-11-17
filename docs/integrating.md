@@ -44,7 +44,8 @@ flows, and [`operations.md`](operations.md) running seal itself.
   back, and only for a rule sealed with `allow_presign`. Use it to hand an object to a
   browser or another party; read and write objects of your own through `send`. Ask for
   the shortest lifetime that works, never log the URL, and give such rules a narrow
-  `path_prefix` and only the methods they need.
+  `path_prefix` and only the methods they need, which for presigned URLs the rule's
+  `methods` still hold.
 - **OAuth callbacks land on the application**, not on seal, which need not be reachable
   from the internet. The authorization code alone is not enough to redeem: that needs
   the sealed client secret and the PKCE verifier, and the tokens come back sealed.

@@ -20,32 +20,20 @@ the body, `range`, and every `x-amz-*` header.
 
 ### Headers a caller may set
 
-| Headers | Allowed |
+seal sets the headers that say how a request is signed, and neither a caller nor another
+presented value's injection may set them:
+
+| Header | |
 |---|---|
-| `x-amz-meta-*`, `x-amz-storage-class`, `x-amz-tagging`, `x-amz-server-side-encryption*`, `x-amz-checksum-*`, `x-amz-expected-bucket-owner`, `x-amz-request-payer`, `x-amz-target` | Always: they change what the request does at its destination, not where it goes or how it is signed. `x-amz-target` names the operation for services such as SQS and DynamoDB |
-| `x-amz-acl`, `x-amz-grant-*` | Where the rule lists them in `allow_headers`, since they can widen who reads the data |
-| `x-amz-copy-source` and the rest of the copy headers | Where the rule lists `x-amz-copy-source`, and only from within the rule's path prefix, or from the rule's host where it sets `allow_copy_from_any_bucket` |
-| `X-Amz-Content-SHA256` | A well-formed hash, where the rule allows the caller's hash |
-| Every other `X-Amz-*` header, including `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Decoded-Content-Length` and `X-Amz-Trailer` | Never: they control signing, or are not on the list yet |
+| `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Decoded-Content-Length`, `X-Amz-Trailer` | Never |
+| `X-Amz-Content-SHA256` | Only a well-formed hash, where the rule allows the caller's hash |
 
-A header that another presented value injects is signed like one the caller set, and
-anyone can seal a value that injects one. So seal holds it to the same table: beside a
-SigV4 rule, another value may inject an `X-Amz-*` header only where the caller could set
-it. An injected `x-amz-copy-source` is always refused, since its value is a secret and
-cannot be checked against the rule's prefix.
-
-A copy reads the object its source names, not the one in the URL. Without a check, a
-secret limited to one bucket could copy another bucket's object into it and read it. So
-seal reads the copy source, `bucket/key` or `/bucket/key` with an optional
-`?versionId=`, as a path on the request's own host, and refuses it unless it is within
-the rule's path prefix. The same rules apply as to a request's URL. A rule that allows
-copies must have a path prefix naming the bucket: with virtual-hosted URLs the bucket is
-in the host name, so seal could not check a source against it.
-
-A credential for a whole endpoint that is addressed by path has no prefix, and its host
-is every bucket's. Its rule can set `allow_copy_from_any_bucket`, and a copy may then
-read any object on that host, which the credential could fetch there anyway. The source
-must still name a bucket and a key, plainly.
+Every other `X-Amz-*` header passes and is signed: metadata, storage class, ACLs and
+grants, a copy source, object lock, `x-amz-target`. They say what the request does at its
+destination, and that is for the credential's own permissions to allow or refuse. seal
+decides where a credential goes, not what its IAM policy lets it do there: a copy can
+read whatever the key can read, and a key that should not set ACLs should not be
+allowed to in IAM.
 
 ### Payload modes
 
@@ -85,8 +73,9 @@ application itself reads or writes the object, send the request through seal ins
 `Presign` takes the sealed values, a method, the object's URL and a lifetime, and returns
 the URL with its signature. seal refuses it unless:
 
-- the rule would allow seal to send that request: the same destination, path prefix and
-  `methods`, which a rule with `allow_presign` must list;
+- the URL is within the rule's destination and path prefix, and the method is one of
+  the rule's `methods`, which a rule with `allow_presign` must list. This is the one
+  place `methods` holds anything: a URL is a copy the caller keeps;
 - the method is `GET`, `HEAD`, `PUT` or `DELETE`;
 - the lifetime is at most the rule's `max_expiry_s`, itself at most seven days;
 - the service is `s3`, since a presigned call to another service can be an identity
@@ -134,10 +123,9 @@ caller sent none, and `Authorization`. A caller cannot set `Authorization`, `x-m
 `Date`. Shared Key refuses a repeated header, so seal refuses one too.
 
 Every other `x-ms-*` header passes and is signed, including `x-ms-copy-source`, the
-rename sources and `x-ms-blob-public-access`. Unlike SigV4's copy source, they are not
-checked against the rule: an account key is good for the whole account and cannot be
-scoped at Azure, so a rule's path prefix holds each request's URL and not what a copy
-can read. The [threat model](threat-model.md) lists this among the accepted risks.
+rename sources and `x-ms-blob-public-access`, as every `X-Amz-*` header but the signing
+ones does. An account key is good for the whole account and cannot be scoped at Azure,
+so a rule's path prefix holds each request's URL and not what a copy can read. The [threat model](threat-model.md) lists this among the accepted risks.
 
 seal sets `Content-Length` before signing whenever the body's length is known, because
 the service signs it whenever the request carries it.
