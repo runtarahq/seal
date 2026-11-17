@@ -116,6 +116,7 @@ jobs:
       - run: rustup toolchain install
       - run: cargo test --package seal --test containers --locked -- --ignored
       - run: cargo test --package seal --test postgres --locked -- --ignored
+      - run: cargo test --package seal-keys --lib --locked s3::tests -- --ignored
 
   test-macos:
     runs-on: macos-latest

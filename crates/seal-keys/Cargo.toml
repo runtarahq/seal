@@ -54,7 +54,7 @@ zeroize = "1"
 futures-util = "0.3"
 seal-testkit = { path = "../seal-testkit" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

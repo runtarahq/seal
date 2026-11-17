@@ -14,6 +14,7 @@ mod https;
 pub mod keyring;
 mod kms;
 pub mod ovh_kms;
+pub mod s3;
 pub mod sigv4;
 pub mod source;
 pub mod wrap;
@@ -32,6 +33,7 @@ use tokio::sync::OwnedSemaphorePermit;
 pub use aws_kms::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
 pub use keyring::{Keyring, KeyringConfig, PublicKeyInfo};
 pub use ovh_kms::{OvhKmsAuth, OvhKmsConfig, OvhKmsWrap};
+pub use s3::{S3KeySource, S3KeySourceConfig};
 pub use source::{DirKeySource, KeySource, RewrapOptions, Rewrapped, WrappedKey, rewrap};
 pub use wrap::{FileKeyWrap, KeyWrap, KeyWraps};
 
