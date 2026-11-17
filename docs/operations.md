@@ -82,7 +82,7 @@ asked for. A certificate that matches two configured callers is refused.
 
 | Setting | Default | |
 |---|---|---|
-| `source` | | `{ dir = "…" }`, or `{ http = { url, ca, cert, key } }` for a key service with a client certificate |
+| `source` | | `{ dir = "…" }`: the directory that holds the wrapped keys, as `<dir>/<keyset>/<kid>.json` |
 | `wrap` | | `{ file = "…" }`: 32 bytes readable only by seal's user. Or `{ ovh_kms = { … } }` or `{ aws_kms = { … } }`, a key that stays in a KMS: see [wrapping with a KMS](#wrapping-with-a-kms) |
 | `idle_evict` | `15m` | A keyset unused this long is dropped from memory |
 | `refresh_interval` | `60s` | How often a loaded keyset is fetched again |
@@ -181,9 +181,8 @@ seal keygen --wrapping-key /etc/seal/kek               # once per deployment
 seal keygen --config /etc/seal/seal.toml --keyset acme # a keyset's first key
 ```
 
-Or call `GenerateKeyset` as an admin caller, which returns the public key and the wrapped
-private key. With a directory source, seal stores it; with a read-only source, the
-application stores it.
+Or call `GenerateKeyset` as an admin caller, which stores the wrapped private key in the
+key source and returns it with the public key.
 
 Instances do not coordinate. Each re-reads the key source for the keysets it has loaded
 every `refresh_interval`, and at once, at most every 30 seconds, when a value names a key
@@ -342,8 +341,6 @@ key's ARN and needs nothing from seal.
 
 ### Rotating the wrapping key
 
-For a directory key source. A key service re-wraps the keys it holds itself.
-
 1. Make the new wrapping key, and wrap every key again into a new directory:
 
    ```sh
@@ -408,7 +405,7 @@ Delete every wrapped key of the keyset from the key source, including any copies
 backups, or destroy the wrapping key. Once that has taken effect, within `max_stale` or
 `max_unwrap_age`, every value sealed to those keys, in every backup, is unreadable.
 
-For a directory key source, seal deletes the keyset's wrapped keys itself:
+seal deletes the keyset's wrapped keys itself:
 
 ```sh
 seal destroy-keyset --config /etc/seal/seal.toml --keyset acme --confirm acme
@@ -420,7 +417,6 @@ tenants, and list its keysets if they can be listed, since `["*"]` lets it end t
 The instance that takes the call stops using the keyset at once, the others within
 `max_stale`. This cannot be undone, and it does not reach backups of the key source: a
 copy of the wrapped keys still opens the keyset's values while the wrapping key exists.
-A key service deletes the keys it holds itself; seal answers `CONFLICT` there.
 
 ## Audit
 
