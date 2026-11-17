@@ -391,3 +391,13 @@ fn the_end_point_hash_follows_the_signature_algorithm() {
         None
     );
 }
+
+#[test]
+fn a_challenge_with_too_few_iterations_is_seen() {
+    assert_eq!(scram_iterations(b"r=abc,s=c2FsdA==,i=4096"), Some(4096));
+    assert_eq!(scram_iterations(b"r=abc,s=c2FsdA==,i=1"), Some(1));
+    assert_eq!(scram_iterations(b"r=abc,s=c2FsdA=="), None);
+    assert_eq!(scram_iterations(b"r=abc,s=c2FsdA==,i=many"), None);
+    assert_eq!(scram_iterations(b"r=abc,s=c2FsdA==,i=99999999999"), None);
+    assert_eq!(MIN_SCRAM_ITERATIONS, 4096);
+}

@@ -142,8 +142,13 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   can relay the login and then read or change the session, as with libpq's
   `sslmode=require` and `disable`. The login is SCRAM only in those modes, so the
   password and anything that could stand in for it stay with seal, and a server that
-  does not know the password is not logged in to. Channel binding, where the server
-  offers it, catches an impostor under `"unverified"`. `"plaintext"` also needs the
+  does not know the password is not logged in to. Under `"unverified"` only a rule with
+  `require_channel_binding` catches an impostor: without it, one that presents a
+  certificate with no hash to bind to, such as Ed25519, is logged in to unbound, and can
+  relay the login to the real server. Whoever receives a SCRAM proof can try passwords
+  against it offline, at the cost of the iterations the server asked for, so seal
+  refuses fewer than 4096, and a password for such a rule should be generated, not
+  chosen. `"plaintext"` also needs the
   operator's `honour_plaintext_postgres_rules`. Both are the sealer's choice per value,
   and the default verifies.
 - **A credential whose service the caller names is bounded by its own permissions.**

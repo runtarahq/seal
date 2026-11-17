@@ -243,7 +243,12 @@ impl PgSession {
 
         let mut hello = before_ok;
         hello.extend_from_slice(&wire::authentication_ok());
-        write(caller, &hello).await.map_err(|()| {
+        // A caller that does not read would otherwise hold the session here, before
+        // the relay's own limits begin.
+        let written = tokio::time::timeout(self.connect_timeout, write(caller, &hello))
+            .await
+            .unwrap_or(Err(()));
+        written.map_err(|()| {
             Some(Refusal::new(
                 ErrorCode::BadRequest,
                 "08006",
@@ -343,8 +348,12 @@ impl PgSession {
             .await
             .map_err(|()| Refusal::new(ErrorCode::UpstreamReset, "08006", "the server closed"))?;
         // The server closes once it has the request.
-        let mut rest = Vec::new();
-        let _ = tokio::time::timeout(self.connect_timeout, server.read_to_end(&mut rest)).await;
+        // Whatever it sends first is read and dropped, never kept.
+        let drained = async {
+            let mut scratch = [0_u8; 1024];
+            while matches!(server.read(&mut scratch).await, Ok(read) if read > 0) {}
+        };
+        let _ = tokio::time::timeout(self.connect_timeout, drained).await;
         Ok(())
     }
 
