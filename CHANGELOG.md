@@ -20,7 +20,9 @@ The first release.
 
 ### Using credentials over HTTP
 
-- Policies name the destinations, methods and paths a value may be used for. The matcher
+- Policies name the destinations and paths a value may be used for. What a request does
+  there is for the credential's own permissions at the provider, which seal does not
+  stand in for. The matcher
   treats every policy as untrusted, and checks every address it connects to. See
   [`docs/policy.md`](docs/policy.md).
 - A rule's host may be a pattern, `*.` and a domain, for a provider whose API is on
@@ -47,9 +49,9 @@ The first release.
 - A SigV4 rule may let the caller name the region and the service with each request, in
   plain fields the rule lists, for one credential used across services. A fixed region
   and service are written as before.
-- A SigV4 request may name its operation in `X-Amz-Target`, as SQS, DynamoDB and other
-  services that take JSON need. A rule for a whole S3 endpoint addressed by path may set
-  `allow_copy_from_any_bucket`, so that a copy can read any object on its host.
+- A SigV4 caller may set any `X-Amz-*` header but those that say how seal signs, and a
+  Shared Key caller any `x-ms-*` header but the date: ACLs, copy sources, `X-Amz-Target`
+  and the rest are for the credential's own permissions to allow.
 - Presigned S3 URLs and Blob shared access signatures, for a rule that sets
   `allow_presign`: off by default, within the lifetime the rule gives, and audited. This
   is the one credential seal hands back to a caller.

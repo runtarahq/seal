@@ -43,7 +43,7 @@ struct Request {
     method: Method,
     headers: Vec<&'static str>,
     plain: BTreeSet<FieldName>,
-    copy_source: Option<&'static str>,
+    presign: bool,
 }
 
 impl Request {
@@ -53,7 +53,7 @@ impl Request {
             method: Method::Get,
             headers: Vec::new(),
             plain: BTreeSet::new(),
-            copy_source: None,
+            presign: false,
         }
     }
 
@@ -65,7 +65,7 @@ impl Request {
                 method: self.method,
                 header_names: &self.headers,
                 plain: &self.plain,
-                copy_source: self.copy_source,
+                presign: self.presign,
             },
         )
     }
@@ -116,14 +116,20 @@ fn another_destination_is_refused() {
 }
 
 #[test]
-fn a_method_the_rule_does_not_list_is_refused() {
+fn a_rules_methods_bound_presigned_urls_and_not_requests() {
     let mut limited = rule(&json!({ "header": { "name": "A", "format": "{}" } }));
     limited["methods"] = json!(["GET"]);
     let policies = fields(&[("token", policy(&json!({ "rules": [limited] })))]);
     let mut request = Request::to(API);
     assert!(request.decide(&policies).is_ok());
+    // What a credential may do is for its own permissions.
     request.method = Method::Post;
+    assert!(request.decide(&policies).is_ok());
+    // A URL is a copy the caller keeps, so there the list holds.
+    request.presign = true;
     assert_eq!(refusal(request.decide(&policies)), ErrorCode::PolicyDenied);
+    request.method = Method::Get;
+    assert!(request.decide(&policies).is_ok());
 }
 
 #[test]
@@ -131,7 +137,7 @@ fn the_first_matching_rule_is_used() {
     let wide = rule(&json!({ "header": { "name": "First", "format": "{}" } }));
     let later = rule(&json!({ "header": { "name": "Second", "format": "{}" } }));
     let mut limited = rule(&json!({ "header": { "name": "Limited", "format": "{}" } }));
-    limited["methods"] = json!(["POST"]);
+    limited["destination"]["path_prefix"] = json!("/elsewhere/");
     let policies = fields(&[("token", policy(&json!({ "rules": [limited, wide, later] })))]);
     let plan = Request::to(API).decide(&policies).unwrap();
     assert_eq!(plan.injections[0].rule_index, 1);
@@ -883,7 +889,7 @@ fn random_rule() -> impl Strategy<Value = Rule> {
 }
 
 /// Simple, slow and obviously correct, working from the written strings only.
-fn reference_allows(rule: &Rule, url: &str, method: Method) -> bool {
+fn reference_allows(rule: &Rule, url: &str) -> bool {
     let Destination::Http {
         scheme,
         host,
@@ -906,13 +912,6 @@ fn reference_allows(rule: &Rule, url: &str, method: Method) -> bool {
         .split_once(':')
         .map_or((authority, default_port), |(h, p)| (h, p.parse().unwrap()));
     if written_host != host.as_str() || written_port != port.unwrap_or(default_port) {
-        return false;
-    }
-    if rule
-        .methods
-        .as_ref()
-        .is_some_and(|methods| !methods.contains(&method))
-    {
         return false;
     }
     match path_prefix {
@@ -955,9 +954,9 @@ proptest! {
         let plain = BTreeSet::new();
         let result = decide(
             &BTreeMap::from([(field("token"), policy)]),
-            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain, copy_source: None },
+            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain, presign: false },
         );
-        prop_assert_eq!(result.is_ok(), reference_allows(&rule, &url, method), "{}", url);
+        prop_assert_eq!(result.is_ok(), reference_allows(&rule, &url), "{}", url);
     }
 
     /// Whatever it accepts really is within the rule.
@@ -977,7 +976,7 @@ proptest! {
         let plain = BTreeSet::new();
         let accepted = decide(
             &BTreeMap::from([(field("token"), policy)]),
-            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain, copy_source: None },
+            &RequestHead { endpoint: Endpoint::Http(&target), method, header_names: &[], plain: &plain, presign: false },
         ).is_ok();
         if accepted {
             let Destination::Http { host, path_prefix, .. } = &rule.destination else {
@@ -989,9 +988,6 @@ proptest! {
                 prop_assert!(target.path.starts_with(prefix.as_str()));
                 let rest = &target.path[prefix.len()..];
                 prop_assert!(prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/'));
-            }
-            if let Some(methods) = &rule.methods {
-                prop_assert!(methods.contains(&method));
             }
         }
     }
@@ -1009,7 +1005,7 @@ proptest! {
         let (first, second) = (wrap(first), wrap(second));
         prop_assume!(first.validate().is_ok() && second.validate().is_ok());
         let plain = BTreeSet::new();
-        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain, copy_source: None };
+        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain, presign: false };
         let alone = decide(&BTreeMap::from([(field("a"), first.clone())]), &head).is_ok();
         let together = decide(&BTreeMap::from([(field("a"), first), (field("b"), second)]), &head).is_ok();
         prop_assert!(alone || !together);
@@ -1028,7 +1024,7 @@ proptest! {
         prop_assume!(attacker.validate().is_ok());
         let target = Target::parse(API).unwrap();
         let plain = BTreeSet::new();
-        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain, copy_source: None };
+        let head = RequestHead { endpoint: Endpoint::Http(&target), method: Method::Get, header_names: &[], plain: &plain, presign: false };
         if let Ok(plan) = decide(&BTreeMap::from([(field("a"), attacker), (field("b"), genuine)]), &head) {
             prop_assert!(plan.response.is_some());
         }
@@ -1039,27 +1035,22 @@ fn rule_destination() -> Destination {
     serde_json::from_value(json!({ "scheme": "https", "host": "api.example.com" })).unwrap()
 }
 
-// X-Amz headers and copy sources.
+// X-Amz headers.
 
-fn s3(allow_headers: &[&str], prefix: &str) -> Policy {
+fn s3(prefix: &str) -> Policy {
     policy(&json!({ "rules": [{
         "destination": { "scheme": "https", "host": "s3.example.com", "path_prefix": prefix },
         "inject": { "aws_sigv4": {
             "region": "us-east-1", "service": "s3",
             "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
-            "allow_headers": allow_headers,
         } },
     }] }))
 }
 
-fn s3_request(path: &str, headers: &[&'static str], copy_source: Option<&'static str>) -> Request {
+fn s3_request(path: &str, headers: &[&'static str]) -> Request {
     let mut request = Request::to(&format!("https://s3.example.com{path}"));
     request.method = Method::Put;
     request.headers = headers.to_vec();
-    if copy_source.is_some() {
-        request.headers.push("x-amz-copy-source");
-    }
-    request.copy_source = copy_source;
     request
 }
 
@@ -1068,8 +1059,9 @@ fn code(result: Result<Plan, BrokerError>) -> Option<ErrorCode> {
 }
 
 #[test]
-fn ordinary_amz_headers_pass_and_signing_ones_do_not() {
-    let policies = fields(&[("secret", s3(&[], "/bucket/"))]);
+fn a_caller_sets_any_amz_header_but_those_that_say_how_to_sign() {
+    let policies = fields(&[("secret", s3("/bucket/"))]);
+    // What a request does there is for the credential's own permissions.
     let ok = s3_request(
         "/bucket/key",
         &[
@@ -1077,134 +1069,45 @@ fn ordinary_amz_headers_pass_and_signing_ones_do_not() {
             "X-Amz-Storage-Class",
             "x-amz-server-side-encryption",
             "x-amz-checksum-sha256",
+            "x-amz-acl",
+            "x-amz-grant-read",
+            "x-amz-object-lock-mode",
+            "x-amz-copy-source",
+            "x-amz-target",
             "content-type",
         ],
-        None,
     );
     assert_eq!(code(ok.decide(&policies)), None);
     for header in [
         "x-amz-date",
+        "X-Amz-Date",
         "x-amz-security-token",
+        "x-amz-content-sha256",
         "x-amz-decoded-content-length",
         "x-amz-trailer",
-        "x-amz-acl",
-        "x-amz-grant-read",
-        "x-amz-object-lock-mode",
     ] {
-        let request = s3_request("/bucket/key", &[header], None);
+        let request = s3_request("/bucket/key", &[header]);
         assert_eq!(
             code(request.decide(&policies)),
             Some(ErrorCode::Conflict),
             "{header}"
         );
     }
-    let policies = fields(&[("secret", s3(&["x-amz-acl"], "/bucket/"))]);
-    assert_eq!(
-        code(s3_request("/bucket/key", &["x-amz-acl"], None).decide(&policies)),
-        None
-    );
-    assert_eq!(
-        code(s3_request("/bucket/key", &["x-amz-grant-read"], None).decide(&policies)),
-        Some(ErrorCode::Conflict)
-    );
 }
 
 #[test]
-fn a_copy_needs_the_rule_to_allow_it() {
-    let policies = fields(&[("secret", s3(&[], "/bucket/"))]);
-    let request = s3_request("/bucket/copy", &[], Some("/bucket/original"));
-    assert_eq!(code(request.decide(&policies)), Some(ErrorCode::Conflict));
-}
-
-#[test]
-fn a_copy_source_must_be_within_the_rules_prefix() {
-    let policies = fields(&[("secret", s3(&["x-amz-copy-source"], "/bucket/"))]);
-    for source in [
-        "/bucket/original",
-        "bucket/original",
-        "bucket/dir/a%20b",
-        "/bucket/original?versionId=3HL4kqtJlcpXroDTDmJ",
-    ] {
-        let request = s3_request(
-            "/bucket/copy",
-            &["x-amz-metadata-directive", "x-amz-copy-source-range"],
-            Some(source),
-        );
-        assert_eq!(code(request.decide(&policies)), None, "{source}");
-    }
-    for source in [
-        "/other-bucket/secret",
-        "/bucket-two/secret",
-        "/bucket",
-        "/bucket/../other/secret",
-        "/bucket/%2e%2e/other/secret",
-        "/bucket/a%2fb",
-        "/bucket/original?versionId=1&x=2",
-        "/bucket/original?partNumber=1",
-        "arn:aws:s3:us-east-1:123456789012:accesspoint/ap/object/key",
-        "//other/secret",
-    ] {
-        let request = s3_request("/bucket/copy", &[], Some(source));
-        assert_eq!(
-            code(request.decide(&policies)),
-            Some(ErrorCode::PolicyDenied),
-            "{source}"
-        );
-    }
-}
-
-#[test]
-fn a_rule_for_a_host_of_every_bucket_may_allow_copies_from_any_of_them() {
-    let any_bucket = policy(&json!({ "rules": [{
-        "destination": { "scheme": "https", "host": "s3.example.com" },
+fn options_that_once_held_a_request_at_the_provider_are_accepted_and_ignored() {
+    // A value sealed with them still opens, and they change nothing.
+    let old = policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "s3.example.com", "path_prefix": "/bucket/" },
         "inject": { "aws_sigv4": {
             "region": "us-east-1", "service": "s3",
             "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
-            "allow_headers": ["x-amz-copy-source"],
-            "allow_copy_from_any_bucket": true,
+            "allow_headers": ["x-amz-acl"],
         } },
     }] }));
-    let policies = fields(&[("secret", any_bucket)]);
-    for source in [
-        "/bucket/original",
-        "other-bucket/dir/a%20b",
-        "/other-bucket/original?versionId=3HL4kqtJlcpXroDTDmJ",
-    ] {
-        let request = s3_request("/bucket/copy", &[], Some(source));
-        assert_eq!(code(request.decide(&policies)), None, "{source}");
-    }
-    // Still an object on this host, named plainly.
-    for source in [
-        "/bucket",
-        "/",
-        "/bucket/../other/secret",
-        "/bucket/%2e%2e/other/secret",
-        "/bucket/original?versionId=1&x=2",
-        "/bucket/original?partNumber=1",
-        "//other/secret",
-    ] {
-        let request = s3_request("/bucket/copy", &[], Some(source));
-        assert_eq!(
-            code(request.decide(&policies)),
-            Some(ErrorCode::PolicyDenied),
-            "{source}"
-        );
-    }
-}
-
-#[test]
-fn the_operation_a_json_protocol_service_takes_may_be_named() {
-    let sqs = policy(&json!({ "rules": [{
-        "destination": { "scheme": "https", "host": "sqs.us-east-1.amazonaws.com" },
-        "inject": { "aws_sigv4": {
-            "region": "us-east-1", "service": "sqs",
-            "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
-        } },
-    }] }));
-    let policies = fields(&[("secret", sqs)]);
-    let mut request = Request::to("https://sqs.us-east-1.amazonaws.com/");
-    request.method = Method::Post;
-    request.headers = vec!["X-Amz-Target", "content-type"];
+    let policies = fields(&[("secret", old)]);
+    let request = s3_request("/bucket/key", &["x-amz-grant-read", "x-amz-copy-source"]);
     assert_eq!(code(request.decide(&policies)), None);
 }
 
@@ -1227,7 +1130,7 @@ fn pg_head<'a>(port: u16, plain: &'a BTreeSet<FieldName>) -> RequestHead<'a> {
         method: Method::Get,
         header_names: &[],
         plain,
-        copy_source: None,
+        presign: false,
     }
 }
 
@@ -1245,8 +1148,6 @@ fn a_postgres_session_gets_the_rules_terms() {
     let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
     let terms = postgres_terms(&policies, &plan).unwrap();
     assert_eq!(terms.user, Part::Literal("app_user".to_owned()));
-    assert_eq!(terms.databases, ["app", "reports"]);
-    assert!(!terms.allow_replication);
     let password = terms.password.unwrap();
     assert_eq!(password.field, field("password"));
     assert!(password.allow_md5 && !password.allow_cleartext);
@@ -1267,8 +1168,10 @@ fn a_postgres_session_gets_the_rules_terms() {
 }
 
 #[test]
-fn a_password_and_a_client_certificate_share_the_databases_both_allow() {
+fn a_password_and_a_client_certificate_must_agree_on_the_user() {
     let cert = json!({ "client_cert": { "cert": { "field": "cert" } } });
+    // The databases each names are no longer compared: the server's privileges say
+    // where this user may connect.
     let policies = fields(&[
         (
             "password",
@@ -1276,33 +1179,19 @@ fn a_password_and_a_client_certificate_share_the_databases_both_allow() {
         ),
         (
             "client_key",
-            pg_policy(&["reports", "other"], "app_user", cert.clone(), &["cert"]),
+            pg_policy(&["other"], "app_user", cert.clone(), &["cert"]),
         ),
     ]);
     let plain = BTreeSet::from([field("cert")]);
     let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
     let terms = postgres_terms(&policies, &plan).unwrap();
-    assert_eq!(terms.databases, ["reports"]);
     assert!(terms.password.is_some() && terms.client_cert.is_some());
 
-    // They must agree on the user, and share a database.
     let policies = fields(&[
         ("password", pg_policy(&["app"], "app_user", password(), &[])),
         (
             "client_key",
-            pg_policy(&["app"], "someone_else", cert.clone(), &["cert"]),
-        ),
-    ]);
-    let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
-    assert_eq!(
-        postgres_terms(&policies, &plan).unwrap_err().code(),
-        ErrorCode::PolicyDenied
-    );
-    let policies = fields(&[
-        ("password", pg_policy(&["app"], "app_user", password(), &[])),
-        (
-            "client_key",
-            pg_policy(&["other"], "app_user", cert, &["cert"]),
+            pg_policy(&["app"], "someone_else", cert, &["cert"]),
         ),
     ]);
     let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
@@ -1337,20 +1226,16 @@ fn s3_header(name: &str) -> Policy {
 }
 
 #[test]
-fn another_value_cannot_inject_an_amz_header_the_signing_rule_refuses() {
-    let request = s3_request("/bucket/key", &[], None);
+fn another_value_cannot_inject_a_header_that_says_how_to_sign() {
+    let request = s3_request("/bucket/key", &[]);
     for header in [
-        "x-amz-copy-source",
-        "X-Amz-Copy-Source",
-        "x-amz-acl",
-        "x-amz-grant-read",
-        "x-amz-trailer",
-        "x-amz-object-lock-mode",
+        "x-amz-date",
+        "x-amz-security-token",
+        "x-amz-content-sha256",
+        "x-amz-decoded-content-length",
+        "X-Amz-Trailer",
     ] {
-        let policies = fields(&[
-            ("secret", s3(&[], "/bucket/")),
-            ("other", s3_header(header)),
-        ]);
+        let policies = fields(&[("secret", s3("/bucket/")), ("other", s3_header(header))]);
         assert_eq!(
             code(request.decide(&policies)),
             Some(ErrorCode::Conflict),
@@ -1360,41 +1245,19 @@ fn another_value_cannot_inject_an_amz_header_the_signing_rule_refuses() {
 }
 
 #[test]
-fn an_injected_copy_source_is_refused_even_where_the_rule_allows_copies() {
-    // The source is a secret, so it cannot be held to the rule's prefix.
-    let request = s3_request("/bucket/key", &[], None);
-    let policies = fields(&[
-        ("secret", s3(&["x-amz-copy-source"], "/bucket/")),
-        ("other", s3_header("x-amz-copy-source")),
-    ]);
-    assert_eq!(code(request.decide(&policies)), Some(ErrorCode::Conflict));
-}
-
-#[test]
 fn another_value_may_inject_what_the_caller_could_set() {
-    let request = s3_request("/bucket/key", &[], None);
-    // A customer's encryption key, sealed, beside the signing key.
-    let policies = fields(&[
-        ("secret", s3(&[], "/bucket/")),
-        (
-            "other",
-            s3_header("x-amz-server-side-encryption-customer-key"),
-        ),
-    ]);
-    assert_eq!(code(request.decide(&policies)), None);
-    // What the rule opts in to, and a header that is not SigV4's.
-    let policies = fields(&[
-        ("secret", s3(&["x-amz-acl"], "/bucket/")),
-        ("other", s3_header("x-amz-acl")),
-    ]);
-    assert_eq!(code(request.decide(&policies)), None);
-    let policies = fields(&[
-        ("secret", s3(&[], "/bucket/")),
-        ("other", s3_header("x-api-key")),
-    ]);
-    assert_eq!(code(request.decide(&policies)), None);
-    // Without a signing rule there is nothing to hold it to.
-    let policies = fields(&[("other", s3_header("x-amz-acl"))]);
+    let request = s3_request("/bucket/key", &[]);
+    for header in [
+        "x-amz-server-side-encryption-customer-key",
+        "x-amz-acl",
+        "x-amz-copy-source",
+        "x-api-key",
+    ] {
+        let policies = fields(&[("secret", s3("/bucket/")), ("other", s3_header(header))]);
+        assert_eq!(code(request.decide(&policies)), None, "{header}");
+    }
+    // Without a signing rule there is nothing to sign.
+    let policies = fields(&[("other", s3_header("x-amz-trailer"))]);
     assert_eq!(code(request.decide(&policies)), None);
 }
 

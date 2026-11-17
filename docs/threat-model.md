@@ -61,7 +61,7 @@ working afterwards.
    signature, and channel binding ties the login to this TLS connection when the
    server offers it. A server that accepts the login without asking for the password
    the rule presents is refused. The caller's
-   startup must name the policy's user and a database it allows.
+   startup must name the policy's user.
 6. **Provider's response to the caller.** Response sealing replaces declared fields
    before the response reaches the caller. Everything else passes through.
 7. **seal to key source and KMS.** These supply the private keys. The key source is a
@@ -149,7 +149,7 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 - **A credential whose service the caller names is bounded by its own permissions.**
   With a fixed `service` and `region`, a SigV4 signature is good for one service in one
   region. Where the rule lets the caller name them, a compromised application can have a
-  request signed for any service the rule allows, at any host it allows, and the
+  request signed for any service, at any host the rule allows, and the
   credential's IAM policy is the only limit left. The secret access key still never
   leaves seal, and every request is still audited with its host and path.
 - **A host pattern trusts a whole domain.** A rule for `*.example.com` sends its secret
@@ -163,17 +163,20 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   value, and anyone with the public key can seal one. A compromised application can
   therefore send it under a prefix of its choosing, such as another Telegram bot's. The
   sealer sets the option only where the rule is safe for any filling, and holds the rest
-  of the request with `path_prefix`, `methods` and `require_form`.
+  of the request with `path_prefix` and `require_form`.
 - **A caller can guess a token.** With `"verify": "equals"`, each answer says whether
   one guess is the secret. seal compares the whole token in constant time, so an answer
   says nothing of where a guess went wrong, and the keyset's rate limit bounds the
   guesses. That is enough for a generated token and not for a short or chosen one.
-- **A caller can read data with a credential it can use.** seal limits where a
+- **What a credential may do is its own permissions' to say.** seal limits where a
   credential goes, not what the provider returns for an allowed request, nor what an
-  allowed request does there: it may, for example, set S3 metadata or storage class.
-  For SigV4, headers that would reach outside the destination, such as a copy source,
-  are checked against the rule, and those that could widen access, such as ACLs, need
-  the rule to allow them.
+  allowed request does there. A caller may use any method, set any `X-Amz-*` or `x-ms-*`
+  header but those that say how seal signs, name any region or service where the rule
+  lets it name them, and connect to any database as the policy's Postgres user. So a
+  copy reads whatever the key can read, an ACL is set if the key may set it, and a
+  replication session opens if the role may replicate. seal is not the provider's access
+  control: scope a credential where it is issued, in IAM, an API key's scopes or a role's
+  privileges, and seal only what the application may use in full.
 - **An Azure account key is good for its whole account, whatever the rule's path.** With
   Shared Key a caller may set any `x-ms-*` header but the date, so a copy or rename can
   read a blob outside the rule's path prefix into it, and a container can be made
@@ -197,8 +200,8 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   required form fields are checked. Which tenant may use which shared app is the
   application's decision.
 - **A Postgres session is the policy's user, for as long as it lasts.** After the login
-  seal relays without reading, so the caller can do anything that user can do in the
-  databases the policy allows. Startup parameters other than the user and database pass
+  seal relays without reading, so the caller can do anything that user can do, in any
+  database the role may connect to. Startup parameters other than the user and database pass
   through, so `options` can set what that user may set anyway. Give a sealed Postgres
   credential the privileges its sessions need, and no more.
 - **A cancel request needs no password.** Postgres cancels by process ID and cancel

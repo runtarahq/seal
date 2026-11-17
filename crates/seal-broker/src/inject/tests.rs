@@ -38,7 +38,7 @@ fn head_for(
             method: Method::Get,
             header_names: &[],
             plain: &plain,
-            copy_source: None,
+            presign: false,
         },
     )
     .unwrap();
@@ -185,7 +185,7 @@ fn parts_come_from_sealed_and_plain_fields() {
             method: Method::Get,
             header_names: &[],
             plain: &names,
-            copy_source: None,
+            presign: false,
         },
     )
     .unwrap();

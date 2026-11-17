@@ -16,8 +16,8 @@ the [README](../../README.md), [`integrating.md`](../integrating.md) and the
    pure function that decides whether a request may use the values it presents, treating
    every policy as untrusted, since anyone with the public key can seal a value with any
    policy. Questions: can one value's rule weaken how another is used? Can a request
-   reach a destination, method, path or Postgres database no presented value allows?
-   Can shared values serve where they should not, or a copy source escape its prefix?
+   reach a destination or path no presented value allows?
+   Can shared values serve where they should not?
 3. **Injection and signing** (`crates/seal-broker/src/inject.rs`, `inject/sigv4.rs`,
    `inject/azure.rs`, `inject/jwt.rs`, [`signing.md`](../signing.md)). Questions: can a
    caller set or influence what seal signs, choose a payload mode the rule forbids, or
@@ -27,7 +27,7 @@ the [README](../../README.md), [`integrating.md`](../integrating.md) and the
    Questions: is TLS established and verified before anything is sent? Is channel
    binding computed and used correctly, and is a downgrade from SCRAM-PLUS detectable? Can
    a malicious server learn the password where the rule does not allow MD5 or cleartext?
-   Can a caller reach a database or role the policy does not allow?
+   Can a caller log in as a role the policy does not allow?
 5. **Response sealing** (`crates/seal-broker/src/response_seal.rs`). Questions: can a
    provider's response, crafted or not, pass a declared field to the caller unsealed?
 

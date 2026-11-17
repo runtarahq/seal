@@ -802,7 +802,7 @@ fn a_sigv4_region_or_service_is_fixed_or_named_by_a_plain_field() {
 }
 
 #[test]
-fn a_named_scope_allows_valid_values_among_those_listed() {
+fn a_named_scope_allows_any_value_written_as_aws_writes_them() {
     let scope = |allowed: &[&str]| NamedScope {
         field: FieldName::new("aws_service").unwrap(),
         allowed: allowed.iter().map(|value| (*value).to_owned()).collect(),
@@ -823,131 +823,51 @@ fn a_named_scope_allows_valid_values_among_those_listed() {
         assert!(!any.allows(value), "{value:?}");
     }
     assert!(!any.allows(&"a".repeat(257)));
+    // A list a value was sealed with is still read, and holds nothing: which services
+    // a credential works with is for its own permissions.
     let some = scope(&["sqs", "sns"]);
-    assert!(some.allows("sqs") && some.allows("sns"));
-    assert!(!some.allows("s3") && !some.allows("sq") && !some.allows("SQS"));
+    assert!(some.allows("sqs") && some.allows("s3"));
+    assert!(!some.allows("SQS"));
 }
 
 #[test]
-fn sigv4_rules_allow_only_opt_in_amz_headers() {
-    let sigv4 = |headers: Value, prefix: Option<&str>| {
-        with_rule(|rule| {
-            rule["inject"] = json!({ "aws_sigv4": {
-                "region": "eu-west-1", "service": "s3",
-                "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
-                "allow_headers": headers,
-            } });
-            rule["destination"] = match prefix {
-                Some(prefix) => https_prefix(prefix),
-                None => https_host("api.example.com"),
-            };
-        })
-    };
-    let policy = sigv4(json!(["x-amz-acl", "x-amz-grant-read"]), None).unwrap();
-    // It round-trips, and an empty list is left out.
-    assert_eq!(
-        parse(&serde_json::to_value(&policy).unwrap()).unwrap(),
-        policy
-    );
-    let plain = sigv4(json!([]), None).unwrap();
-    assert!(
-        !serde_json::to_string(&plain)
-            .unwrap()
-            .contains("allow_headers")
-    );
-
-    // Headers that control signing, or that are allowed anyway, are not opt-in.
-    for header in [
-        "x-amz-date",
-        "x-amz-security-token",
-        "x-amz-content-sha256",
-        "x-amz-meta-a",
-        "X-Amz-Acl",
-        "authorization",
-    ] {
-        sigv4(json!([header]), None).unwrap_err();
-    }
-    sigv4(json!(["x-amz-acl", "x-amz-acl"]), None).unwrap_err();
-
-    // Copies are checked against the path prefix, so they need one naming a bucket.
-    sigv4(json!(["x-amz-copy-source"]), None).unwrap_err();
-    sigv4(json!(["x-amz-copy-source"]), Some("/")).unwrap_err();
-    sigv4(json!(["x-amz-copy-source"]), Some("/bucket/")).unwrap();
+fn options_seal_no_longer_uses_are_still_accepted() {
+    // A value sealed with them must still open. They are read and change nothing.
+    let policy = with_rule(|rule| {
+        rule["destination"]["path_prefix"] = json!("/bucket/");
+        rule["inject"] = json!({ "aws_sigv4": {
+            "region": "us-east-1", "service": "s3",
+            "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
+            "allow_headers": ["x-amz-acl", "x-amz-copy-source"],
+            "allow_copy_from_any_bucket": true,
+        } });
+    });
+    policy.unwrap();
 }
 
 #[test]
-fn copies_from_any_bucket_are_for_a_rule_with_no_prefix_that_allows_copies() {
-    let sigv4 = |headers: Value, prefix: Option<&str>| {
-        with_rule(|rule| {
-            rule["inject"] = json!({ "aws_sigv4": {
-                "region": "eu-west-1", "service": "s3",
-                "access_key_id": { "literal": "AKIA" }, "payload": ["computed"],
-                "allow_headers": headers,
-                "allow_copy_from_any_bucket": true,
-            } });
-            rule["destination"] = match prefix {
-                Some(prefix) => https_prefix(prefix),
-                None => https_host("s3.example.com"),
-            };
-        })
-    };
-    let policy = sigv4(json!(["x-amz-copy-source"]), None).unwrap();
-    assert_eq!(
-        parse(&serde_json::to_value(&policy).unwrap()).unwrap(),
-        policy
-    );
-    // A prefix already holds the source, and the option would then mean nothing.
-    sigv4(json!(["x-amz-copy-source"]), Some("/bucket/")).unwrap_err();
-    // It allows nothing by itself.
-    sigv4(json!([]), None).unwrap_err();
-    sigv4(json!(["x-amz-acl"]), None).unwrap_err();
-}
-
-#[test]
-fn which_amz_headers_a_caller_may_set() {
-    use super::amz_header_allowed;
-    let none: &[String] = &[];
-    for name in [
-        "x-amz-meta-owner",
-        "x-amz-storage-class",
-        "x-amz-tagging",
-        "x-amz-server-side-encryption",
-        "x-amz-server-side-encryption-customer-key",
-        "x-amz-checksum-crc32",
-        "x-amz-expected-bucket-owner",
-        "x-amz-request-payer",
-        "x-amz-target",
-    ] {
-        assert!(amz_header_allowed(name, none), "{name}");
-    }
+fn only_headers_that_say_how_to_sign_are_seals_own() {
+    use super::amz_header_controls_signing;
     for name in [
         "x-amz-date",
         "x-amz-security-token",
         "x-amz-content-sha256",
         "x-amz-decoded-content-length",
         "x-amz-trailer",
+    ] {
+        assert!(amz_header_controls_signing(name), "{name}");
+    }
+    for name in [
         "x-amz-acl",
         "x-amz-grant-read",
         "x-amz-copy-source",
-        "x-amz-metadata-directive",
+        "x-amz-meta-owner",
+        "x-amz-target",
         "x-amz-object-lock-mode",
+        "authorization",
     ] {
-        assert!(!amz_header_allowed(name, none), "{name}");
+        assert!(!amz_header_controls_signing(name), "{name}");
     }
-    let acl = ["x-amz-acl".to_owned()];
-    assert!(amz_header_allowed("x-amz-acl", &acl));
-    assert!(!amz_header_allowed("x-amz-grant-read", &acl));
-    let copy = ["x-amz-copy-source".to_owned()];
-    for name in [
-        "x-amz-copy-source",
-        "x-amz-copy-source-range",
-        "x-amz-copy-source-if-match",
-        "x-amz-metadata-directive",
-        "x-amz-tagging-directive",
-    ] {
-        assert!(amz_header_allowed(name, &copy), "{name}");
-    }
-    assert!(!amz_header_allowed("x-amz-date", &copy));
 }
 
 #[test]
@@ -1073,15 +993,16 @@ fn postgres_destinations_need_their_fields_and_no_http_ones() {
         d.as_object_mut().unwrap().remove("port");
     })
     .unwrap_err();
+    // A database list is no longer needed, and one a value was sealed with is read.
     postgres(|d| {
         d.as_object_mut().unwrap().remove("databases");
     })
-    .unwrap_err();
+    .unwrap();
     postgres(|d| {
         d.as_object_mut().unwrap().remove("user");
     })
     .unwrap_err();
-    postgres(|d| d["databases"] = json!([])).unwrap_err();
+    postgres(|d| d["databases"] = json!([])).unwrap();
     postgres(|d| d["databases"] = json!([""])).unwrap_err();
     postgres(|d| d["path_prefix"] = json!("/a")).unwrap_err();
     postgres(|d| d["tls"] = json!({ "ca": "not pem" })).unwrap_err();

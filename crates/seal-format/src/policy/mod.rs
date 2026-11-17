@@ -145,7 +145,9 @@ pub struct Definition {
 pub struct Rule {
     /// Where the secret may go.
     pub destination: Destination,
-    /// The HTTP methods allowed; any method if absent. HTTP only.
+    /// The methods a presigned URL may be for, which a rule that allows presigning
+    /// must list. Requests seal sends are not held to it: what a credential may do is
+    /// for its own permissions. HTTP only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub methods: Option<Vec<Method>>,
     /// How the secret is attached. The caller never places it.
@@ -263,13 +265,15 @@ pub enum Destination {
         host: Host,
         /// The exact port.
         port: u16,
-        /// The databases a session may use. At least one.
+        /// No longer used: which databases a role may connect to is for the server's
+        /// own privileges. Accepted so that a value sealed with it still opens.
         databases: Vec<String>,
         /// The user a session logs in as.
         user: Part,
         /// How the server's certificate is verified.
         tls: PgTls,
-        /// Allows a replication session.
+        /// No longer used: whether a role may replicate is for the server's own
+        /// privileges. Accepted so that a value sealed with it still opens.
         allow_replication: bool,
     },
 }
@@ -349,9 +353,7 @@ impl TryFrom<RawDestination> for Destination {
                     port: raw.port.ok_or(FormatError::InvalidPolicy(
                         "a Postgres destination needs a port",
                     ))?,
-                    databases: raw.databases.ok_or(FormatError::InvalidPolicy(
-                        "a Postgres destination needs databases",
-                    ))?,
+                    databases: raw.databases.unwrap_or_default(),
                     user: raw.user.ok_or(FormatError::InvalidPolicy(
                         "a Postgres destination needs a user",
                     ))?,
@@ -409,7 +411,8 @@ impl From<Destination> for RawDestination {
                 host,
                 port: Some(port),
                 path_prefix: None,
-                databases: Some(databases),
+                // Left out when empty, as every policy made now has it.
+                databases: (!databases.is_empty()).then_some(databases),
                 user: Some(user),
                 // The default is left out, so a policy has one canonical form.
                 tls: (tls != PgTls::VerifyFull).then_some(tls),
@@ -576,13 +579,12 @@ pub enum Inject {
         /// Also allows `UNSIGNED-PAYLOAD`.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_unsigned_payload: bool,
-        /// `X-Amz-*` headers the caller may also set, from [`OPT_IN_AMZ_HEADERS`].
+        /// No longer used: seal does not decide which `X-Amz-*` headers a credential
+        /// may be used with. Accepted so that a value sealed with it still opens.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         allow_headers: Vec<String>,
-        /// Lets a copy read any object on the rule's host, for a rule with no path
-        /// prefix that allows `x-amz-copy-source`. Only for an endpoint addressed by
-        /// path, whose host is every bucket's: where the host is one bucket's, a copy
-        /// could then read the others.
+        /// No longer used: a copy's source is for the credential's own permissions.
+        /// Accepted so that a value sealed with it still opens.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_copy_from_any_bucket: bool,
         /// Also lets the caller have a presigned URL, which it can copy and pass on.
@@ -654,54 +656,22 @@ pub struct Presign {
     pub max_expiry_s: u32,
 }
 
-/// `X-Amz-*` headers a caller may set on any SigV4 request, by prefix. They change what
-/// a request does at its destination, never how it is signed or where it goes.
-pub const DEFAULT_AMZ_HEADER_PREFIXES: &[&str] = &[
-    "x-amz-meta-",
-    "x-amz-server-side-encryption",
-    "x-amz-checksum-",
+/// `X-Amz-*` headers that say how a request is signed. seal sets them itself, so neither
+/// a caller nor another value's injection may. Every other `X-Amz-*` header says what the
+/// request does at its destination, which is for the credential's own permissions to
+/// allow or refuse.
+pub const SIGNING_AMZ_HEADERS: &[&str] = &[
+    "x-amz-date",
+    "x-amz-security-token",
+    "x-amz-content-sha256",
+    "x-amz-decoded-content-length",
+    "x-amz-trailer",
 ];
 
-/// `X-Amz-*` headers a caller may set on any SigV4 request, exactly. `x-amz-target`
-/// names the operation for the services that take one, such as SQS and DynamoDB: as a
-/// method and a path do elsewhere, it says what the request does.
-pub const DEFAULT_AMZ_HEADERS: &[&str] = &[
-    "x-amz-storage-class",
-    "x-amz-tagging",
-    "x-amz-expected-bucket-owner",
-    "x-amz-request-payer",
-    "x-amz-target",
-];
-
-/// `X-Amz-*` headers a rule may allow in `allow_headers`. ACLs and grants can widen who
-/// reads the data. `x-amz-copy-source` reads from the object it names, so it also allows
-/// the rest of the copy headers, and seal checks that the source is within the rule's
-/// path prefix, or on its host where the rule sets `allow_copy_from_any_bucket`.
-pub const OPT_IN_AMZ_HEADERS: &[&str] = &[
-    "x-amz-acl",
-    "x-amz-grant-full-control",
-    "x-amz-grant-read",
-    "x-amz-grant-read-acp",
-    "x-amz-grant-write",
-    "x-amz-grant-write-acp",
-    "x-amz-copy-source",
-];
-
-/// The headers that come with `x-amz-copy-source`, apart from its own family.
-pub const COPY_HEADERS: &[&str] = &["x-amz-metadata-directive", "x-amz-tagging-directive"];
-
-/// Whether a caller may set this lowercase `x-amz-*` header under a rule allowing
-/// `allow_headers`. Headers that control signing are never allowed here.
+/// Whether this lowercase header is one of [`SIGNING_AMZ_HEADERS`].
 #[must_use]
-pub fn amz_header_allowed(name: &str, allow_headers: &[String]) -> bool {
-    let opted = |header: &str| allow_headers.iter().any(|allowed| allowed == header);
-    DEFAULT_AMZ_HEADER_PREFIXES
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-        || DEFAULT_AMZ_HEADERS.contains(&name)
-        || (opted(name) && name != "x-amz-copy-source")
-        || (opted("x-amz-copy-source")
-            && (name.starts_with("x-amz-copy-source") || COPY_HEADERS.contains(&name)))
+pub fn amz_header_controls_signing(name: &str) -> bool {
+    SIGNING_AMZ_HEADERS.contains(&name)
 }
 
 /// Another part of a credential.
@@ -750,18 +720,18 @@ impl From<&str> for AwsScope {
 pub struct NamedScope {
     /// The plain field that names it, which the rule must list in `plain`.
     pub field: FieldName,
-    /// The values the caller may name; any valid one if empty.
+    /// No longer used: which regions and services a credential works with is for its
+    /// own permissions. Accepted so that a value sealed with it still opens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed: Vec<String>,
 }
 
 impl NamedScope {
-    /// Whether the caller may name this value: one written as AWS writes regions and
-    /// services, and among those allowed if the policy lists any.
+    /// Whether the caller may name this value: any written as AWS writes regions and
+    /// services.
     #[must_use]
     pub fn allows(&self, value: &str) -> bool {
         validate::is_aws_scope(value)
-            && (self.allowed.is_empty() || self.allowed.iter().any(|allowed| allowed == value))
     }
 }
 

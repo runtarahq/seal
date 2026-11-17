@@ -14,7 +14,6 @@ use serde_json::Value;
 /// Every option name in the schema. Adding an option without adding it here and
 /// to the document is caught by the check on the built examples below.
 const OPTIONS: &[&str] = &[
-    "allow_headers",
     "rules",
     "definitions",
     "destination",
@@ -29,11 +28,9 @@ const OPTIONS: &[&str] = &[
     "host",
     "port",
     "path_prefix",
-    "databases",
     "user",
     "tls",
     "ca",
-    "allow_replication",
     "header",
     "name",
     "format",
@@ -97,9 +94,7 @@ const OPTIONS: &[&str] = &[
     "hash",
     "allow_presign",
     "max_expiry_s",
-    "allow_copy_from_any_bucket",
     "allow_injected_path",
-    "allowed",
 ];
 
 fn policy_doc() -> String {

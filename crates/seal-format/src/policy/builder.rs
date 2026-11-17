@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use super::{
     AwsScope, AzureService, Definition, Destination, HmacHash, Host, Inject, JwtAlg, JwtAudience,
-    JwtClaims, JwtHeader, Method, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme,
+    JwtClaims, JwtHeader, Part, PayloadMode, PgTls, Policy, ResponseFormat, Rule, Scheme,
     SealResponse, SealedField, Verify,
 };
 use crate::error::FormatError;
@@ -209,7 +209,6 @@ pub fn registered_webhook_token(
             name: token_field.to_owned(),
         },
     );
-    rule.methods = Some(vec![Method::Post]);
     rule.allow_injected_path = Some(path_prefix.to_owned());
     rule.require_form = BTreeMap::from([(url_field.to_owned(), vec![webhook_url.to_owned()])]);
     finish(Policy {
@@ -451,14 +450,9 @@ pub fn client_cert(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidPolicy`] if the host, port or databases are not valid.
-pub fn postgres(
-    host: &str,
-    port: u16,
-    databases: Vec<String>,
-    user: &str,
-) -> Result<Policy, FormatError> {
-    postgres_with_tls(host, port, databases, user, PgTls::VerifyFull)
+/// Returns [`FormatError::InvalidPolicy`] if the host or port is not valid.
+pub fn postgres(host: &str, port: u16, user: &str) -> Result<Policy, FormatError> {
+    postgres_with_tls(host, port, user, PgTls::VerifyFull)
 }
 
 /// A Postgres password with only SCRAM allowed, for a server reached as `tls` says:
@@ -469,12 +463,10 @@ pub fn postgres(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidPolicy`] if the host, port, databases or CA are not
-/// valid.
+/// Returns [`FormatError::InvalidPolicy`] if the host, port or CA is not valid.
 pub fn postgres_with_tls(
     host: &str,
     port: u16,
-    databases: Vec<String>,
     user: &str,
     tls: PgTls,
 ) -> Result<Policy, FormatError> {
@@ -482,7 +474,7 @@ pub fn postgres_with_tls(
         Destination::Postgres {
             host: Host::new(host)?,
             port,
-            databases,
+            databases: Vec::new(),
             user: Part::Literal(user.to_owned()),
             tls,
             allow_replication: false,
@@ -806,7 +798,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
-            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path_prefix":"/setWebhook"},"methods":["POST"],"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
+            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path_prefix":"/setWebhook"},"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
         );
         assert!(!policy.shared);
         // It goes with the value `path_secret` makes for the same prefix.
@@ -926,18 +918,10 @@ mod tests {
 
     #[test]
     fn postgres_with_tls_says_how_the_server_is_reached_and_keeps_scram_only() {
-        let with = |tls: PgTls| {
-            postgres_with_tls(
-                "db.example.com",
-                5432,
-                vec!["app".to_owned()],
-                "app_user",
-                tls,
-            )
-        };
+        let with = |tls: PgTls| postgres_with_tls("db.example.com", 5432, "app_user", tls);
         assert_eq!(
             with(PgTls::VerifyFull).unwrap(),
-            postgres("db.example.com", 5432, vec!["app".to_owned()], "app_user").unwrap()
+            postgres("db.example.com", 5432, "app_user").unwrap()
         );
         for (tls, written) in [
             (PgTls::Unverified, r#""tls":"unverified""#),
@@ -960,14 +944,7 @@ mod tests {
             );
         }
         with(PgTls::Ca("not pem".to_owned())).unwrap_err();
-        postgres_with_tls(
-            "*.example.com",
-            5432,
-            vec!["app".to_owned()],
-            "u",
-            PgTls::Unverified,
-        )
-        .unwrap_err();
+        postgres_with_tls("*.example.com", 5432, "u", PgTls::Unverified).unwrap_err();
     }
 
     #[test]
@@ -1092,7 +1069,7 @@ mod tests {
 
     #[test]
     fn postgres_allows_only_scram_on_a_verified_connection() {
-        let policy = postgres("db.example.com", 5432, vec!["app".to_owned()], "app_user").unwrap();
+        let policy = postgres("db.example.com", 5432, "app_user").unwrap();
         assert_eq!(
             policy.rules[0].inject,
             Inject::PgPassword {
@@ -1109,8 +1086,7 @@ mod tests {
                 ..
             }
         ));
-        postgres("db.example.com", 5432, vec![], "u").unwrap_err();
-        postgres("DB.example.com", 5432, vec!["a".to_owned()], "u").unwrap_err();
+        postgres("DB.example.com", 5432, "u").unwrap_err();
     }
 
     #[test]

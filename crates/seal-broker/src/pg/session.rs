@@ -45,8 +45,6 @@ pub struct PgSession {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) user: String,
-    pub(crate) databases: Vec<String>,
-    pub(crate) allow_replication: bool,
     pub(crate) tls: PgTls,
     pub(crate) password: Option<Zeroizing<Vec<u8>>>,
     pub(crate) allow_md5: bool,
@@ -305,28 +303,11 @@ impl PgSession {
                 "this user is not allowed",
             ));
         }
+        // The database, and whether the session replicates, are the caller's to name:
+        // the server's own privileges say what this user may do. The audit record
+        // keeps the database.
         let database = startup.param("database").unwrap_or(&self.user).to_owned();
         progress.database = Some(database.clone());
-        if !self.databases.contains(&database) {
-            return Err(Refusal::new(
-                ErrorCode::PolicyDenied,
-                "3D000",
-                "this database is not allowed",
-            ));
-        }
-        let replication = startup.param("replication").is_some_and(|value| {
-            !matches!(
-                value.to_ascii_lowercase().as_str(),
-                "false" | "off" | "no" | "0"
-            )
-        });
-        if replication && !self.allow_replication {
-            return Err(Refusal::new(
-                ErrorCode::PolicyDenied,
-                "28000",
-                "replication is not allowed",
-            ));
-        }
         let mut params: Vec<(String, String)> = startup
             .params
             .iter()

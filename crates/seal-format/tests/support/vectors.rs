@@ -140,7 +140,11 @@ fn valid_policies() -> Vec<(&'static str, Policy)> {
         ),
         (
             "Postgres",
-            builder::postgres("db.example.com", 5432, vec!["app".to_owned()], "app_user").unwrap(),
+            // With the database list values were once sealed with, which is still read.
+            Policy::from_json(
+                br#"{"rules":[{"destination":{"scheme":"postgres","host":"db.example.com","port":5432,"databases":["app"],"user":{"literal":"app_user"}},"inject":{"pg_password":{}}}]}"#,
+            )
+            .unwrap(),
         ),
         (
             "host pattern",
