@@ -1326,3 +1326,74 @@ fn two_passwords_are_refused() {
         ErrorCode::PolicyDenied | ErrorCode::Conflict
     ));
 }
+
+// Headers another value injects beside a signing rule.
+
+fn s3_header(name: &str) -> Policy {
+    policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "s3.example.com" },
+        "inject": { "header": { "name": name, "format": "{}" } },
+    }] }))
+}
+
+#[test]
+fn another_value_cannot_inject_an_amz_header_the_signing_rule_refuses() {
+    let request = s3_request("/bucket/key", &[], None);
+    for header in [
+        "x-amz-copy-source",
+        "X-Amz-Copy-Source",
+        "x-amz-acl",
+        "x-amz-grant-read",
+        "x-amz-trailer",
+        "x-amz-object-lock-mode",
+    ] {
+        let policies = fields(&[
+            ("secret", s3(&[], "/bucket/")),
+            ("other", s3_header(header)),
+        ]);
+        assert_eq!(
+            code(request.decide(&policies)),
+            Some(ErrorCode::Conflict),
+            "{header}"
+        );
+    }
+}
+
+#[test]
+fn an_injected_copy_source_is_refused_even_where_the_rule_allows_copies() {
+    // The source is a secret, so it cannot be held to the rule's prefix.
+    let request = s3_request("/bucket/key", &[], None);
+    let policies = fields(&[
+        ("secret", s3(&["x-amz-copy-source"], "/bucket/")),
+        ("other", s3_header("x-amz-copy-source")),
+    ]);
+    assert_eq!(code(request.decide(&policies)), Some(ErrorCode::Conflict));
+}
+
+#[test]
+fn another_value_may_inject_what_the_caller_could_set() {
+    let request = s3_request("/bucket/key", &[], None);
+    // A customer's encryption key, sealed, beside the signing key.
+    let policies = fields(&[
+        ("secret", s3(&[], "/bucket/")),
+        (
+            "other",
+            s3_header("x-amz-server-side-encryption-customer-key"),
+        ),
+    ]);
+    assert_eq!(code(request.decide(&policies)), None);
+    // What the rule opts in to, and a header that is not SigV4's.
+    let policies = fields(&[
+        ("secret", s3(&["x-amz-acl"], "/bucket/")),
+        ("other", s3_header("x-amz-acl")),
+    ]);
+    assert_eq!(code(request.decide(&policies)), None);
+    let policies = fields(&[
+        ("secret", s3(&[], "/bucket/")),
+        ("other", s3_header("x-api-key")),
+    ]);
+    assert_eq!(code(request.decide(&policies)), None);
+    // Without a signing rule there is nothing to hold it to.
+    let policies = fields(&[("other", s3_header("x-amz-acl"))]);
+    assert_eq!(code(request.decide(&policies)), None);
+}

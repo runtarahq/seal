@@ -28,6 +28,12 @@ the body, `range`, and every `x-amz-*` header.
 | `X-Amz-Content-SHA256` | A well-formed hash, where the rule allows the caller's hash |
 | Every other `X-Amz-*` header, including `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Decoded-Content-Length` and `X-Amz-Trailer` | Never: they control signing, or are not on the list yet |
 
+A header that another presented value injects is signed like one the caller set, and
+anyone can seal a value that injects one. So seal holds it to the same table: beside a
+SigV4 rule, another value may inject an `X-Amz-*` header only where the caller could set
+it. An injected `x-amz-copy-source` is always refused, since its value is a secret and
+cannot be checked against the rule's prefix.
+
 A copy reads the object its source names, not the one in the URL. Without a check, a
 secret limited to one bucket could copy another bucket's object into it and read it. So
 seal reads the copy source, `bucket/key` or `/bucket/key` with an optional
