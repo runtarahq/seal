@@ -265,13 +265,15 @@ pub enum Destination {
         host: Host,
         /// The exact port.
         port: u16,
-        /// The databases a session may use. At least one.
+        /// No longer used: which databases a role may connect to is for the server's
+        /// own privileges. Accepted so that a value sealed with it still opens.
         databases: Vec<String>,
         /// The user a session logs in as.
         user: Part,
         /// How the server's certificate is verified.
         tls: PgTls,
-        /// Allows a replication session.
+        /// No longer used: whether a role may replicate is for the server's own
+        /// privileges. Accepted so that a value sealed with it still opens.
         allow_replication: bool,
     },
 }
@@ -351,9 +353,7 @@ impl TryFrom<RawDestination> for Destination {
                     port: raw.port.ok_or(FormatError::InvalidPolicy(
                         "a Postgres destination needs a port",
                     ))?,
-                    databases: raw.databases.ok_or(FormatError::InvalidPolicy(
-                        "a Postgres destination needs databases",
-                    ))?,
+                    databases: raw.databases.unwrap_or_default(),
                     user: raw.user.ok_or(FormatError::InvalidPolicy(
                         "a Postgres destination needs a user",
                     ))?,
@@ -411,7 +411,8 @@ impl From<Destination> for RawDestination {
                 host,
                 port: Some(port),
                 path_prefix: None,
-                databases: Some(databases),
+                // Left out when empty, as every policy made now has it.
+                databases: (!databases.is_empty()).then_some(databases),
                 user: Some(user),
                 // The default is left out, so a policy has one canonical form.
                 tls: (tls != PgTls::VerifyFull).then_some(tls),

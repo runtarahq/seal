@@ -443,8 +443,6 @@ impl Broker {
             host,
             port,
             user,
-            databases: terms.databases,
-            allow_replication: terms.allow_replication,
             tls: terms.tls,
             allow_md5: verified
                 && terms

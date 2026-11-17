@@ -707,12 +707,8 @@ mod tests;
 pub struct PgTerms {
     /// The user to log in as.
     pub user: Part,
-    /// The databases a session may use: those every matched rule allows.
-    pub databases: Vec<String>,
     /// How the server's certificate is verified.
     pub tls: seal_format::policy::PgTls,
-    /// Whether every matched rule allows replication.
-    pub allow_replication: bool,
     /// The field holding the password, if one was presented, and the weaker methods its
     /// rule allows.
     pub password: Option<PgPassword>,
@@ -734,13 +730,13 @@ pub struct PgPassword {
 }
 
 /// The terms of a Postgres session, from a plan made for a Postgres endpoint. Matched
-/// rules must agree on the user and on TLS; a session may use only the databases all of
-/// them allow, and replication only if all of them do.
+/// rules must agree on the user and on TLS. Which databases the user may connect to, and
+/// whether it may replicate, are for the server's own privileges.
 ///
 /// # Errors
 ///
-/// [`ErrorCode::PolicyDenied`] if the rules disagree, allow no database in common, or
-/// present two passwords or two client certificates.
+/// [`ErrorCode::PolicyDenied`] if the rules disagree, or present two passwords or two
+/// client certificates.
 pub fn postgres_terms(
     policies: &BTreeMap<FieldName, Policy>,
     plan: &Plan,
@@ -756,31 +752,18 @@ pub fn postgres_terms(
             .ok_or_else(|| {
                 BrokerError::for_field(ErrorCode::Internal, "a matched rule is missing", field)
             })?;
-        let seal_format::policy::Destination::Postgres {
-            databases,
-            user,
-            tls,
-            allow_replication,
-            ..
-        } = &rule.destination
-        else {
+        let seal_format::policy::Destination::Postgres { user, tls, .. } = &rule.destination else {
             return Err(denied("this rule is not for a Postgres server", field));
         };
         let current = terms.get_or_insert_with(|| PgTerms {
             user: user.clone(),
-            databases: databases.clone(),
             tls: tls.clone(),
-            allow_replication: *allow_replication,
             password: None,
             client_cert: None,
         });
         if current.user != *user || current.tls != *tls {
             return Err(denied("rules disagree on the user or on TLS", field));
         }
-        current
-            .databases
-            .retain(|database| databases.contains(database));
-        current.allow_replication &= *allow_replication;
         match &injection.inject {
             Inject::PgPassword {
                 allow_md5,
@@ -808,11 +791,5 @@ pub fn postgres_terms(
     }
     let terms =
         terms.ok_or_else(|| BrokerError::new(ErrorCode::PolicyDenied, "nothing logs in"))?;
-    if terms.databases.is_empty() {
-        return Err(BrokerError::new(
-            ErrorCode::PolicyDenied,
-            "the rules allow no database in common",
-        ));
-    }
     Ok(terms)
 }

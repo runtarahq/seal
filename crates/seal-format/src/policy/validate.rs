@@ -195,7 +195,6 @@ fn destination(destination: &Destination) -> Result<(), FormatError> {
         } => {
             require(!host.is_pattern(), "a Postgres host cannot be a pattern")?;
             require(*port != 0, "port is zero")?;
-            require(!databases.is_empty(), "a database list is empty")?;
             require(databases.len() <= MAX_DATABASES, "too many databases")?;
             for database in databases {
                 require(

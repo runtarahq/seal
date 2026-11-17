@@ -96,7 +96,10 @@ async fn a_session_logs_in_and_relays() {
     let mut first = wire::ssl_request();
     first.extend(startup(&[
         ("user", "app_user"),
-        ("database", "reports"),
+        // A database no rule names, and a replication session: the server's own
+        // privileges say whether this user may have them, not seal.
+        ("database", "elsewhere"),
+        ("replication", "database"),
         ("application_name", "x"),
     ]));
     let (mut caller, task) = session(&harness, connect_request(&server, &password), &first).await;
@@ -116,7 +119,11 @@ async fn a_session_logs_in_and_relays() {
     assert_eq!(server.startup_param(0, "user").as_deref(), Some("app_user"));
     assert_eq!(
         server.startup_param(0, "database").as_deref(),
-        Some("reports")
+        Some("elsewhere")
+    );
+    assert_eq!(
+        server.startup_param(0, "replication").as_deref(),
+        Some("database")
     );
     assert_eq!(
         server.startup_param(0, "application_name").as_deref(),
@@ -125,7 +132,7 @@ async fn a_session_logs_in_and_relays() {
     let record = harness.audit.last();
     assert_eq!(
         (record.op, record.pg_auth, record.path.as_deref()),
-        ("connect", Some("scram-sha-256"), Some("reports"))
+        ("connect", Some("scram-sha-256"), Some("elsewhere"))
     );
     assert_eq!(record.bytes_in, 12);
 }
@@ -138,16 +145,6 @@ async fn a_startup_the_policy_does_not_allow_is_refused_before_connecting() {
     for (params, sqlstate) in [
         (&[("user", "postgres"), ("database", "app")][..], "28000"),
         (&[("database", "app")][..], "28000"),
-        (&[("user", "app_user"), ("database", "other")][..], "3D000"),
-        (&[("user", "app_user")][..], "3D000"),
-        (
-            &[
-                ("user", "app_user"),
-                ("database", "app"),
-                ("replication", "database"),
-            ][..],
-            "28000",
-        ),
     ] {
         let (mut caller, task) = session(
             &harness,

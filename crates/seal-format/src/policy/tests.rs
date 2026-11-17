@@ -993,15 +993,16 @@ fn postgres_destinations_need_their_fields_and_no_http_ones() {
         d.as_object_mut().unwrap().remove("port");
     })
     .unwrap_err();
+    // A database list is no longer needed, and one a value was sealed with is read.
     postgres(|d| {
         d.as_object_mut().unwrap().remove("databases");
     })
-    .unwrap_err();
+    .unwrap();
     postgres(|d| {
         d.as_object_mut().unwrap().remove("user");
     })
     .unwrap_err();
-    postgres(|d| d["databases"] = json!([])).unwrap_err();
+    postgres(|d| d["databases"] = json!([])).unwrap();
     postgres(|d| d["databases"] = json!([""])).unwrap_err();
     postgres(|d| d["path_prefix"] = json!("/a")).unwrap_err();
     postgres(|d| d["tls"] = json!({ "ca": "not pem" })).unwrap_err();

@@ -105,9 +105,8 @@ fn policy() -> impl Strategy<Value = Policy> {
             .unwrap()
             .secret
         }),
-        (host(), 1_u16..=65535, "[a-z_]{1,16}").prop_map(|(host, port, database)| {
-            builder::postgres(&host, port, vec![database], "app_user").unwrap()
-        }),
+        (host(), 1_u16..=65535, "[a-z_]{1,16}")
+            .prop_map(|(host, port, user)| { builder::postgres(&host, port, &user).unwrap() }),
     ]
 }
 

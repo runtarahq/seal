@@ -1148,8 +1148,6 @@ fn a_postgres_session_gets_the_rules_terms() {
     let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
     let terms = postgres_terms(&policies, &plan).unwrap();
     assert_eq!(terms.user, Part::Literal("app_user".to_owned()));
-    assert_eq!(terms.databases, ["app", "reports"]);
-    assert!(!terms.allow_replication);
     let password = terms.password.unwrap();
     assert_eq!(password.field, field("password"));
     assert!(password.allow_md5 && !password.allow_cleartext);
@@ -1170,8 +1168,10 @@ fn a_postgres_session_gets_the_rules_terms() {
 }
 
 #[test]
-fn a_password_and_a_client_certificate_share_the_databases_both_allow() {
+fn a_password_and_a_client_certificate_must_agree_on_the_user() {
     let cert = json!({ "client_cert": { "cert": { "field": "cert" } } });
+    // The databases each names are no longer compared: the server's privileges say
+    // where this user may connect.
     let policies = fields(&[
         (
             "password",
@@ -1179,33 +1179,19 @@ fn a_password_and_a_client_certificate_share_the_databases_both_allow() {
         ),
         (
             "client_key",
-            pg_policy(&["reports", "other"], "app_user", cert.clone(), &["cert"]),
+            pg_policy(&["other"], "app_user", cert.clone(), &["cert"]),
         ),
     ]);
     let plain = BTreeSet::from([field("cert")]);
     let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
     let terms = postgres_terms(&policies, &plan).unwrap();
-    assert_eq!(terms.databases, ["reports"]);
     assert!(terms.password.is_some() && terms.client_cert.is_some());
 
-    // They must agree on the user, and share a database.
     let policies = fields(&[
         ("password", pg_policy(&["app"], "app_user", password(), &[])),
         (
             "client_key",
-            pg_policy(&["app"], "someone_else", cert.clone(), &["cert"]),
-        ),
-    ]);
-    let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
-    assert_eq!(
-        postgres_terms(&policies, &plan).unwrap_err().code(),
-        ErrorCode::PolicyDenied
-    );
-    let policies = fields(&[
-        ("password", pg_policy(&["app"], "app_user", password(), &[])),
-        (
-            "client_key",
-            pg_policy(&["other"], "app_user", cert, &["cert"]),
+            pg_policy(&["app"], "someone_else", cert, &["cert"]),
         ),
     ]);
     let plan = decide(&policies, &pg_head(5432, &plain)).unwrap();
