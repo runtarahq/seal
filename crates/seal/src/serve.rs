@@ -337,8 +337,11 @@ pub async fn run(
             .map_err(|_| format!("cannot listen on {address}"))?;
             listening(&Listening::Tcp(local));
             tracing::info!(mode, "seal is listening");
+            // A certificate is checked when a connection opens. Ending connections at
+            // an age makes a caller show one again; requests under way finish first.
             builder
                 .clone()
+                .max_connection_age(config.listen.max_connection_age.0)
                 .add_service(server)
                 .serve_with_incoming_shutdown(incoming, shutdown)
                 .await

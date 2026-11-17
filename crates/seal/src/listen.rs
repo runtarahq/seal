@@ -272,6 +272,11 @@ fn build_tls(files: &[PathBuf; 3]) -> Result<(rustls::ServerConfig, Vec<u8>), St
         .with_single_cert(chain, key)
         .map_err(|_| "the certificate and key do not match".to_owned())?;
     config.alpn_protocols = vec![b"h2".to_vec()];
+    // A resumed session is not asked for its certificate again, and each one hands out
+    // new tickets, so a caller could go on past its certificate's expiry for as long as
+    // it kept resuming. Every connection does a full handshake instead.
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
     Ok((config, contents))
 }
 
@@ -390,5 +395,19 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o660
         );
+    }
+
+    #[test]
+    fn a_session_is_never_resumed_without_its_certificate_being_checked() {
+        let directory = tempfile::tempdir().unwrap();
+        let pki = seal_testkit::pki::TestPki::new("callers");
+        let server = pki.server(&["localhost"]);
+        let files = ["tls.crt", "tls.key", "ca.crt"].map(|name| directory.path().join(name));
+        std::fs::write(&files[0], &server.cert_pem).unwrap();
+        std::fs::write(&files[1], &server.key_pem).unwrap();
+        std::fs::write(&files[2], &pki.ca_pem).unwrap();
+        let (config, _) = build_tls(&files).unwrap();
+        assert_eq!(config.send_tls13_tickets, 0);
+        assert!(!config.session_storage.can_cache());
     }
 }

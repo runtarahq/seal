@@ -42,6 +42,12 @@ Certificates are short-lived: seal checks its certificate files every
 the old certificates kept, so a half-written renewal cannot take seal down. Connections
 already open keep the certificate they started with.
 
+A caller's certificate is checked when it connects, and seal never resumes a TLS session,
+so every connection is a full handshake with a certificate that is valid then. A
+connection ends at `listen.max_connection_age`, once the requests on it have finished, and
+the caller connects again. An expired or replaced certificate therefore stops working
+within that time, plus the longest request still running.
+
 ## Configuration reference
 
 Unknown settings are errors. Durations are written like `100ms`, `60s`, `15m` or `8h`,
@@ -55,6 +61,7 @@ configuration file that its group or others can write.
 | `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
 | `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san` |
 | `reload_interval` | `10s` | How often certificate files are checked |
+| `max_connection_age` | `1h` | How long a TLS connection lasts before the caller must connect, and show its certificate, again |
 
 ### `[[callers]]`
 
