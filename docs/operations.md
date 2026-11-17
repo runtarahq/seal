@@ -97,7 +97,7 @@ asked for. A certificate that matches two configured callers is refused.
 | `max_stale` | `5m` | A keyset not fetched successfully this long is dropped |
 | `max_unwrap_age` | `1h` | A key not unwrapped this long is dropped |
 | `max_loaded_keysets` | `1024` | The least recently used goes first |
-| `max_keys_per_keyset` | `16` | `rotate` refuses past this |
+| `max_keys_per_keyset` | `16` | `rotate` refuses past this. A keyset is read with up to twice as many, so one left over the limit by rotations on separate instances at once still loads; more than that is refused |
 | `max_live_keys` | `4096` | Every private key in memory, including ones a request still holds |
 | `max_tracked_keysets` | `4096` | Unknown keysets remembered, and rate buckets |
 | `lock_memory` | `best_effort` | `off`, `best_effort` or `required` |

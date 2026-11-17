@@ -77,6 +77,14 @@ impl KeyringConfig {
     ///
     /// # Errors
     ///
+    /// The most keys of one keyset that are read: twice what `rotate` allows. Rotations
+    /// on separate instances can each pass the limit before any has stored its key, and
+    /// a keyset left over the limit that way must still load.
+    #[must_use]
+    pub fn max_keys_read(&self) -> usize {
+        self.max_keys_per_keyset.saturating_mul(2)
+    }
+
     /// Returns [`KeyError::Invalid`] naming the rule that is broken.
     pub fn validate(&self) -> Result<(), KeyError> {
         if !(self.refresh_interval < self.max_stale && self.max_stale < self.max_unwrap_age) {
@@ -160,6 +168,8 @@ struct Inner {
     state: Mutex<State>,
     live: Arc<Semaphore>,
     unwraps: Semaphore,
+    /// Held while a key is added, so that two rotations here cannot both pass the limit.
+    adding: tokio::sync::Mutex<()>,
 }
 
 /// Loads, refreshes and evicts keysets.
@@ -195,6 +205,7 @@ impl Keyring {
             state: Mutex::new(State::default()),
             live: Arc::new(Semaphore::new(config.max_live_keys)),
             unwraps: Semaphore::new(config.unwrap_concurrency),
+            adding: tokio::sync::Mutex::new(()),
         });
         spawn_maintenance(Arc::downgrade(&inner));
         Ok(Self { inner })
@@ -236,6 +247,7 @@ impl Keyring {
     /// Returns [`KeyError::UnknownKeyset`] if the keyset has no keys, and
     /// [`KeyError::TooManyKeys`] if it has as many as it may.
     pub async fn rotate(&self, keyset: &KeysetId) -> Result<WrappedKey, KeyError> {
+        let _adding = self.inner.adding.lock().await;
         let existing = self.inner.fetch(keyset).await?;
         if existing.is_empty() {
             return Err(KeyError::UnknownKeyset);
@@ -456,7 +468,7 @@ impl Inner {
         if wrapped.is_empty() {
             return Ok(None);
         }
-        if wrapped.len() > self.config.max_keys_per_keyset {
+        if wrapped.len() > self.config.max_keys_read() {
             return Err(KeyError::Unavailable);
         }
         let now = Instant::now();

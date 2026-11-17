@@ -49,10 +49,10 @@ pub type KeyParts = (Arc<dyn KeySource>, KeyWraps);
 ///
 /// Returns a message naming what could not be loaded.
 pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
+    // Twice what `rotate` allows, as the keyring reads: see `KeyringConfig::max_keys_read`.
+    let max_keys = config.keys.max_keys_per_keyset.saturating_mul(2);
     let source: Arc<dyn KeySource> = match &config.keys.source {
-        SourceConfig::Dir(path) => {
-            Arc::new(DirKeySource::new(path, config.keys.max_keys_per_keyset))
-        }
+        SourceConfig::Dir(path) => Arc::new(DirKeySource::new(path, max_keys)),
         SourceConfig::S3(s3) => {
             let ca_pem = match &s3.ca {
                 Some(path) => Some(
@@ -71,7 +71,7 @@ pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
                     profile: s3.profile.clone().unwrap_or_else(|| "default".to_owned()),
                     ca_pem,
                     timeout: KEY_SOURCE_TIMEOUT,
-                    max_keys: config.keys.max_keys_per_keyset,
+                    max_keys,
                 })
                 .map_err(|error| error.to_string())?,
             )
