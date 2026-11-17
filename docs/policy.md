@@ -576,9 +576,9 @@ of the listed values. Here a shared client secret may only be used for the grant
 for a user who consented, never for `client_credentials`, which would act as the app
 itself.
 
-A required field may not be named in the URL's query either. Some providers read
-parameters from both and prefer the query, which would put the caller's value in place of
-the one seal checked.
+A required field may not be named in the URL's query either, by the caller or by a query
+injection of another value presented with it. Some providers read parameters from both and
+prefer the query, which would put that value in place of the one seal checked.
 
 ```json
 {

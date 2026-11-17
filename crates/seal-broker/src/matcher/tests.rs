@@ -1362,3 +1362,28 @@ fn a_required_form_field_cannot_also_be_in_the_query() {
     request.method = Method::Post;
     assert!(request.decide(&policies).is_ok());
 }
+
+#[test]
+fn a_required_form_field_cannot_be_put_in_the_query_by_another_value() {
+    let shared = policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "api.example.com" },
+        "inject": { "form_field": { "name": "client_secret" } },
+        "require_form": { "grant_type": ["authorization_code", "refresh_token"] },
+    }] }));
+    // Anyone can seal a value, so this one is the caller's own.
+    let injects = |name: &str| one_rule(&json!({ "query": { "name": name } }));
+    let mut request = Request::to("https://api.example.com/oauth/token");
+    request.method = Method::Post;
+
+    let policies = fields(&[
+        ("client_secret", shared.clone()),
+        ("mine", injects("grant_type")),
+    ]);
+    let error = request.decide(&policies).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::PolicyDenied);
+    assert!(error.detail().ends_with(": mine"), "{}", error.detail());
+
+    // A query parameter the rule does not require still goes with it.
+    let policies = fields(&[("client_secret", shared), ("mine", injects("api_key"))]);
+    assert!(request.decide(&policies).is_ok());
+}
