@@ -532,10 +532,13 @@ nothing for what it was doing, so its supervisor should wait longer than the gra
 A record is written when its request ends, with what happened, so the request that finds
 the sink broken has already used its credential: a streamed response has been delivered
 before it fails, and a Postgres session has run. seal keeps that record, up to 1024 of
-them, and refuses every request after it with `INTERNAL`, before opening a value, until
-the missed records are written. What goes unrecorded while the sink is broken is
-therefore the requests under way when it broke, and their records follow once it works
-again. `seal_audit_failures_total` counts each failed write: alert on it.
+them, and refuses every request and administrative call after it with `INTERNAL`, before
+opening a value or touching a key, until the missed records are written. What goes
+unrecorded while the sink is broken is therefore the requests under way when it broke,
+and their records follow once it works again. Of the refusals made meanwhile only the
+first 64 are kept, so that they leave room for those. `seal_audit_failures_total` counts
+each failed write, and `seal_audit_dropped_total` each record that was not kept: alert on
+both.
 
 A caller refused a keyset, a value's keyset or an administrative call leaves a record
 too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an

@@ -145,6 +145,7 @@ impl Service {
         if !self.per_caller.allow(&caller.name) {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
+        self.audit_ready()?;
         let keyset = KeysetId::new(request.get_ref().keyset.clone()).ok();
         // A name that is no keyset's is refused as malformed by the call itself.
         let allowed = keyset
@@ -161,6 +162,15 @@ impl Service {
             "administrative calls need an admin caller"
         };
         Err(self.denied(op, &caller, &keyset, reason))
+    }
+
+    /// Refuses while the audit sink cannot write, before a key is made or destroyed:
+    /// an administrative call is recorded once it is done, and destroying a keyset
+    /// cannot be undone for want of its record.
+    fn audit_ready(&self) -> Result<(), Status> {
+        self.audit
+            .ready()
+            .map_err(|_| refusal(ErrorCode::Internal, "the audit log cannot be written"))
     }
 
     /// Refuses a caller something it is not allowed, and leaves an audit record: what
@@ -242,6 +252,7 @@ impl Service {
             ));
         }
         let keyset = keyset.ok_or_else(|| bad("the keyset is not valid"))?;
+        self.audit_ready()?;
         let result = self.keyring.destroy(&keyset).await;
         self.audit_admin(
             "destroy_keyset",
@@ -1046,5 +1057,116 @@ mod tests {
         assert!(presented(sealed.clone(), stray).is_err());
         let bad_item = HashMap::from([("client_secret".to_owned(), String::new())]);
         assert!(presented(sealed, bad_item).is_err());
+    }
+    /// A sink that says it cannot write, as one does once it has missed a record.
+    #[derive(Default)]
+    struct NotReady {
+        records: std::sync::Mutex<Vec<AuditRecord>>,
+        not_ready: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuditSink for NotReady {
+        fn record(&self, record: &AuditRecord) -> Result<(), seal_broker::audit::AuditFailed> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+
+        fn ready(&self) -> Result<(), seal_broker::audit::AuditFailed> {
+            if self.not_ready.load(std::sync::atomic::Ordering::Acquire) {
+                Err(seal_broker::audit::AuditFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn no_key_is_made_or_destroyed_while_the_audit_log_cannot_be_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let kek = directory.path().join("kek");
+        crate::cli::create_wrapping_key(&kek).unwrap();
+        let config = crate::config::Config::parse(&format!(
+            r#"
+            [listen]
+            unix = "/unused"
+
+            [[callers]]
+            name = "ops"
+            unix_uid = 990
+            keysets = ["*"]
+            admin = true
+            destroy_keysets = true
+
+            [keys]
+            source = {{ dir = {keys:?} }}
+            wrap = {{ file = {kek:?} }}
+            lock_memory = "off"
+            "#,
+            keys = directory.path().join("keys"),
+        ))
+        .unwrap();
+        let (source, wrap) = crate::serve::key_parts(&config).unwrap();
+        let keyring = Keyring::new(source, wrap, config.keyring()).unwrap();
+        let audit = Arc::new(NotReady::default());
+        let sink: Arc<dyn AuditSink> = Arc::clone(&audit) as Arc<dyn AuditSink>;
+        let broker = Broker::new(
+            crate::serve::broker_config(&config).unwrap(),
+            Arc::new(keyring.clone()),
+            seal_broker::Environment::production(Arc::clone(&sink)).unwrap(),
+        )
+        .unwrap();
+        let service = Service::new(
+            Arc::new(broker),
+            keyring.clone(),
+            Arc::new(CallerMap::new(&config.callers)),
+            sink,
+            ServiceLimits {
+                max_concurrent_streams: 8,
+                rate_per_caller: config.limits.rate_per_caller,
+                rate_per_keyset: config.limits.rate_per_keyset,
+                max_tracked_keysets: 16,
+                head_timeout: Duration::from_secs(1),
+            },
+            ServiceInfo {
+                mode: "unix",
+                buffer_cap: 1 << 20,
+            },
+        );
+        let request = |keyset: &str| {
+            let mut request = Request::new(KeysetRequest {
+                keyset: keyset.to_owned(),
+            });
+            request.extensions_mut().insert(Identity::Uid(990));
+            request
+        };
+        let acme = KeysetId::new("acme").unwrap();
+        service.generate_keyset(request("acme")).await.unwrap();
+
+        audit
+            .not_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        let written = audit.records.lock().unwrap().len();
+        for refused in [
+            service.generate_keyset(request("other")).await.err(),
+            service.rotate(request("acme")).await.err(),
+            service.destroy_keyset(request("acme")).await.err(),
+        ] {
+            assert_eq!(refused.unwrap().code(), tonic::Code::Internal);
+        }
+        // Nothing was done, so there is nothing that went unrecorded.
+        assert_eq!(audit.records.lock().unwrap().len(), written);
+        assert_eq!(keyring.public_keys(&acme).await.unwrap().len(), 1);
+        assert!(
+            keyring
+                .public_keys(&KeysetId::new("other").unwrap())
+                .await
+                .is_err()
+        );
+
+        audit
+            .not_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        service.destroy_keyset(request("acme")).await.unwrap();
+        assert!(keyring.public_keys(&acme).await.is_err());
     }
 }
