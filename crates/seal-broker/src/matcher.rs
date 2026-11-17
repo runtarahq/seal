@@ -124,6 +124,7 @@ pub fn decide(
     }
 
     path_injection_is_allowed_by_the_rest(&matched)?;
+    required_form_fields_are_not_in_the_query(&matched, head)?;
 
     // Step 2: resolve the parts each primary rule refers to.
     let mut used_as_companion: BTreeSet<&FieldName> = BTreeSet::new();
@@ -301,6 +302,28 @@ fn parts_of(inject: &Inject) -> Vec<&Part> {
         | Inject::PgPassword { .. }
         | Inject::Companion { .. } => Vec::new(),
     }
+}
+
+/// `require_form` holds a field of the body to its allowed values. A provider that also
+/// reads parameters from the query, and prefers them, would take the caller's value
+/// there instead, so a required field may not be named in the query at all.
+fn required_form_fields_are_not_in_the_query(
+    matched: &BTreeMap<&FieldName, (usize, &Rule)>,
+    head: &RequestHead<'_>,
+) -> Result<(), BrokerError> {
+    let Endpoint::Http(target) = head.endpoint else {
+        return Ok(());
+    };
+    for (field, (_, rule)) in matched {
+        if rule.require_form.keys().any(|name| query_has(target, name)) {
+            return Err(BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "the query names a form field this field's rule requires",
+                field,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_part<'a>(
