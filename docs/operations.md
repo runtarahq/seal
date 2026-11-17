@@ -59,7 +59,7 @@ configuration file that its group or others can write.
 | Setting | Default | |
 |---|---|---|
 | `unix` | | A socket path, in a directory only seal's user can write: seal refuses one its group or others can write, where the socket could be replaced. Callers then need `unix_uid` |
-| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san` |
+| `tcp`, `tls` | | An address, with `{ cert, key, client_ca }` in PEM. Callers then need `cert_subject` or `cert_san`. seal refuses a `key` that everyone on the host can read, and warns of one its group can read |
 | `reload_interval` | `10s` | How often certificate files are checked |
 | `max_connection_age` | `1h` | How long a TLS connection lasts before the caller must connect, and show its certificate, again |
 
@@ -70,7 +70,7 @@ configuration file that its group or others can write.
 | `name` | The name in audit records |
 | `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
-| `admin` | Whether it may generate keysets, rotate and list public keys. Default `false` |
+| `admin` | Whether it may generate keysets, rotate and list public keys. Default `false`. It holds for every keyset, whatever `keysets` lists: `keysets` says which a caller may use, and a platform that makes a keyset for each new tenant could not list one that does not exist yet. So an admin caller can add keys to any keyset, within its rate, though it reads no private key and can destroy nothing |
 | `destroy_keysets` | Whether it may [destroy](#destroying-a-keyset) the keysets it may use, which cannot be undone. Separate from `admin`. Default `false` |
 
 A `cert_subject` is the certificate's whole subject, attribute by attribute and in the

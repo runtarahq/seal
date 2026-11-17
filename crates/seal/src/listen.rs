@@ -254,18 +254,28 @@ impl ReloadingTls {
 }
 
 /// The service's own TLS key lets whoever has it pass as seal to a caller, and be handed
-/// sealed values and requests. It is often mounted by something else, readable by a
-/// group, so this warns and does not refuse.
-fn warn_if_others_can_read(key: &Path) {
+/// sealed values and requests. One that everyone on the host can read is refused. One
+/// its group can read is often mounted that way by something else, so seal says so and
+/// goes on.
+fn key_is_private_enough(key: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let others =
-            std::fs::metadata(key).is_ok_and(|file| file.permissions().mode() & 0o077 != 0);
-        if others {
-            tracing::warn!("the service's TLS key can be read by its group or by others");
+        let mode = std::fs::metadata(key)
+            .map_err(|_| format!("{} cannot be read", key.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o007 != 0 {
+            return Err(format!(
+                "{} can be read by everyone on the host, and it is the service's private key",
+                key.display()
+            ));
+        }
+        if mode & 0o070 != 0 {
+            tracing::warn!("the service's TLS key can be read by its group");
         }
     }
+    Ok(())
 }
 
 fn read_all(files: &[PathBuf; 3]) -> io::Result<Vec<u8>> {
@@ -283,7 +293,7 @@ fn build_tls(files: &[PathBuf; 3]) -> Result<(rustls::ServerConfig, Vec<u8>), St
     let chain = CertificateDer::pem_file_iter(cert)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(|_| format!("{} is not a PEM certificate chain", cert.display()))?;
-    warn_if_others_can_read(key);
+    key_is_private_enough(key)?;
     let key = PrivateKeyDer::from_pem_file(key)
         .map_err(|_| format!("{} is not a PEM private key", key.display()))?;
     let mut roots = rustls::RootCertStore::empty();
@@ -464,8 +474,21 @@ mod tests {
         std::fs::write(&files[0], &server.cert_pem).unwrap();
         std::fs::write(&files[1], &server.key_pem).unwrap();
         std::fs::write(&files[2], &pki.ca_pem).unwrap();
+        let mode = |mode| {
+            std::fs::set_permissions(&files[1], std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(0o600);
         let (config, _) = build_tls(&files).unwrap();
         assert_eq!(config.send_tls13_tickets, 0);
         assert!(!config.session_storage.can_cache());
+
+        // The service's key is private: one everyone can read is refused, and one its
+        // group can read, as a mounted secret often is, only warned of.
+        for others in [0o644, 0o604, 0o606] {
+            mode(others);
+            assert!(build_tls(&files).is_err(), "{others:o}");
+        }
+        mode(0o640);
+        build_tls(&files).unwrap();
     }
 }
