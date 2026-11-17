@@ -55,6 +55,7 @@ idle_timeout = "60s"
 connect_timeout = "10s"
 first_byte_timeout = "60s"
 buffered_total_timeout = "60s"
+shutdown_grace = "30s"                  # the unit's TimeoutStopSec is longer
 rate_per_caller = "1000/s"
 rate_per_keyset = "200/s"
 memory_budget = "2GiB"                  # check-config prints how the ceiling adds up

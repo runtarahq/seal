@@ -1618,3 +1618,51 @@ async fn a_caller_that_stops_taking_a_response_does_not_hold_its_audit_record() 
             .is_ok()
     );
 }
+
+// Stopping.
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stopping_ends_what_is_still_running_and_records_it() {
+    // seal lets requests under way finish when it is told to stop. One that does not
+    // finish would keep it running until its supervisor killed it, and a killed
+    // process writes no record of what it was doing.
+    let provider = MockProvider::plain().await;
+    let options = Options {
+        limits: "idle_timeout = \"60s\"\nshutdown_grace = \"1s\"\n".to_owned(),
+        ..Options::default()
+    };
+    let mut instance = start(Mode::Unix, options, &[&provider]).await;
+    let token = instance
+        .setup
+        .seal("token", b"SEALCANARY-token", &token_policy(&provider))
+        .await;
+    let holding = instance
+        .client
+        .send(get(&url(&provider, "/stall"), &[("token", &token)]))
+        .await
+        .unwrap();
+    let mut process = instance.process.take().unwrap();
+    let status = Command::new("kill")
+        .args(["-TERM", &process.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let started = std::time::Instant::now();
+    let exit = loop {
+        if let Some(exit) = process.try_wait() {
+            break exit;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "seal did not stop: {}",
+            process.stderr.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(exit.success(), "{exit:?}");
+    assert!(instance.setup.audit_records().iter().any(|record| {
+        record["op"] == "send" && record["path"] == "/stall" && record["outcome"] == "cancelled"
+    }));
+    drop(holding);
+}

@@ -473,6 +473,9 @@ pub struct LimitsConfig {
     pub max_stream_duration: Option<Interval>,
     /// The longest Postgres session.
     pub pg_max_session: Interval,
+    /// How long requests under way may take to finish once seal is told to stop.
+    /// Those still running then are ended, so that their audit records are written.
+    pub shutdown_grace: Interval,
     /// Requests per caller.
     pub rate_per_caller: Rate,
     /// Requests per keyset.
@@ -496,6 +499,7 @@ impl Default for LimitsConfig {
             buffered_total_timeout: Interval(Duration::from_secs(60)),
             max_stream_duration: None,
             pg_max_session: Interval(Duration::from_secs(8 * 3600)),
+            shutdown_grace: Interval(Duration::from_secs(30)),
             rate_per_caller: Rate {
                 count: 1000,
                 per: Duration::from_secs(1),

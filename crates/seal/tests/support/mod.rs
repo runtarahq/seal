@@ -318,6 +318,11 @@ impl Process {
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
+
+    /// How the process ended, if it has.
+    pub fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
 }
 
 impl Drop for Process {

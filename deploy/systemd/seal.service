@@ -19,6 +19,9 @@ ExecStartPre=/usr/local/bin/seal check-config --config /etc/seal/seal.toml
 ExecStart=/usr/local/bin/seal serve --config /etc/seal/seal.toml
 Restart=on-failure
 RestartSec=2s
+# Longer than limits.shutdown_grace, 30s unless set: seal ends the requests still
+# running after it, and each writes its audit record. A killed process writes none.
+TimeoutStopSec=45s
 
 # The socket, keys and audit log.
 RuntimeDirectory=seal

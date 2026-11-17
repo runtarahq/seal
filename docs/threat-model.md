@@ -305,6 +305,11 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   expire, wherever they were copied to, unless the role's sessions are revoked in IAM.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
+- **A killed process records nothing more.** A record is written when a request ends.
+  Told to stop, seal ends what is still running after `shutdown_grace` and records it;
+  killed outright, or crashed, it leaves no record of the requests then under way. A
+  Postgres session is the exception that would matter most, lasting hours, so it is
+  also recorded when it begins.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups
   that also hold copies of them, unless the wrapping key is destroyed too.
 - **A refused response can follow a credential's use.** Refusing a response as over its

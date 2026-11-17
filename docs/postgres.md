@@ -125,8 +125,8 @@ failed", since a server's message can name users or more.
 ## Limits
 
 A session ends when nothing moves for the idle timeout, or at `pg_max_session` (default
-8 hours), whichever comes first. A rule can shorten either. Its bytes each way go in the
-audit record. Each session holds one of `max_concurrent_streams` and one provider
+8 hours), whichever comes first. A rule can shorten either. A session is recorded when it
+has logged in, as `started`, and again when it ends, with its bytes each way. Each session holds one of `max_concurrent_streams` and one provider
 connection.
 
 ## Servers that cannot be verified

@@ -142,6 +142,7 @@ coming from inside. `deny_cidrs` wins over both.
 | `limits.first_byte_timeout` | `60s` | Once the request is sent |
 | `limits.buffered_total_timeout` | `60s` | For a request holding a capped buffer |
 | `limits.max_stream_duration` | none | An optional total deadline for streams |
+| `limits.shutdown_grace` | `30s` | Once told to stop, how long requests under way may take to finish. Those still running are then ended, so that each writes its audit record. Give seal's supervisor longer than this before it kills the process |
 | `limits.rate_per_caller` | `1000/s` | |
 | `limits.rate_per_keyset` | `200/s` | Counted against the request's keyset and against the keyset each presented value was sealed to |
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
@@ -513,11 +514,20 @@ copy of the wrapped keys still opens the keyset's values while the wrapping key 
 
 One JSON line per request and per administrative call: time, caller, keyset, item, field
 names, matched rule indexes, method, host, path without the query string, status, bytes
-each way, duration, outcome (`ok`, `refused`, `failed` or `cancelled`) and error code. A
+each way, duration, outcome (`ok`, `refused`, `failed`, `cancelled` or `started`) and error code. A
 `verify` record has `verified`, whether the code matched: a run of `false` for one value
 is someone guessing. A `presign` record has `expires_s`, how long the URL lasts: what is
 done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
+
+A Postgres session leaves two records: one with outcome `started` when it has logged in,
+before the caller can use it, and one with what it did when it ends. A session may last
+hours, and the first says that it happened even if seal is killed before the second.
+When seal is told to stop it waits `limits.shutdown_grace` for requests under way, then
+ends them, and each is recorded as `cancelled`. A process that is killed outright writes
+nothing for what it was doing, so its supervisor should wait longer than the grace:
+`TimeoutStopSec` in the systemd unit, `--stop-timeout` or
+`terminationGracePeriodSeconds` for a container.
 
 A record is written when its request ends, with what happened, so the request that finds
 the sink broken has already used its credential: a streamed response has been delivered

@@ -3,6 +3,7 @@
 #
 #   docker build -f deploy/container/Dockerfile -t seal .
 #   docker run --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+#     --stop-timeout=45 \
 #     --memory=2g --ulimit memlock=2147483648 \
 #     -v /etc/seal:/etc/seal:ro -v seal-keys:/var/lib/seal/keys -p 7443:7443 seal
 
