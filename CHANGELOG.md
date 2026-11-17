@@ -116,7 +116,5 @@ The first release.
   [`docs/dependencies.md`](docs/dependencies.md).
 - The [threat model](docs/threat-model.md) states what seal does and does not protect
   against.
-- A [security audit](docs/security-audit.md) of the source, with what became of each
-  finding.
 
 [0.1.0]: https://github.com/runtarahq/seal/releases/tag/v0.1.0
