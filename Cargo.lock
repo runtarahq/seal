@@ -3014,7 +3014,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "metrics",
- "percent-encoding",
  "ring",
  "rustls",
  "seal-format",

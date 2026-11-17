@@ -253,17 +253,6 @@ pub struct KeysConfig {
 pub enum SourceConfig {
     /// A directory of `<keyset>/<kid>.json` files.
     Dir(PathBuf),
-    /// A key service over HTTPS with a client certificate.
-    Http {
-        /// The base URL.
-        url: String,
-        /// The key service's CA, in PEM.
-        ca: PathBuf,
-        /// seal's client certificate, in PEM.
-        cert: PathBuf,
-        /// seal's client key, in PEM.
-        key: PathBuf,
-    },
 }
 
 /// A wrapping key.

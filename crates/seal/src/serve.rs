@@ -14,8 +14,7 @@ use seal_broker::{Broker, BrokerConfig, Environment, Limits};
 #[cfg(feature = "aws-kms")]
 use seal_keys::{AwsCredentials, AwsKmsConfig, AwsKmsWrap};
 use seal_keys::{
-    DirKeySource, FileKeyWrap, HttpKeySource, HttpKeySourceConfig, KeySource, KeyWrap, Keyring,
-    OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
+    DirKeySource, FileKeyWrap, KeySource, KeyWrap, Keyring, OvhKmsAuth, OvhKmsConfig, OvhKmsWrap,
 };
 use seal_proto::MAX_BODY_CHUNK;
 use seal_proto::v1::seal_server::SealServer;
@@ -46,27 +45,9 @@ pub type KeyParts = (Arc<dyn KeySource>, Arc<dyn KeyWrap>);
 ///
 /// Returns a message naming what could not be loaded.
 pub fn key_parts(config: &Config) -> Result<KeyParts, String> {
-    let source: Arc<dyn KeySource> = match &config.keys.source {
-        SourceConfig::Dir(path) => {
-            Arc::new(DirKeySource::new(path, config.keys.max_keys_per_keyset))
-        }
-        SourceConfig::Http { url, ca, cert, key } => {
-            let read = |path: &PathBuf| {
-                std::fs::read_to_string(path).map_err(|_| format!("cannot read {}", path.display()))
-            };
-            Arc::new(
-                HttpKeySource::new(&HttpKeySourceConfig {
-                    url: url.clone(),
-                    ca_pem: read(ca)?,
-                    cert_pem: read(cert)?,
-                    key_pem: read(key)?,
-                    timeout: Duration::from_secs(10),
-                    max_keys: config.keys.max_keys_per_keyset,
-                })
-                .map_err(|error| error.to_string())?,
-            )
-        }
-    };
+    let SourceConfig::Dir(path) = &config.keys.source;
+    let source: Arc<dyn KeySource> =
+        Arc::new(DirKeySource::new(path, config.keys.max_keys_per_keyset));
     Ok((source, key_wrap(&config.keys.wrap)?))
 }
 

@@ -1,4 +1,4 @@
-//! The HTTPS client the key source and the KMS wrappers share: HTTP/1.1, one request
+//! The HTTPS client the KMS wrappers share: HTTP/1.1, one request
 //! per connection, no redirects, and a response no larger than the caller allows.
 
 use std::sync::Arc;
@@ -133,11 +133,6 @@ impl Https {
     /// The host, as the URL has it.
     pub(crate) fn host(&self) -> &str {
         &self.host
-    }
-
-    /// The port.
-    pub(crate) fn port(&self) -> u16 {
-        self.port
     }
 
     /// The URL's path, without a trailing slash.

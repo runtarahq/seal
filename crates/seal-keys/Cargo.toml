@@ -32,7 +32,6 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 metrics = "0.24"
-percent-encoding = "2"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # The keyring holds private keys, so this crate is on the opening side.
