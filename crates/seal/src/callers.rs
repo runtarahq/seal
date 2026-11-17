@@ -44,6 +44,9 @@ pub struct Caller {
     keysets: Vec<KeysetId>,
     /// Whether it may make and rotate keys.
     pub admin: bool,
+    /// The keysets its administrative calls are held to, if the configuration names
+    /// any: `None` for every keyset, and `Some` with whether `*` was among them.
+    admin_keysets: Option<(bool, Vec<KeysetId>)>,
     /// Whether it may destroy the keysets it may use.
     pub destroy_keysets: bool,
 }
@@ -53,6 +56,17 @@ impl Caller {
     #[must_use]
     pub fn may_use(&self, keyset: &KeysetId) -> bool {
         self.all_keysets || self.keysets.contains(keyset)
+    }
+
+    /// Whether it may make, rotate or list the keys of a keyset: an admin caller, for
+    /// every keyset unless its configuration names the ones it administers.
+    #[must_use]
+    pub fn may_administer(&self, keyset: &KeysetId) -> bool {
+        self.admin
+            && self
+                .admin_keysets
+                .as_ref()
+                .is_none_or(|(all, listed)| *all || listed.contains(keyset))
     }
 }
 
@@ -84,6 +98,15 @@ impl CallerMap {
                         .filter_map(|keyset| KeysetId::new(keyset.clone()).ok())
                         .collect(),
                     admin: config.admin,
+                    admin_keysets: config.admin_keysets.as_ref().map(|listed| {
+                        (
+                            listed.iter().any(|keyset| keyset == "*"),
+                            listed
+                                .iter()
+                                .filter_map(|keyset| KeysetId::new(keyset.clone()).ok())
+                                .collect(),
+                        )
+                    }),
                     destroy_keysets: config.destroy_keysets,
                 };
                 Some((identity, caller))
@@ -234,8 +257,41 @@ mod tests {
             cert_san: None,
             keysets: keysets.iter().map(|keyset| (*keyset).to_owned()).collect(),
             admin,
+            admin_keysets: None,
             destroy_keysets: false,
         }
+    }
+
+    #[test]
+    fn an_admin_caller_administers_every_keyset_unless_it_names_them() {
+        let keyset = |name: &str| KeysetId::new(name).unwrap();
+        let mut operator = config("operator", Some(0), None, &[], true);
+        let mut app = config("app", Some(1), None, &["acme"], false);
+        let map = CallerMap::new(&[operator.clone(), app.clone()]);
+        // Every keyset, though it may use none: a platform makes ones that are new.
+        assert!(
+            map.get(&Identity::Uid(0))
+                .unwrap()
+                .may_administer(&keyset("new-tenant"))
+        );
+        assert!(
+            !map.get(&Identity::Uid(1))
+                .unwrap()
+                .may_administer(&keyset("acme"))
+        );
+
+        operator.admin_keysets = Some(vec!["acme".to_owned()]);
+        app.admin = true;
+        app.admin_keysets = Some(vec!["*".to_owned()]);
+        let map = CallerMap::new(&[operator, app]);
+        let operator = map.get(&Identity::Uid(0)).unwrap();
+        assert!(operator.may_administer(&keyset("acme")));
+        assert!(!operator.may_administer(&keyset("other")));
+        assert!(
+            map.get(&Identity::Uid(1))
+                .unwrap()
+                .may_administer(&keyset("other"))
+        );
     }
 
     #[test]

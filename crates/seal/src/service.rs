@@ -144,19 +144,22 @@ impl Service {
         if !self.per_caller.allow(&caller.name) {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
-        if caller.admin {
+        let keyset = KeysetId::new(request.get_ref().keyset.clone()).ok();
+        // A name that is no keyset's is refused as malformed by the call itself.
+        let allowed = keyset
+            .as_ref()
+            .map_or(caller.admin, |keyset| caller.may_administer(keyset));
+        if allowed {
             return Ok(caller);
         }
         // Only a keyset that is an identifier goes in the record.
-        let keyset = KeysetId::new(request.get_ref().keyset.clone())
-            .map(|keyset| keyset.to_string())
-            .unwrap_or_default();
-        Err(self.denied(
-            op,
-            &caller,
-            &keyset,
-            "administrative calls need an admin caller",
-        ))
+        let keyset = keyset.map(|keyset| keyset.to_string()).unwrap_or_default();
+        let reason = if caller.admin {
+            "this caller does not administer this keyset"
+        } else {
+            "administrative calls need an admin caller"
+        };
+        Err(self.denied(op, &caller, &keyset, reason))
     }
 
     /// Refuses a caller something it is not allowed, and leaves an audit record: what

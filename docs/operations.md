@@ -71,6 +71,7 @@ configuration file that its group or others can write.
 | `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
 | `admin` | Whether it may generate keysets, rotate and list public keys. Default `false`. It holds for every keyset, whatever `keysets` lists: `keysets` says which a caller may use, and a platform that makes a keyset for each new tenant could not list one that does not exist yet. So an admin caller can add keys to any keyset, within its rate, though it reads no private key and can destroy nothing |
+| `admin_keysets` | The keysets an admin caller may generate, rotate and list the keys of, where that should not be every one: the names, or `*`. Absent means every keyset. Only for a caller with `admin` |
 | `destroy_keysets` | Whether it may [destroy](#destroying-a-keyset) the keysets it may use, which cannot be undone. Separate from `admin`. Default `false` |
 
 A `cert_subject` is the certificate's whole subject, attribute by attribute and in the
