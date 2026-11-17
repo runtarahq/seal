@@ -1397,3 +1397,77 @@ fn another_value_may_inject_what_the_caller_could_set() {
     let policies = fields(&[("other", s3_header("x-amz-acl"))]);
     assert_eq!(code(request.decide(&policies)), None);
 }
+
+// A client certificate that says how the provider is verified.
+
+fn cert_rule(extra: &Value) -> Policy {
+    let mut inject = json!({ "cert": { "field": "cert" } });
+    for (name, value) in extra.as_object().unwrap() {
+        inject[name] = value.clone();
+    }
+    policy(&json!({ "rules": [{
+        "destination": { "scheme": "https", "host": "api.example.com" },
+        "inject": { "client_cert": inject },
+        "plain": ["cert"],
+    }] }))
+}
+
+const A_CA: &str = "-----BEGIN CERTIFICATE-----\nexample\n-----END CERTIFICATE-----";
+
+#[test]
+fn a_certificate_that_names_a_ca_or_server_name_cannot_ride_with_another_value() {
+    let mut request = Request::to(API);
+    request.plain = BTreeSet::from([field("cert")]);
+    for extra in [
+        json!({ "ca": A_CA }),
+        json!({ "server_name": "attacker.example" }),
+        json!({ "ca": A_CA, "server_name": "attacker.example" }),
+    ] {
+        let policies = fields(&[("token", bearer()), ("client_key", cert_rule(&extra))]);
+        assert_eq!(
+            refusal(request.decide(&policies)),
+            ErrorCode::PolicyDenied,
+            "{extra}"
+        );
+        // Alone, it is the rule's own choice.
+        let policies = fields(&[("client_key", cert_rule(&extra))]);
+        assert!(request.decide(&policies).is_ok(), "{extra}");
+    }
+    // One that leaves verification alone goes with a token as before.
+    let policies = fields(&[("token", bearer()), ("client_key", cert_rule(&json!({})))]);
+    assert!(request.decide(&policies).is_ok());
+}
+
+#[test]
+fn a_postgres_certificate_cannot_change_how_a_passwords_server_is_verified() {
+    let plain = BTreeSet::from([field("cert")]);
+    for extra in [
+        json!({ "ca": A_CA }),
+        json!({ "server_name": "attacker.example" }),
+    ] {
+        let mut inject = json!({ "cert": { "field": "cert" } });
+        for (name, value) in extra.as_object().unwrap() {
+            inject[name] = value.clone();
+        }
+        let cert = json!({ "client_cert": inject });
+        let policies = fields(&[
+            ("password", pg_policy(&["app"], "app_user", password(), &[])),
+            (
+                "client_key",
+                pg_policy(&["app"], "app_user", cert.clone(), &["cert"]),
+            ),
+        ]);
+        assert_eq!(
+            decide(&policies, &pg_head(5432, &plain))
+                .unwrap_err()
+                .code(),
+            ErrorCode::PolicyDenied,
+            "{extra}"
+        );
+        let policies = fields(&[(
+            "client_key",
+            pg_policy(&["app"], "app_user", cert, &["cert"]),
+        )]);
+        assert!(decide(&policies, &pg_head(5432, &plain)).is_ok(), "{extra}");
+    }
+}

@@ -212,8 +212,9 @@ only the objects on the way to the pointer are written again, compactly and in k
 ### `client_cert`
 
 The secret is the private key. Needs `https`, or a Postgres destination. `ca` and
-`server_name` verify the provider; [`signing.md`](signing.md#client-certificates) has how
-connections are pooled.
+`server_name` verify the provider, and a rule that sets either is used alone, not beside
+another value; [`signing.md`](signing.md#client-certificates) has how connections are
+pooled.
 
 ```json
 { "rules": [{

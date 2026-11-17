@@ -416,6 +416,7 @@ fn check_placements(
     primaries: &[(&FieldName, usize, &Rule)],
     head: &RequestHead<'_>,
 ) -> Result<(), BrokerError> {
+    a_certificate_that_changes_verification_is_alone(primaries)?;
     let mut seen = BTreeSet::new();
     for (field, _, rule) in primaries {
         refuse_amz_headers(field, rule, head)?;
@@ -538,6 +539,32 @@ fn refuse_injected_amz_headers(
             return Err(BrokerError::for_field(
                 ErrorCode::Conflict,
                 "this field injects an X-Amz header the signing rule does not allow",
+                field,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A client certificate's rule may name a CA and a server name to verify the provider
+/// with, and they would hold for the whole connection: for every other value sent over
+/// it too. Anyone can seal such a rule, so one that sets either is used alone, with its
+/// own parts.
+fn a_certificate_that_changes_verification_is_alone(
+    primaries: &[(&FieldName, usize, &Rule)],
+) -> Result<(), BrokerError> {
+    if primaries.len() < 2 {
+        return Ok(());
+    }
+    for (field, _, rule) in primaries {
+        if let Inject::ClientCert {
+            ca, server_name, ..
+        } = &rule.inject
+            && (ca.is_some() || server_name.is_some())
+        {
+            return Err(BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "a client certificate that names a CA or a server name is used alone",
                 field,
             ));
         }

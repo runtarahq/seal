@@ -168,6 +168,11 @@ ECDSA or Ed25519 key. The certificate and any chain may be plain. A rule can nam
 verify the provider with, added to the usual roots for that destination only, and a
 server name to verify instead of the URL's host.
 
+Both hold for the whole connection, so a rule that sets either is used alone, with its
+own certificate and chain: seal refuses it beside any other value, such as a token.
+Anyone can seal a client certificate's rule, and it must not decide how another value's
+provider is verified.
+
 A key that does not match its certificate is refused before seal connects.
 
 ### Pools
