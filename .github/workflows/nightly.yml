@@ -43,6 +43,9 @@ jobs:
     # Secrets are never given to forks, and this never runs for one.
     if: github.repository == 'runtarahq/seal'
     runs-on: ubuntu-latest
+    # The real KMS and bucket credentials belong to this environment, which only the
+    # main branch may use: a workflow on another branch cannot read them.
+    environment: real-providers
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
