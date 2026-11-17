@@ -253,6 +253,21 @@ impl ReloadingTls {
     }
 }
 
+/// The service's own TLS key lets whoever has it pass as seal to a caller, and be handed
+/// sealed values and requests. It is often mounted by something else, readable by a
+/// group, so this warns and does not refuse.
+fn warn_if_others_can_read(key: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let others =
+            std::fs::metadata(key).is_ok_and(|file| file.permissions().mode() & 0o077 != 0);
+        if others {
+            tracing::warn!("the service's TLS key can be read by its group or by others");
+        }
+    }
+}
+
 fn read_all(files: &[PathBuf; 3]) -> io::Result<Vec<u8>> {
     let mut all = Vec::new();
     for file in files {
@@ -268,6 +283,7 @@ fn build_tls(files: &[PathBuf; 3]) -> Result<(rustls::ServerConfig, Vec<u8>), St
     let chain = CertificateDer::pem_file_iter(cert)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(|_| format!("{} is not a PEM certificate chain", cert.display()))?;
+    warn_if_others_can_read(key);
     let key = PrivateKeyDer::from_pem_file(key)
         .map_err(|_| format!("{} is not a PEM private key", key.display()))?;
     let mut roots = rustls::RootCertStore::empty();

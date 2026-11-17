@@ -21,14 +21,8 @@ pub fn harden(lock_memory: LockMemory) -> Result<Hardened, String> {
         if nix::unistd::geteuid().is_root() {
             return Err("seal refuses to run as root".to_owned());
         }
-        nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
-            .map_err(|_| "could not turn off core dumps".to_owned())?;
     }
-    #[cfg(target_os = "linux")]
-    {
-        nix::sys::prctl::set_dumpable(false)
-            .map_err(|_| "could not mark the process undumpable".to_owned())?;
-    }
+    no_core_dumps()?;
     let memory_locked = match lock_memory {
         LockMemory::Off => false,
         LockMemory::BestEffort | LockMemory::Required => {
@@ -45,6 +39,27 @@ pub fn harden(lock_memory: LockMemory) -> Result<Hardened, String> {
         }
     };
     Ok(Hardened { memory_locked })
+}
+
+/// Turns off core dumps, and on Linux marks the process undumpable, so that another
+/// process of the same user cannot read its memory either. For every command that
+/// holds a key or an opened secret, not only the service.
+///
+/// # Errors
+///
+/// Returns a message if either cannot be done.
+pub fn no_core_dumps() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
+            .map_err(|_| "could not turn off core dumps".to_owned())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        nix::sys::prctl::set_dumpable(false)
+            .map_err(|_| "could not mark the process undumpable".to_owned())?;
+    }
+    Ok(())
 }
 
 fn lock_all() -> bool {
