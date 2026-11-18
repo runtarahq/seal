@@ -1,9 +1,11 @@
 # What vectors/verify.py needs, for CI: `pip install --require-hashes -r` this file.
-# The hashes are of the wheels for CPython 3.12 on x86-64 Linux, which is what the
-# runner has. Another Python needs the hash of its own cffi wheel added.
+# The hashes are of the wheels for x86-64 Linux, which is what the runner has. cffi has
+# one wheel for each CPython, and the runner's changes: 3.12, 3.13 and 3.14 are here.
 cryptography==50.0.2 \
     --hash=sha256:9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079
 cffi==2.1.1 \
-    --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+    --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf \
+    --hash=sha256:a931079504ecc49efed7744c476a5c343a92fabf66dec2db95edb1b2fdc770e2 \
+    --hash=sha256:b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96
 pycparser==3.12 \
     --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
