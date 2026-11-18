@@ -209,6 +209,10 @@ pub struct CallerConfig {
     pub cert_san: Option<String>,
     /// The keysets it may use. `*` means all.
     pub keysets: Vec<String>,
+    /// What it may do with the values of those keysets. Absent means all of it; an
+    /// application that only checks webhooks lists `verify` alone.
+    #[serde(default)]
+    pub operations: Option<Vec<Operation>>,
     /// Whether it may make and rotate keys.
     #[serde(default)]
     pub admin: bool,
@@ -221,6 +225,33 @@ pub struct CallerConfig {
     /// from `admin`, so that a caller that makes keysets cannot also end them.
     #[serde(default)]
     pub destroy_keysets: bool,
+}
+
+/// Something a caller does with a sealed value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    /// Send an HTTP request with it.
+    Send,
+    /// Open a database session with it.
+    Connect,
+    /// Check a message's signature with it.
+    Verify,
+    /// Sign a URL with it.
+    Presign,
+}
+
+impl Operation {
+    /// The name in the configuration and in audit records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::Connect => "connect",
+            Self::Verify => "verify",
+            Self::Presign => "presign",
+        }
+    }
 }
 
 /// Where wrapped keys come from and what unwraps them.
@@ -988,6 +1019,38 @@ mod tests {
             }
         }
         assert!(Config::parse(&format!("{MINIMAL}\n[surprise]\na = 1")).is_err());
+    }
+
+    #[test]
+    fn a_caller_may_list_its_operations() {
+        let config = Config::parse(MINIMAL).unwrap();
+        assert_eq!(config.callers[0].operations, None);
+        let listed = |operations: &str| {
+            Config::parse(&MINIMAL.replace(
+                "keysets = [\"*\"]",
+                &format!("keysets = [\"*\"]\noperations = {operations}"),
+            ))
+        };
+        assert_eq!(
+            listed("[\"verify\"]").unwrap().callers[0].operations,
+            Some(vec![Operation::Verify])
+        );
+        assert_eq!(
+            listed("[\"send\", \"connect\", \"presign\"]")
+                .unwrap()
+                .callers[0]
+                .operations,
+            Some(vec![
+                Operation::Send,
+                Operation::Connect,
+                Operation::Presign
+            ])
+        );
+        assert_eq!(listed("[]").unwrap().callers[0].operations, Some(vec![]));
+        // A name that is no operation's is an error, not an operation nobody may do.
+        assert!(listed("[\"verfy\"]").is_err());
+        assert!(listed("[\"generate\"]").is_err());
+        assert!(listed("\"verify\"").is_err());
     }
 
     #[test]

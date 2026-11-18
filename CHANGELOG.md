@@ -5,6 +5,16 @@ All notable changes to seal are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Security fixes are also announced as
 GitHub Security Advisories.
 
+## [Unreleased]
+
+### Added
+
+- A caller may list the `operations` it is allowed, any of `send`, `connect`, `verify`
+  and `presign`, so that an application that only checks webhooks cannot send a request
+  with a value it is handed. Absent means all four, as before. A call that is not listed
+  is refused with `CALLER_DENIED` and recorded. See
+  [`docs/operations.md`](docs/operations.md#callers).
+
 ## [0.1.0]
 
 The first release.

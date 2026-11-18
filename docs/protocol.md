@@ -53,7 +53,7 @@ the same code.
 
 | Code | Meaning | Retry? |
 |---|---|---|
-| `CALLER_DENIED` | The caller may not use this keyset, make an admin call, or destroy this keyset | No |
+| `CALLER_DENIED` | The caller may not use this keyset, make this call, make an admin call, or destroy this keyset | No |
 | `BAD_REQUEST` | The request is malformed | No |
 | `OPEN_FAILED` | A sealed value did not open: wrong item, field or key | No |
 | `KEYSET_UNKNOWN` | The keyset has no keys | No |

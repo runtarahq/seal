@@ -30,7 +30,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::callers::{Caller, CallerMap, Identity};
-use crate::config::Rate;
+use crate::config::{Operation, Rate};
 use crate::limits::RateLimiter;
 
 /// What the service reports in `Info`.
@@ -116,6 +116,25 @@ impl Service {
             .and_then(|identity| self.callers.get(identity))
             .cloned()
             .ok_or_else(|| refusal(ErrorCode::CallerDenied, "the caller is not known"))
+    }
+
+    /// Refuses a caller an operation its configuration does not list, whatever the
+    /// keyset, with an audit record.
+    fn allowed(
+        &self,
+        operation: Operation,
+        caller: &Caller,
+        keyset: &KeysetId,
+    ) -> Result<(), Status> {
+        if caller.may(operation) {
+            return Ok(());
+        }
+        Err(self.denied(
+            operation.as_str(),
+            caller,
+            keyset.as_str(),
+            "the caller may not make this call",
+        ))
     }
 
     /// A value counts against the rate of the keyset it was sealed to, as well as the
@@ -699,6 +718,7 @@ impl Seal for Service {
             url,
             headers,
         } = parse_send_head(head)?;
+        self.allowed(Operation::Send, &caller, &keyset)?;
         if !caller.may_use(&keyset) {
             return Err(self.denied(
                 "send",
@@ -768,6 +788,7 @@ impl Seal for Service {
             _ => return Err(bad("the first message must be the head")),
         };
         let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
+        self.allowed(Operation::Connect, &caller, &keyset)?;
         if !caller.may_use(&keyset) {
             return Err(self.denied(
                 "connect",
@@ -833,6 +854,7 @@ impl Seal for Service {
             _ => return Err(bad("the first message must be the head")),
         };
         let keyset = KeysetId::new(head.keyset).map_err(|_| bad("the keyset is not valid"))?;
+        self.allowed(Operation::Verify, &caller, &keyset)?;
         if !caller.may_use(&keyset) {
             return Err(self.denied(
                 "verify",
@@ -888,6 +910,7 @@ impl Seal for Service {
         }
         let request = request.into_inner();
         let keyset = KeysetId::new(request.keyset).map_err(|_| bad("the keyset is not valid"))?;
+        self.allowed(Operation::Presign, &caller, &keyset)?;
         if !caller.may_use(&keyset) {
             return Err(self.denied(
                 "presign",

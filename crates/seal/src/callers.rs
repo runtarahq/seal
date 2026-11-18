@@ -8,7 +8,7 @@ use x509_parser::extensions::GeneralName;
 use x509_parser::objects::{oid_registry, oid2abbrev};
 use x509_parser::x509::X509Name;
 
-use crate::config::CallerConfig;
+use crate::config::{CallerConfig, Operation};
 
 /// How a connection's caller was identified.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,6 +42,8 @@ pub struct Caller {
     pub name: String,
     all_keysets: bool,
     keysets: Vec<KeysetId>,
+    /// What it may do with a value, if the configuration says: `None` for everything.
+    operations: Option<Vec<Operation>>,
     /// Whether it may make and rotate keys.
     pub admin: bool,
     /// The keysets its administrative calls are held to, if the configuration names
@@ -56,6 +58,14 @@ impl Caller {
     #[must_use]
     pub fn may_use(&self, keyset: &KeysetId) -> bool {
         self.all_keysets || self.keysets.contains(keyset)
+    }
+
+    /// Whether it may do this with the values of the keysets it may use.
+    #[must_use]
+    pub fn may(&self, operation: Operation) -> bool {
+        self.operations
+            .as_ref()
+            .is_none_or(|listed| listed.contains(&operation))
     }
 
     /// Whether it may make, rotate or list the keys of a keyset: an admin caller, for
@@ -97,6 +107,7 @@ impl CallerMap {
                         .iter()
                         .filter_map(|keyset| KeysetId::new(keyset.clone()).ok())
                         .collect(),
+                    operations: config.operations.clone(),
                     admin: config.admin,
                     admin_keysets: config.admin_keysets.as_ref().map(|listed| {
                         (
@@ -256,6 +267,7 @@ mod tests {
             cert_subject: subject.map(str::to_owned),
             cert_san: None,
             keysets: keysets.iter().map(|keyset| (*keyset).to_owned()).collect(),
+            operations: None,
             admin,
             admin_keysets: None,
             destroy_keysets: false,
@@ -292,6 +304,34 @@ mod tests {
                 .unwrap()
                 .may_administer(&keyset("other"))
         );
+    }
+
+    #[test]
+    fn a_caller_may_do_everything_unless_it_names_its_operations() {
+        let app = config("app", Some(1), None, &["acme"], false);
+        let mut intake = config("intake", Some(2), None, &["acme"], false);
+        intake.operations = Some(vec![Operation::Verify]);
+        let mut ops = config("ops", Some(3), None, &[], true);
+        ops.operations = Some(Vec::new());
+        let map = CallerMap::new(&[app, intake, ops]);
+        let all = [
+            Operation::Send,
+            Operation::Connect,
+            Operation::Verify,
+            Operation::Presign,
+        ];
+        let app = map.get(&Identity::Uid(1)).unwrap();
+        assert!(all.iter().all(|operation| app.may(*operation)));
+        let intake = map.get(&Identity::Uid(2)).unwrap();
+        assert_eq!(
+            all.map(|operation| intake.may(operation)),
+            [false, false, true, false]
+        );
+        // The keyset is still its own question.
+        assert!(intake.may_use(&KeysetId::new("acme").unwrap()));
+        let ops = map.get(&Identity::Uid(3)).unwrap();
+        assert!(all.iter().all(|operation| !ops.may(*operation)));
+        assert!(ops.admin);
     }
 
     #[test]

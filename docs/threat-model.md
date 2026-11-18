@@ -31,7 +31,7 @@ working afterwards.
 | Actor | Can | Should not be able to |
 |---|---|---|
 | Application, working normally | Seal values, and ask seal to use them | Read a secret |
-| Compromised application | Use any value it can present, for any request a value's policy allows | Read a secret, change a policy, reach a destination no policy allows, or hide its use |
+| Compromised application | Use any value it can present, for any request a value's policy allows, by the operations its caller is allowed | Read a secret, change a policy, reach a destination no policy allows, or hide its use |
 | Administrative caller | Generate and rotate keys | Read a private key, which never leaves seal unwrapped. Destroy a keyset, which needs `destroy_keysets` |
 | Caller that may destroy keysets | Make every value of the keysets it may use unreadable, for good | Read a value, or touch a keyset it may not use |
 | Provider | Receive the credentials sealed for it | Receive another destination's credentials |

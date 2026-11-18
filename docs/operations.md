@@ -80,6 +80,7 @@ configuration file that its group or others can write.
 | `name` | The name in audit records |
 | `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
+| `operations` | What it may do with the values of those keysets: any of `send`, `connect`, `verify` and `presign`. Absent means all four. An application that only checks webhooks has `["verify"]`, so that taking it over gives no way to send a request with a value it is handed. `[]` is for a caller that only administers |
 | `admin` | Whether it may generate keysets, rotate and list public keys. Default `false`. It holds for every keyset, whatever `keysets` lists: `keysets` says which a caller may use, and a platform that makes a keyset for each new tenant could not list one that does not exist yet. So an admin caller can add keys to any keyset, within its rate, though it reads no private key and can destroy nothing |
 | `admin_keysets` | The keysets an admin caller may generate, rotate and list the keys of, where that should not be every one: the names, or `*`. Absent means every keyset. Only for a caller with `admin` |
 | `destroy_keysets` | Whether it may [destroy](#destroying-a-keyset) the keysets it may use, which cannot be undone. Separate from `admin`. Default `false` |
@@ -550,9 +551,9 @@ first 64 are kept, so that they leave room for those. `seal_audit_failures_total
 each failed write, and `seal_audit_dropped_total` each record that was not kept: alert on
 both.
 
-A caller refused a keyset, a value's keyset or an administrative call leaves a record
-too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an
-application trying what it was not given. Two refusals leave none: a request over a
+A caller refused a keyset, a value's keyset, an operation or an administrative call
+leaves a record too, with the operation, the keyset and `CALLER_DENIED`: a run of them
+is an application trying what it was not given. Two refusals leave none: a request over a
 rate or concurrency limit, which bounds how many records a caller can cause, and a
 request too malformed to name a keyset.
 

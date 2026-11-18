@@ -242,6 +242,85 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
     );
 }
 
+/// A caller that lists its operations is held to them in the keysets it may use: one
+/// that only checks webhooks can send nothing with what it is handed.
+#[tokio::test]
+async fn a_caller_is_limited_to_the_operations_it_lists() {
+    let provider = MockProvider::plain().await;
+    let uid = nix::unistd::getuid().as_raw();
+    let callers = format!(
+        "[[callers]]\nname = \"intake\"\nunix_uid = {uid}\nkeysets = [\"acme\"]\noperations = [\"verify\"]\n"
+    );
+    let options = Options {
+        callers: Some(callers),
+        ..Options::default()
+    };
+    let instance = start(Mode::Unix, options, &[&provider]).await;
+    let token = instance
+        .setup
+        .seal("token", b"SEALCANARY-token", &token_policy(&provider))
+        .await;
+    let error = instance
+        .client
+        .send(get(&url(&provider, "/quiet"), &[("token", &token)]))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
+    assert!(provider.received().is_empty());
+    let connect = seal_client::ConnectRequest {
+        keyset: keyset(),
+        item: item(),
+        sealed: std::collections::BTreeMap::from([(field("token"), token.clone().into())]),
+        plain: std::collections::BTreeMap::new(),
+        host: "db.example.org".to_owned(),
+        port: 5432,
+    };
+    let error = instance.client.connect_pg(connect).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
+    let presign = seal_client::PresignRequest {
+        keyset: keyset(),
+        item: item(),
+        sealed: std::collections::BTreeMap::from([(field("token"), token.into())]),
+        plain: std::collections::BTreeMap::new(),
+        method: http::Method::GET,
+        url: url(&provider, "/object"),
+        expires_s: 60,
+    };
+    let error = instance.client.presign(presign).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
+
+    // The call it lists is answered: a signature that is wrong is `false`, not refused.
+    let webhook =
+        seal_format::policy::builder::webhook_hmac(seal_format::policy::HmacHash::Sha256).unwrap();
+    let verify = seal_client::VerifyRequest {
+        keyset: keyset(),
+        item: item(),
+        field: field("secret"),
+        value: instance
+            .setup
+            .seal("secret", b"SEALCANARY-signing", &webhook)
+            .await
+            .into(),
+        message: bytes::Bytes::from_static(b"message"),
+        mac: vec![0; 32],
+    };
+    assert!(!instance.client.verify(verify).await.unwrap());
+
+    let records = instance.setup.audit_records();
+    let refused: Vec<&str> = records
+        .iter()
+        .filter(|record| record["outcome"] == "refused")
+        .map(|record| {
+            assert_eq!(record["code"], "CALLER_DENIED");
+            assert_eq!(record["caller"], "intake");
+            assert_eq!(record["keyset"], "acme");
+            record["op"].as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(refused, ["send", "connect", "presign"]);
+}
+
 /// Making keysets and ending them are separate permissions: an admin caller cannot
 /// destroy one, and a caller that can is held to the keysets it may use.
 #[tokio::test]
