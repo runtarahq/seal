@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -13,11 +13,11 @@ repository = "https://github.com/runtarahq/seal"
 publish = false
 
 [workspace.dependencies]
-seal-broker = { path = "crates/seal-broker", version = "0.1.0" }
-seal-client = { path = "crates/seal-client", version = "0.1.0" }
-seal-format = { path = "crates/seal-format", version = "0.1.0" }
-seal-keys = { path = "crates/seal-keys", version = "0.1.0" }
-seal-proto = { path = "crates/seal-proto", version = "0.1.0" }
+seal-broker = { path = "crates/seal-broker", version = "0.2.0" }
+seal-client = { path = "crates/seal-client", version = "0.2.0" }
+seal-format = { path = "crates/seal-format", version = "0.2.0" }
+seal-keys = { path = "crates/seal-keys", version = "0.2.0" }
+seal-proto = { path = "crates/seal-proto", version = "0.2.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
