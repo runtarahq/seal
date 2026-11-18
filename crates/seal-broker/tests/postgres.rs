@@ -51,7 +51,7 @@ fn connect_request(server: &MockPostgres, password: &Envelope) -> ConnectRequest
 
 fn harness() -> Harness {
     let mut options = Options::default();
-    options.network.honour_private_rules = true;
+    options.network.private_rule_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
     Harness::with(options)
 }
 
@@ -113,8 +113,22 @@ async fn a_session_logs_in_and_relays() {
     let mut echo = [0; 12];
     caller.read_exact(&mut echo).await.unwrap();
     assert_eq!(&echo, b"hello server");
+    // A session may last hours, and seal may be killed before it ends: that it began
+    // is on record before the caller could use it.
+    let started = harness.audit.all();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].outcome, seal_broker::audit::Outcome::Started);
+    assert_eq!(
+        (
+            started[0].op,
+            started[0].pg_auth,
+            started[0].path.as_deref()
+        ),
+        ("connect", Some("scram-sha-256"), Some("elsewhere"))
+    );
     drop(caller);
     task.await.unwrap().unwrap();
+    assert_eq!(harness.audit.all().len(), 2);
 
     assert_eq!(server.startup_param(0, "user").as_deref(), Some("app_user"));
     assert_eq!(
@@ -135,6 +149,30 @@ async fn a_session_logs_in_and_relays() {
         ("connect", Some("scram-sha-256"), Some("elsewhere"))
     );
     assert_eq!(record.bytes_in, 12);
+    assert_eq!(record.outcome, seal_broker::audit::Outcome::Ok);
+}
+
+#[tokio::test]
+async fn a_session_whose_start_cannot_be_recorded_is_not_handed_to_the_caller() {
+    let server = MockPostgres::start_scram(HOST, b"pw").await;
+    let harness = harness();
+    let password = harness.seal("password", b"pw", &password_policy(&server));
+    let first = startup(&[("user", "app_user")]);
+    let session = harness
+        .broker
+        .open_session(connect_request(&server, &password))
+        .await
+        .unwrap();
+    *harness.audit.fail.lock().unwrap() = true;
+    let (mut caller, seal_end) = tokio::io::duplex(1 << 16);
+    caller.write_all(&first).await.unwrap();
+    let error = session.run(seal_end).await.unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Internal);
+    // The caller hears an error, never that it is logged in.
+    assert_eq!(read_message(&mut caller).await.tag, b'E');
+    let mut rest = Vec::new();
+    caller.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
 }
 
 #[tokio::test]
@@ -291,7 +329,7 @@ async fn a_server_that_asks_for_no_password_is_not_logged_in_to() {
 async fn a_server_that_goes_quiet_during_the_login_is_given_up_on() {
     let server = MockPostgres::start_silent(HOST).await;
     let mut options = Options::default();
-    options.network.honour_private_rules = true;
+    options.network.private_rule_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
     options.limits.connect_timeout = std::time::Duration::from_millis(300);
     let harness = Harness::with(options);
     let password = harness.seal("password", b"pw", &password_policy(&server));
@@ -420,7 +458,7 @@ fn tls_policy(server: &MockPostgres, tls: &str) -> Policy {
 
 fn allowing_plaintext() -> Harness {
     let mut options = Options::default();
-    options.network.honour_private_rules = true;
+    options.network.private_rule_cidrs = vec!["127.0.0.0/8".parse().unwrap()];
     options.network.honour_plaintext_postgres_rules = true;
     Harness::with(options)
 }

@@ -3,12 +3,16 @@
 #
 #   docker build -f deploy/container/Dockerfile -t seal .
 #   docker run --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+#     --stop-timeout=45 \
 #     --memory=2g --ulimit memlock=2147483648 \
 #     -v /etc/seal:/etc/seal:ro -v seal-keys:/var/lib/seal/keys -p 7443:7443 seal
 
 # Alpine's own target is musl, so the binary links statically with no cross-compiler.
 # The C compiler is for `ring`, the one dependency that is not Rust.
-FROM rust:1.99.1-alpine AS build
+# Named by digest, so that the compiler that builds seal is the one this file was
+# written against: a tag can be pushed again. The digest is of the index for every
+# architecture, from `docker buildx imagetools inspect rust:1.99.1-alpine`.
+FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
 COPY . .

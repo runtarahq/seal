@@ -408,9 +408,10 @@ pub struct NetworkConfig {
     /// Allowed whatever their class.
     #[serde(default)]
     pub allow_private_cidrs: Vec<String>,
-    /// Whether a rule's `allow_private_destination` has any effect.
+    /// The internal ranges a rule's `allow_private_destination` may reach. Empty, the
+    /// option has no effect.
     #[serde(default)]
-    pub honour_private_rules: bool,
+    pub private_rule_cidrs: Vec<String>,
     /// Whether a Postgres rule whose `tls` is `plaintext` may connect with no TLS.
     #[serde(default)]
     pub honour_plaintext_postgres_rules: bool,
@@ -472,6 +473,9 @@ pub struct LimitsConfig {
     pub max_stream_duration: Option<Interval>,
     /// The longest Postgres session.
     pub pg_max_session: Interval,
+    /// How long requests under way may take to finish once seal is told to stop.
+    /// Those still running then are ended, so that their audit records are written.
+    pub shutdown_grace: Interval,
     /// Requests per caller.
     pub rate_per_caller: Rate,
     /// Requests per keyset.
@@ -495,6 +499,7 @@ impl Default for LimitsConfig {
             buffered_total_timeout: Interval(Duration::from_secs(60)),
             max_stream_duration: None,
             pg_max_session: Interval(Duration::from_secs(8 * 3600)),
+            shutdown_grace: Interval(Duration::from_secs(30)),
             rate_per_caller: Rate {
                 count: 1000,
                 per: Duration::from_secs(1),
@@ -734,6 +739,7 @@ impl Config {
             .deny_cidrs
             .iter()
             .chain(&self.network.allow_private_cidrs)
+            .chain(&self.network.private_rule_cidrs)
         {
             cidr.parse::<seal_broker::address::Cidr>()
                 .map_err(|_| invalid(format!("address range {cidr:?} is not valid")))?;
@@ -824,7 +830,7 @@ mod tests {
         assert_eq!(config.keys.max_stale, Interval(Duration::from_secs(300)));
         assert_eq!(config.keys.lock_memory, LockMemory::BestEffort);
         assert_eq!(config.audit.on_failure, AuditFailure::FailClosed);
-        assert!(!config.network.honour_private_rules);
+        assert!(config.network.private_rule_cidrs.is_empty());
         assert!(!config.network.honour_plaintext_postgres_rules);
         assert!(config.limits.max_stream_duration.is_none());
     }
@@ -1127,6 +1133,13 @@ mod tests {
     #[test]
     fn address_ranges_are_checked() {
         let text = format!("{MINIMAL}\n[network]\ndeny_cidrs = [\"10.0.0.0/33\"]");
+        assert!(Config::parse(&text).is_err());
+        let text = format!("{MINIMAL}\n[network]\nprivate_rule_cidrs = [\"10.0.0.0/33\"]");
+        assert!(Config::parse(&text).is_err());
+        let text = format!("{MINIMAL}\n[network]\nprivate_rule_cidrs = [\"10.20.0.0/16\"]");
+        assert!(Config::parse(&text).is_ok());
+        // The switch that opened every internal range at once is gone.
+        let text = format!("{MINIMAL}\n[network]\nhonour_private_rules = true");
         assert!(Config::parse(&text).is_err());
     }
 }

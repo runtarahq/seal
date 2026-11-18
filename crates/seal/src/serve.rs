@@ -196,7 +196,7 @@ pub fn broker_config(config: &Config) -> Result<BrokerConfig, String> {
         network: NetworkPolicy {
             deny_cidrs: parse(&config.network.deny_cidrs)?,
             allow_private_cidrs: parse(&config.network.allow_private_cidrs)?,
-            honour_private_rules: config.network.honour_private_rules,
+            private_rule_cidrs: parse(&config.network.private_rule_cidrs)?,
             honour_plaintext_postgres_rules: config.network.honour_plaintext_postgres_rules,
         },
         client: ClientConfig {
@@ -311,18 +311,40 @@ pub async fn run(
         tracing::info!(address = %local, "serving metrics and health");
     }
 
+    // Once told to stop, seal takes no more requests and lets those under way finish,
+    // but not for ever: a Postgres session may last hours, and a supervisor that
+    // tires of waiting kills the process, which writes no audit record for anything
+    // still running. Returning ends them instead, and each writes its record.
+    let (stopping, mut stopped) = tokio::sync::watch::channel(false);
+    let shutdown = async move {
+        shutdown.await;
+        let _ = stopping.send(true);
+    };
+    let grace = limits.shutdown_grace.0;
+    let out_of_grace = async move {
+        while !*stopped.borrow_and_update() {
+            if stopped.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
+        tokio::time::sleep(grace).await;
+        tracing::warn!("ending the requests still under way");
+    };
+
     match (&config.listen.unix, config.listen.tcp, &config.listen.tls) {
         (Some(path), _, _) => {
             let incoming = listen::unix(path, callers, limits.max_caller_connections)
                 .map_err(|error| format!("cannot listen on {}: {error}", path.display()))?;
             listening(&Listening::Unix(path.clone()));
             tracing::info!(mode, "seal is listening");
-            builder
+            let serving = builder
                 .clone()
                 .add_service(server)
-                .serve_with_incoming_shutdown(incoming, shutdown)
-                .await
-                .map_err(|_| "the server failed".to_owned())
+                .serve_with_incoming_shutdown(incoming, shutdown);
+            tokio::select! {
+                served = serving => served.map_err(|_| "the server failed".to_owned()),
+                () = out_of_grace => Ok(()),
+            }
         }
         (None, Some(address), Some(files)) => {
             let tls = listen::ReloadingTls::load(&files.cert, &files.key, &files.client_ca)?;
@@ -340,13 +362,15 @@ pub async fn run(
             tracing::info!(mode, "seal is listening");
             // A certificate is checked when a connection opens. Ending connections at
             // an age makes a caller show one again; requests under way finish first.
-            builder
+            let serving = builder
                 .clone()
                 .max_connection_age(config.listen.max_connection_age.0)
                 .add_service(server)
-                .serve_with_incoming_shutdown(incoming, shutdown)
-                .await
-                .map_err(|_| "the server failed".to_owned())
+                .serve_with_incoming_shutdown(incoming, shutdown);
+            tokio::select! {
+                served = serving => served.map_err(|_| "the server failed".to_owned()),
+                () = out_of_grace => Ok(()),
+            }
         }
         _ => Err("no listener is configured".to_owned()),
     }

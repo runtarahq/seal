@@ -73,7 +73,7 @@ server is verified is the destination's `tls`: a certificate's rule that names i
 ## The login
 
 1. seal connects to an address it has checked, like any destination. A private address
-   needs `allow_private_destination` and an operator who honours it.
+   needs `allow_private_destination` and an operator whose `private_rule_cidrs` hold it.
 2. It sends `SSLRequest`, and refuses a server that does not offer TLS, unless the rule
    says `"plaintext"` ([Servers that cannot be verified](#servers-that-cannot-be-verified)). It reads exactly
    the one-byte answer before the handshake, so nothing unprotected can be slipped in.
@@ -125,8 +125,8 @@ failed", since a server's message can name users or more.
 ## Limits
 
 A session ends when nothing moves for the idle timeout, or at `pg_max_session` (default
-8 hours), whichever comes first. A rule can shorten either. Its bytes each way go in the
-audit record. Each session holds one of `max_concurrent_streams` and one provider
+8 hours), whichever comes first. A rule can shorten either. A session is recorded when it
+has logged in, as `started`, and again when it ends, with its bytes each way. Each session holds one of `max_concurrent_streams` and one provider
 connection.
 
 ## Servers that cannot be verified

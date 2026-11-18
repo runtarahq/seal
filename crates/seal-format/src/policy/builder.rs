@@ -204,7 +204,7 @@ pub fn registered_webhook_token(
     webhook_url: &str,
 ) -> Result<Policy, FormatError> {
     let mut rule = Rule::new(
-        endpoint(register_url)?,
+        exact_endpoint(register_url)?,
         Inject::FormField {
             name: token_field.to_owned(),
         },
@@ -250,8 +250,14 @@ pub fn oauth_client(config: &OAuthConfig) -> Result<OAuthPolicies, FormatError> 
             "a JWT bearer grant key acts as the platform, so it cannot be shared",
         ));
     }
-    let token = endpoint(&config.token_url)?;
-    let revoke = config.revoke_url.as_deref().map(endpoint).transpose()?;
+    // Each is one endpoint, so no path below it matches: a rule for one could
+    // otherwise be reached by a path that the provider reads as the other's.
+    let token = exact_endpoint(&config.token_url)?;
+    let revoke = config
+        .revoke_url
+        .as_deref()
+        .map(exact_endpoint)
+        .transpose()?;
     let sealing = token_response_sealing(config.response_format, &config.access_token_claims)?;
 
     let revoke_with = |name: &str| {
@@ -618,6 +624,26 @@ fn token_response_sealing(
     })
 }
 
+/// Parses an `https` URL into a destination for that one path and nothing below it.
+fn exact_endpoint(url: &str) -> Result<Destination, FormatError> {
+    let exact = url::Url::parse(url)
+        .map_err(|_| FormatError::InvalidPolicy("endpoint is not a URL"))?
+        .path()
+        .to_owned();
+    match endpoint(url)? {
+        Destination::Http {
+            scheme, host, port, ..
+        } => Ok(Destination::Http {
+            scheme,
+            host,
+            port,
+            path_prefix: None,
+            path: Some(exact),
+        }),
+        other @ Destination::Postgres { .. } => Ok(other),
+    }
+}
+
 /// Parses an `https` URL into a destination. Anything a destination cannot
 /// express, such as credentials or a query, is refused rather than dropped.
 fn endpoint(url: &str) -> Result<Destination, FormatError> {
@@ -644,6 +670,7 @@ fn endpoint(url: &str) -> Result<Destination, FormatError> {
         host: Host::new(host)?,
         port: parsed.port(),
         path_prefix: (path != "/").then(|| path.to_owned()),
+        path: None,
     })
 }
 
@@ -669,6 +696,18 @@ mod tests {
                 host, path_prefix, ..
             } => (host.as_str().to_owned(), path_prefix.clone()),
             Destination::Postgres { .. } => panic!("not HTTP"),
+        }
+    }
+
+    /// The one path a rule is for, if it is for one.
+    fn exact_path(rule: &Rule) -> Option<String> {
+        match &rule.destination {
+            Destination::Http {
+                path,
+                path_prefix: None,
+                ..
+            } => path.clone(),
+            _ => None,
         }
     }
 
@@ -798,7 +837,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(policy.canonical_json().unwrap()).unwrap(),
-            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path_prefix":"/setWebhook"},"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
+            r#"{"rules":[{"destination":{"scheme":"https","host":"api.telegram.org","path":"/setWebhook"},"inject":{"form_field":{"name":"secret_token"}},"require_form":{"url":["https://app.example.com/telegram"]},"allow_injected_path":"/bot{}"}],"verify":"equals"}"#
         );
         assert!(!policy.shared);
         // It goes with the value `path_secret` makes for the same prefix.
@@ -1107,18 +1146,41 @@ mod tests {
         assert!(access.rules.iter().all(|rule| rule.seal_response.is_none()));
 
         let refresh = client.for_response_field(&definition("refresh")).unwrap();
+        assert_eq!(host_and_prefix(&refresh.rules[0]).0, "auth.example.com");
         assert_eq!(
-            host_and_prefix(&refresh.rules[0]),
-            (
-                "auth.example.com".to_owned(),
-                Some("/oauth/token".to_owned())
-            )
+            exact_path(&refresh.rules[0]).as_deref(),
+            Some("/oauth/token")
         );
         assert!(refresh.rules[0].seal_response.is_some());
         assert_eq!(
-            host_and_prefix(&refresh.rules[1]).1,
-            Some("/oauth/revoke".to_owned())
+            exact_path(&refresh.rules[1]).as_deref(),
+            Some("/oauth/revoke")
         );
+    }
+
+    #[test]
+    fn the_token_and_revocation_endpoints_are_one_path_each() {
+        // A rule for a prefix also matches below it, and a path below the revocation
+        // endpoint that the provider reads as the token endpoint would be sent with
+        // the client's credential and neither the checks nor the sealing of the
+        // token rule.
+        let mut config = oauth(OAuthClientAuth::ClientSecretPost);
+        config.shared = true;
+        let policies = oauth_client(&config).unwrap();
+        let refresh = policies
+            .client
+            .for_response_field(&definition("refresh"))
+            .unwrap();
+        for rule in policies
+            .client
+            .rules
+            .iter()
+            .chain(&policies.password.rules)
+            .chain(&refresh.rules)
+        {
+            let path = exact_path(rule).unwrap();
+            assert!(["/oauth/token", "/oauth/revoke"].contains(&path.as_str()));
+        }
     }
 
     #[test]

@@ -114,6 +114,17 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   returns it encoded some other way, compressed, or escaped inside JSON, still gives it
   to the caller, and one that means to can always do so. Policies should name API
   hosts, not services that reflect requests.
+- **A provider that returns what the caller chose lets the caller test guesses at a
+  secret.** To keep a streamed response that repeats a credential from the caller, seal
+  holds back the end of a piece of the body while it is the start of one, so how a body
+  arrives shows whether its last bytes were. A compromised application that can get a
+  destination to answer with bytes it chose, from an endpoint that echoes its request or
+  a file it stored there, can therefore find a header, basic, query, path or body secret
+  a byte at a time, in about as many audited requests as the secret has bytes times
+  half its alphabet. A signing key is not looked for, so it is not exposed, nor is
+  anything in a sealed response, which is read whole. A destination that serves the
+  caller's own content is as bad for a credential as one that reflects requests:
+  policies should name API hosts that do neither.
 - **Response sealing covers declared fields at declared locations only.** The same
   value elsewhere in a response passes through, as does anything else a provider
   returns, such as a presigned URL it generates itself.
@@ -190,6 +201,13 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   public. An account key cannot be scoped at Azure, and seal does not stand in for that:
   a path prefix on a Shared Key rule holds the URL of each request, not what the account
   key can reach. Seal an account key only where the application may have the account.
+- **An internal range the operator opens is open to every caller.** Anyone can seal a
+  value whose rule names an internal host and sets `allow_private_destination`, so a
+  compromised application can send any request to any address in
+  `private_rule_cidrs` or `allow_private_cidrs` and read the answer. Nothing internal
+  is reachable until the operator names a range, and link-local and metadata addresses
+  need `allow_private_cidrs`. The operator names only the ranges that hold services
+  credentials are sealed for.
 - **Sealed values are usable by anyone who can call seal with them,** so applications
   should not expose them in bulk, even though they are not readable.
 - **Anyone with the public key can seal a new value, with any policy.** HPKE's base
@@ -298,6 +316,11 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   expire, wherever they were copied to, unless the role's sessions are revoked in IAM.
 - **Running operations are not interrupted** by a deletion or by revoking a wrapping
   key. They end on their own limits, up to `pg_max_session` for Postgres.
+- **A killed process records nothing more.** A record is written when a request ends.
+  Told to stop, seal ends what is still running after `shutdown_grace` and records it;
+  killed outright, or crashed, it leaves no record of the requests then under way. A
+  Postgres session is the exception that would matter most, lasting hours, so it is
+  also recorded when it begins.
 - **Destruction needs every copy gone.** Deleting wrapped keys does not protect backups
   that also hold copies of them, unless the wrapping key is destroyed too.
 - **A refused response can follow a credential's use.** Refusing a response as over its

@@ -235,20 +235,31 @@ fn records(instance: &Instance) -> usize {
     instance.setup.audit_records().len()
 }
 
-/// The audit record of a session after `after` records that logged in by `method`,
-/// waiting for it, since a session audits itself when it ends. Another session ending
-/// meanwhile may have written its record first.
+/// The audit record of the end of a session after `after` records that logged in by
+/// `method`, waiting for it, since a session audits itself when it ends. Another
+/// session ending meanwhile may have written its record first. A session is also
+/// recorded when it begins, and that record must come before this one.
 async fn session_record(instance: &Instance, after: usize, method: &str) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let found = instance
+        let sessions: Vec<Value> = instance
             .setup
             .audit_records()
             .into_iter()
             .skip(after)
-            .find(|record| record["op"] == "connect" && record["pg_auth"] == method);
-        if let Some(record) = found {
-            return record;
+            .filter(|record| record["op"] == "connect" && record["pg_auth"] == method)
+            .collect();
+        let ended = sessions
+            .iter()
+            .position(|record| record["outcome"] != "started");
+        if let Some(ended) = ended {
+            assert!(
+                sessions[..ended]
+                    .iter()
+                    .any(|record| record["outcome"] == "started"),
+                "a session is recorded when it begins"
+            );
+            return sessions[ended].clone();
         }
         assert!(tokio::time::Instant::now() < deadline, "no session record");
         tokio::time::sleep(Duration::from_millis(50)).await;

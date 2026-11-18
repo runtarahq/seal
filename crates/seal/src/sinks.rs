@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
-use seal_broker::audit::{AuditFailed, AuditRecord, AuditSink};
+use seal_broker::audit::{AuditFailed, AuditRecord, AuditSink, Outcome};
 
 use crate::config::AuditFailure;
 
@@ -90,9 +90,16 @@ pub struct Policy<S> {
     missed: Mutex<VecDeque<AuditRecord>>,
 }
 
-/// The most unwritten records kept. Past it the earliest are kept, which are the uses
-/// that went ahead; the rest are refusals made while the sink could not write.
+/// The most unwritten records kept. Nothing new is used while one is unwritten, so
+/// those that matter are of what was under way when the sink broke, and they arrive as
+/// each ends, which may be hours later for a Postgres session.
 const MAX_MISSED: usize = 1024;
+
+/// How many of them may be refusals. Every request refused while the sink cannot
+/// write would leave one, and a caller can make those as fast as its rate allows:
+/// kept without a limit of their own, they would fill the room before the records of
+/// what was really used arrived.
+const MAX_MISSED_REFUSALS: usize = 64;
 
 impl<S> Policy<S> {
     /// Wraps a sink.
@@ -116,8 +123,15 @@ impl<S: AuditSink> AuditSink for Policy<S> {
             (Err(error), AuditFailure::FailClosed) => {
                 metrics::counter!("seal_audit_failures_total").increment(1);
                 let mut missed = self.missed.lock().unwrap_or_else(PoisonError::into_inner);
-                if missed.len() < MAX_MISSED {
+                let room = if record.outcome == Outcome::Refused {
+                    MAX_MISSED_REFUSALS
+                } else {
+                    MAX_MISSED
+                };
+                if missed.len() < room {
                     missed.push_back(record.clone());
+                } else {
+                    metrics::counter!("seal_audit_dropped_total").increment(1);
                 }
                 Err(error)
             }
@@ -139,8 +153,6 @@ impl<S: AuditSink> AuditSink for Policy<S> {
 
 #[cfg(test)]
 mod tests {
-    use seal_broker::audit::Outcome;
-
     use super::*;
 
     fn record(caller: &str) -> AuditRecord {
@@ -263,6 +275,33 @@ mod tests {
         *sink.broken.lock().unwrap() = true;
         assert_eq!(policy.record(&record("c")), Ok(()));
         assert_eq!(policy.ready(), Ok(()));
+    }
+
+    #[test]
+    fn refusals_made_while_the_sink_is_broken_do_not_crowd_out_what_was_used() {
+        let sink = Flaky::default();
+        let policy = Policy::new(&sink, AuditFailure::FailClosed);
+        *sink.broken.lock().unwrap() = true;
+        // A session under way when the sink broke ends, and finds it broken.
+        assert_eq!(policy.record(&record("first")), Err(AuditFailed));
+        // From then on every request is refused, and a caller can ask as fast as its
+        // rate allows.
+        for _ in 0..10 * MAX_MISSED {
+            let mut refused = record("refused");
+            refused.outcome = Outcome::Refused;
+            assert_eq!(policy.record(&refused), Err(AuditFailed));
+        }
+        // What was also under way ends later still, and its record is kept.
+        let mut session = record("session");
+        session.outcome = Outcome::Cancelled;
+        assert_eq!(policy.record(&session), Err(AuditFailed));
+
+        *sink.broken.lock().unwrap() = false;
+        assert_eq!(policy.ready(), Ok(()));
+        let written = sink.written.lock().unwrap();
+        assert_eq!(written.first().map(String::as_str), Some("first"));
+        assert_eq!(written.last().map(String::as_str), Some("session"));
+        assert_eq!(written.len(), MAX_MISSED_REFUSALS + 1);
     }
 
     #[test]

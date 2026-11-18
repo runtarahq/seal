@@ -35,7 +35,17 @@ socket is group-readable, so add the application's user to seal's group.
 Use the [container image](../deploy/container/Dockerfile) or the binary, with the
 [configuration](../deploy/config/separate-machine.toml). The image is published as
 `ghcr.io/runtarahq/seal` for amd64 and arm64: a release is tagged with its version, such
-as `0.1.0`, and `latest`; `main` follows the main branch. Callers present a client
+as `0.1.0`, and `latest`; `main` follows the main branch. Those tags move. Every image
+also has the tag `sha-<commit>`, which does not, and a signed statement that the CI
+workflow of this repository built it from that commit. Deploy an image by its digest, and
+check the statement first:
+
+```sh
+gh attestation verify oci://ghcr.io/runtarahq/seal:sha-<commit> --repo runtarahq/seal
+docker pull ghcr.io/runtarahq/seal@sha256:<the digest it printed>
+```
+
+Callers present a client
 certificate from the CA in `listen.tls.client_ca`, and are identified by its subject.
 Certificates are short-lived: seal checks its certificate files every
 `listen.reload_interval` and swaps them in. A change that does not load is logged and
@@ -112,9 +122,17 @@ least twice `max_keys_per_keyset`.
 |---|---|---|
 | `deny_cidrs` | `[]` | Always refused |
 | `allow_private_cidrs` | `[]` | Allowed whatever their class |
-| `honour_private_rules` | `false` | Whether a rule's `allow_private_destination` has any effect |
+| `private_rule_cidrs` | `[]` | The internal ranges a rule's `allow_private_destination` may reach. Empty, the option has no effect |
 | `honour_plaintext_postgres_rules` | `false` | Whether a Postgres rule whose `tls` is `"plaintext"` may connect with no TLS. Otherwise such a session is refused |
 | `extra_ca_files` | `[]` | CAs to trust toward providers, besides the public roots |
+
+Anyone with a keyset's public key can seal a value whose rule names any host and sets
+`allow_private_destination`, and a caller can present it. So an internal range in
+`private_rule_cidrs` or `allow_private_cidrs` is one every caller can send requests to
+and read the answers from, with or without a credential of yours. Name the narrowest
+ranges that hold the services credentials are sealed for, such as one database subnet,
+and not seal's own host, management networks or anything that trusts a request for
+coming from inside. `deny_cidrs` wins over both.
 
 ### `[pools]`, `[limits]`, `[audit]`, `[metrics]`
 
@@ -129,11 +147,12 @@ least twice `max_keys_per_keyset`.
 | `limits.buffer_cap` | `1MiB` | The largest buffered body or sealed response |
 | `limits.max_head` | `256KiB` | The largest request head, including envelopes |
 | `limits.max_caller_connections` | `256` | |
-| `limits.idle_timeout` | `60s` | No bytes in either direction |
+| `limits.idle_timeout` | `60s` | No bytes in either direction. Also how long a caller may leave a piece of a streamed response untaken, after which the stream ends and its audit record is written |
 | `limits.connect_timeout` | `10s` | Including DNS and TLS |
 | `limits.first_byte_timeout` | `60s` | Once the request is sent |
 | `limits.buffered_total_timeout` | `60s` | For a request holding a capped buffer |
 | `limits.max_stream_duration` | none | An optional total deadline for streams |
+| `limits.shutdown_grace` | `30s` | Once told to stop, how long requests under way may take to finish. Those still running are then ended, so that each writes its audit record. Give seal's supervisor longer than this before it kills the process |
 | `limits.rate_per_caller` | `1000/s` | |
 | `limits.rate_per_keyset` | `200/s` | Counted against the request's keyset and against the keyset each presented value was sealed to |
 | `limits.memory_budget` | `2GiB` | seal refuses to start if the ceiling is over it |
@@ -505,19 +524,31 @@ copy of the wrapped keys still opens the keyset's values while the wrapping key 
 
 One JSON line per request and per administrative call: time, caller, keyset, item, field
 names, matched rule indexes, method, host, path without the query string, status, bytes
-each way, duration, outcome (`ok`, `refused`, `failed` or `cancelled`) and error code. A
+each way, duration, outcome (`ok`, `refused`, `failed`, `cancelled` or `started`) and error code. A
 `verify` record has `verified`, whether the code matched: a run of `false` for one value
 is someone guessing. A `presign` record has `expires_s`, how long the URL lasts: what is
 done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
+A Postgres session leaves two records: one with outcome `started` when it has logged in,
+before the caller can use it, and one with what it did when it ends. A session may last
+hours, and the first says that it happened even if seal is killed before the second.
+When seal is told to stop it waits `limits.shutdown_grace` for requests under way, then
+ends them, and each is recorded as `cancelled`. A process that is killed outright writes
+nothing for what it was doing, so its supervisor should wait longer than the grace:
+`TimeoutStopSec` in the systemd unit, `--stop-timeout` or
+`terminationGracePeriodSeconds` for a container.
+
 A record is written when its request ends, with what happened, so the request that finds
 the sink broken has already used its credential: a streamed response has been delivered
 before it fails, and a Postgres session has run. seal keeps that record, up to 1024 of
-them, and refuses every request after it with `INTERNAL`, before opening a value, until
-the missed records are written. What goes unrecorded while the sink is broken is
-therefore the requests under way when it broke, and their records follow once it works
-again. `seal_audit_failures_total` counts each failed write: alert on it.
+them, and refuses every request and administrative call after it with `INTERNAL`, before
+opening a value or touching a key, until the missed records are written. What goes
+unrecorded while the sink is broken is therefore the requests under way when it broke,
+and their records follow once it works again. Of the refusals made meanwhile only the
+first 64 are kept, so that they leave room for those. `seal_audit_failures_total` counts
+each failed write, and `seal_audit_dropped_total` each record that was not kept: alert on
+both.
 
 A caller refused a keyset, a value's keyset or an administrative call leaves a record
 too, with the operation, the keyset and `CALLER_DENIED`: a run of them is an

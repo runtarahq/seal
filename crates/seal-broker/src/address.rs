@@ -194,8 +194,10 @@ pub struct NetworkPolicy {
     pub deny_cidrs: Vec<Cidr>,
     /// Allowed whatever their class, for this deployment.
     pub allow_private_cidrs: Vec<Cidr>,
-    /// Whether a rule's `allow_private_destination` has any effect. Off by default.
-    pub honour_private_rules: bool,
+    /// The internal ranges a rule's `allow_private_destination` may reach. Empty by
+    /// default, and then the option has no effect. Anyone can seal a rule that sets
+    /// it, so these are what every caller can reach.
+    pub private_rule_cidrs: Vec<Cidr>,
     /// Whether a Postgres rule may connect with no TLS at all. Off by default.
     pub honour_plaintext_postgres_rules: bool,
 }
@@ -217,7 +219,12 @@ impl NetworkPolicy {
         }
         let class = classify(address);
         class == AddressClass::Public
-            || (class.rule_may_allow() && rule_allows_private && self.honour_private_rules)
+            || (class.rule_may_allow()
+                && rule_allows_private
+                && self
+                    .private_rule_cidrs
+                    .iter()
+                    .any(|cidr| cidr.contains(address)))
     }
 }
 
@@ -390,10 +397,18 @@ mod tests {
         }
     }
 
+    /// Every internal range a rule's option could reach.
+    fn every_internal_range() -> Vec<Cidr> {
+        ["0.0.0.0/0", "::/0"]
+            .iter()
+            .map(|range| range.parse().unwrap())
+            .collect()
+    }
+
     #[test]
     fn a_rule_can_allow_internal_services_only_if_configuration_honours_it() {
         let policy = NetworkPolicy {
-            honour_private_rules: true,
+            private_rule_cidrs: every_internal_range(),
             ..NetworkPolicy::default()
         };
         for address in [
@@ -409,9 +424,25 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_reaches_only_the_internal_ranges_configuration_names() {
+        // Anyone can seal a rule with the option, so without this a deployment that
+        // needs one internal database would give every caller the whole network.
+        let policy = NetworkPolicy {
+            private_rule_cidrs: vec!["10.20.0.0/16".parse().unwrap()],
+            ..NetworkPolicy::default()
+        };
+        assert!(policy.permits(ip("10.20.3.4"), true));
+        assert!(policy.permits(ip("::ffff:10.20.3.4"), true));
+        assert!(!policy.permits(ip("10.20.3.4"), false));
+        for address in ["10.21.0.1", "127.0.0.1", "192.168.1.1", "fd00::1"] {
+            assert!(!policy.permits(ip(address), true), "{address}");
+        }
+    }
+
+    #[test]
     fn a_rule_can_never_allow_metadata_or_other_non_internal_ranges() {
         let policy = NetworkPolicy {
-            honour_private_rules: true,
+            private_rule_cidrs: every_internal_range(),
             ..NetworkPolicy::default()
         };
         for address in [
@@ -455,7 +486,7 @@ mod tests {
                 "10.1.2.3/32".parse().unwrap(),
             ],
             allow_private_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
-            honour_private_rules: true,
+            private_rule_cidrs: every_internal_range(),
             ..NetworkPolicy::default()
         };
         assert!(!policy.permits(ip("8.8.8.8"), true));

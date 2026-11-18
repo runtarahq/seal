@@ -310,3 +310,81 @@ fn ci_has_read_only_permissions_and_keeps_no_credentials() {
     assert!(!workflow.contains("pull_request_target"));
     assert!(!workflow.contains("self-hosted"));
 }
+
+#[test]
+fn ci_installs_tools_by_version() {
+    // A tool installed at whatever is newest runs in the same workflow that builds
+    // the published image, with a release of it that nobody has looked at.
+    let workflow = ci_workflow();
+    let mut installs = 0;
+    for line in workflow.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.contains("cargo") && line.contains(" install ") {
+            installs += 1;
+            assert!(line.contains("--version"), "{line}");
+            assert!(line.contains("--locked"), "{line}");
+        }
+        if line.contains("pip install") {
+            installs += 1;
+            assert!(line.contains("--require-hashes"), "{line}");
+        }
+        assert!(!line.contains("+nightly "), "{line}");
+        assert!(!line.contains("install nightly "), "{line}");
+    }
+    assert!(installs >= 4);
+}
+
+#[test]
+fn only_the_image_that_was_tested_is_published() {
+    // Any job of a run can upload an artifact. The publish job takes the two images
+    // by name and pushes them only if they are the files the image job saved.
+    let workflow = fs::read_to_string(workspace_root().join(".github/workflows/ci.yml")).unwrap();
+    let publish = workflow.split("\n  publish:\n").nth(1).unwrap();
+    assert!(!publish.contains("pattern:"));
+    assert!(!publish.contains("merge-multiple"));
+    let check = publish.find("sha256sum --check --strict").unwrap();
+    let load = publish.find("docker load").unwrap();
+    assert!(check < load);
+    for arch in ["amd64", "arm64"] {
+        assert!(publish.contains(&format!("name: image-{arch}\n")));
+        assert!(publish.contains(&format!("needs.image.outputs.{arch}")));
+    }
+    // The digest is taken before the tests run beside the image.
+    let image = workflow.split("\n  image:\n").nth(1).unwrap();
+    let saved = image.find("sha256sum \"seal-$ARCH.tar\"").unwrap();
+    let tested = image.find("cargo test").unwrap();
+    assert!(saved < tested);
+    // And what is published says where it was built.
+    assert!(publish.contains("uses: actions/attest-build-provenance@"));
+}
+
+#[test]
+fn the_image_is_built_from_a_base_named_by_digest() {
+    let dockerfile =
+        fs::read_to_string(workspace_root().join("deploy/container/Dockerfile")).unwrap();
+    let bases: Vec<&str> = dockerfile
+        .lines()
+        .filter_map(|line| line.strip_prefix("FROM "))
+        .map(|base| base.split_whitespace().next().unwrap_or_default())
+        .collect();
+    assert!(bases.len() >= 2);
+    for base in bases {
+        let digest = base.split_once("@sha256:").map(|(_, digest)| digest);
+        assert!(
+            base == "scratch"
+                || digest.is_some_and(|digest| {
+                    digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit())
+                }),
+            "{base}"
+        );
+    }
+    // The toolchain in it is the pinned one.
+    let version = read_toml(&workspace_root().join("rust-toolchain.toml"))["toolchain"]["channel"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(dockerfile.contains(&format!("FROM rust:{version}-alpine@sha256:")));
+}

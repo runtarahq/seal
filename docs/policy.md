@@ -59,6 +59,16 @@ scheme.
 - `path_prefix` starts with `/` and matches on segment boundaries. It may not have
   `.` or `..` segments, empty segments, or an encoded dot or separator (`%2e`, `%2f`,
   `%5c`).
+- `path` is the whole path, for a rule that is for one endpoint such as a token
+  endpoint: `/oauth/token` and nothing below it. It is written as `path_prefix` is, and
+  a destination has one or the other.
+
+Under a `path_prefix`, seal refuses a path that a server might read as one outside it: an
+encoded dot or separator, a `.` or `..` segment with parameters such as `..;`, and a `%`
+that does not start an escape. It cannot know every server's reading, so where a rule is
+for one endpoint, name it with `path`. A value's first rule that matches a request is the
+one used, so a rule that checks or seals more, with `require_form` or `seal_response`,
+should not share a host with a rule for a wider prefix that does less.
 
 ### Host patterns
 
@@ -169,14 +179,14 @@ webhook's `secret_token` in the body:
 
 ```json
 { "rules": [{
-  "destination": { "scheme": "https", "host": "api.telegram.org", "path_prefix": "/setWebhook" },
+  "destination": { "scheme": "https", "host": "api.telegram.org", "path": "/setWebhook" },
   "inject": { "form_field": { "name": "secret_token" } },
   "allow_injected_path": "/bot{}",
   "require_form": { "url": ["https://app.example.com/telegram"] }
 }], "verify": "equals" }
 ```
 
-The rule's `path_prefix` still bounds what follows the injected prefix. What fills the
+The rule's `path` still holds what follows the injected prefix. What fills the
 prefix is whichever value is presented, which may be another bot's token, so the rule
 must be safe for any of them: here `require_form` holds the webhook to one URL, since
 Telegram sends the secret to whatever URL is registered.
@@ -329,12 +339,13 @@ With `allow_presign`, the caller may have a shared access signature for one blob
 ### `jwt_assertion`
 
 The secret is the key that signs a short-lived JWT. The JWT goes only into the request,
-never back to the caller, and only to this exact endpoint: `path_prefix` must be the
-token endpoint's full path, with no trailing `/`.
+never back to the caller, and only to this exact endpoint: `path` is the token
+endpoint's full path, with no trailing `/`. A `path_prefix` that is the full path is
+read the same way.
 
 ```json
 { "rules": [{
-  "destination": { "scheme": "https", "host": "auth.example.com", "path_prefix": "/oauth/token" },
+  "destination": { "scheme": "https", "host": "auth.example.com", "path": "/oauth/token" },
   "inject": { "jwt_assertion": {
     "alg": "RS256",
     "aud": { "value": "https://tenant.example.com/" },
@@ -445,7 +456,7 @@ value gets the rules of that definition, plus the same `definitions`:
 ```json
 {
   "rules": [{
-    "destination": { "scheme": "https", "host": "auth.example.com", "path_prefix": "/oauth/token" },
+    "destination": { "scheme": "https", "host": "auth.example.com", "path": "/oauth/token" },
     "inject": { "form_field": { "name": "client_secret" } },
     "seal_response": {
       "format": "json",
@@ -461,7 +472,7 @@ value gets the rules of that definition, plus the same `definitions`:
       "inject": { "header": { "name": "Authorization", "format": "Bearer {}" } }
     }] },
     "refresh": { "rules": [{
-      "destination": { "scheme": "https", "host": "auth.example.com", "path_prefix": "/oauth/token" },
+      "destination": { "scheme": "https", "host": "auth.example.com", "path": "/oauth/token" },
       "inject": { "form_field": { "name": "refresh_token" } },
       "seal_response": {
         "format": "json",
@@ -483,7 +494,7 @@ as a JSON object:
 ```json
 {
   "rules": [{
-    "destination": { "scheme": "https", "host": "identity.xero.com", "path_prefix": "/connect/token" },
+    "destination": { "scheme": "https", "host": "identity.xero.com", "path": "/connect/token" },
     "inject": { "form_field": { "name": "client_secret" } },
     "seal_response": {
       "format": "json",
@@ -546,7 +557,7 @@ And a form-encoded one, for providers that respond that way:
 ```json
 {
   "rules": [{
-    "destination": { "scheme": "https", "host": "provider.example.com", "path_prefix": "/token" },
+    "destination": { "scheme": "https", "host": "provider.example.com", "path": "/token" },
     "inject": { "form_field": { "name": "client_secret" } },
     "seal_response": {
       "format": "form",
@@ -576,14 +587,14 @@ of the listed values. Here a shared client secret may only be used for the grant
 for a user who consented, never for `client_credentials`, which would act as the app
 itself.
 
-A required field may not be named in the URL's query either. Some providers read
-parameters from both and prefer the query, which would put the caller's value in place of
-the one seal checked.
+A required field may not be named in the URL's query either, by the caller or by a query
+injection of another value presented with it. Some providers read parameters from both and
+prefer the query, which would put that value in place of the one seal checked.
 
 ```json
 {
   "rules": [{
-    "destination": { "scheme": "https", "host": "auth.example.com", "path_prefix": "/oauth/token" },
+    "destination": { "scheme": "https", "host": "auth.example.com", "path": "/oauth/token" },
     "inject": { "form_field": { "name": "client_secret" } },
     "require_form": { "grant_type": ["authorization_code", "refresh_token"] }
   }],
@@ -663,7 +674,7 @@ Options that weaken a guarantee are named for it, and are off by default.
 
 | Option | On | Effect |
 |---|---|---|
-| `allow_private_destination` | A rule | Allows an internal address (loopback, RFC 1918, CGNAT, unique-local), if the deployment's configuration also permits it, and every value presented with this one sets it too. Never a link-local or metadata address |
+| `allow_private_destination` | A rule | Allows an internal address (loopback, RFC 1918, CGNAT, unique-local), if the deployment's configuration names its range in `private_rule_cidrs`, and every value presented with this one sets it too. Never a link-local or metadata address |
 | `allow_plain_http` | A rule | Allows plain HTTP. Required for scheme `http`, and invalid otherwise |
 | `allow_injected_path` | A rule | Lets the value go with one that [injects into the path](#path) with exactly this prefix. The request is then sent under that prefix, filled by whichever such value is presented |
 | `allow_unsigned_payload` | `aws_sigv4` | Allows `UNSIGNED-PAYLOAD` |

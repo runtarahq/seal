@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# As in ci.yml: tools are named by version.
+env:
+  NIGHTLY: nightly-2026-11-09
+  CARGO_AUDIT: 0.22.2
+  CARGO_FUZZ: 0.13.2
+
 jobs:
   memory:
     runs-on: ubuntu-latest
@@ -37,6 +43,9 @@ jobs:
     # Secrets are never given to forks, and this never runs for one.
     if: github.repository == 'runtarahq/seal'
     runs-on: ubuntu-latest
+    # The real KMS and bucket credentials belong to this environment, which only the
+    # main branch may use: a workflow on another branch cannot read them.
+    environment: real-providers
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -92,7 +101,7 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - run: cargo install --locked cargo-audit
+      - run: cargo install --locked cargo-audit --version "$CARGO_AUDIT"
       - run: cargo audit
       - run: cargo audit --file fuzz/Cargo.lock
 
@@ -120,8 +129,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install nightly --profile minimal
-      - run: cargo +nightly install --locked cargo-fuzz
+      - run: rustup toolchain install "$NIGHTLY" --profile minimal
+      - run: cargo "+$NIGHTLY" install --locked cargo-fuzz --version "$CARGO_FUZZ"
       # Each night starts from the corpus the night before grew. A cache entry cannot
       # be overwritten, so each run saves under its own key and the next restores the
       # newest by prefix.
@@ -134,7 +143,7 @@ jobs:
       - name: Fuzz for an hour
         run: |
           mkdir -p "fuzz/corpus/$TARGET"
-          cargo +nightly fuzz run "$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -- -max_total_time=3600
+          cargo "+$NIGHTLY" fuzz run "$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -- -max_total_time=3600
         env:
           TARGET: ${{ matrix.target }}
       - name: Save the corpus

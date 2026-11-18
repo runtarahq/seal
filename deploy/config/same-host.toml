@@ -36,7 +36,7 @@ lock_memory = "best_effort"             # off | best_effort | required
 [network]
 deny_cidrs = []
 allow_private_cidrs = []
-honour_private_rules = false
+private_rule_cidrs = []
 honour_plaintext_postgres_rules = false
 
 [pools]
@@ -55,6 +55,7 @@ idle_timeout = "60s"
 connect_timeout = "10s"
 first_byte_timeout = "60s"
 buffered_total_timeout = "60s"
+shutdown_grace = "30s"                  # the unit's TimeoutStopSec is longer
 rate_per_caller = "1000/s"
 rate_per_keyset = "200/s"
 memory_budget = "2GiB"                  # check-config prints how the ceiling adds up

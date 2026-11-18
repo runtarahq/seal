@@ -258,6 +258,9 @@ pub enum Destination {
         port: Option<u16>,
         /// A path prefix, matched on segment boundaries.
         path_prefix: Option<String>,
+        /// The whole path, matched exactly: for a rule that is for one endpoint, such
+        /// as a token endpoint. Not with `path_prefix`.
+        path: Option<String>,
     },
     /// A Postgres server.
     Postgres {
@@ -326,6 +329,8 @@ struct RawDestination {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user: Option<Part>,
@@ -343,7 +348,7 @@ impl TryFrom<RawDestination> for Destination {
             "https" => Scheme::Https,
             "http" => Scheme::Http,
             "postgres" => {
-                if raw.path_prefix.is_some() {
+                if raw.path_prefix.is_some() || raw.path.is_some() {
                     return Err(FormatError::InvalidPolicy(
                         "a Postgres destination has no path prefix",
                     ));
@@ -377,6 +382,7 @@ impl TryFrom<RawDestination> for Destination {
             host: raw.host,
             port: raw.port,
             path_prefix: raw.path_prefix,
+            path: raw.path,
         })
     }
 }
@@ -389,11 +395,13 @@ impl From<Destination> for RawDestination {
                 host,
                 port,
                 path_prefix,
+                path,
             } => Self {
                 scheme: scheme.as_str().to_owned(),
                 host,
                 port,
                 path_prefix,
+                path,
                 databases: None,
                 user: None,
                 tls: None,
@@ -411,6 +419,7 @@ impl From<Destination> for RawDestination {
                 host,
                 port: Some(port),
                 path_prefix: None,
+                path: None,
                 // Left out when empty, as every policy made now has it.
                 databases: (!databases.is_empty()).then_some(databases),
                 user: Some(user),

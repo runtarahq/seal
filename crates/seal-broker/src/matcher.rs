@@ -247,8 +247,10 @@ fn signs_only_for_its_exact_endpoint(rule: &Rule, target: &Target) -> bool {
     match (&rule.inject, &rule.destination) {
         (
             Inject::JwtAssertion { .. },
-            seal_format::policy::Destination::Http { path_prefix, .. },
-        ) => path_prefix.as_deref() == Some(target.path.as_str()),
+            seal_format::policy::Destination::Http {
+                path_prefix, path, ..
+            },
+        ) => path.as_deref().or(path_prefix.as_deref()) == Some(target.path.as_str()),
         (Inject::JwtAssertion { .. }, _) => false,
         _ => true,
     }
@@ -309,8 +311,10 @@ fn parts_of(inject: &Inject) -> Vec<&Part> {
 }
 
 /// `require_form` holds a field of the body to its allowed values. A provider that also
-/// reads parameters from the query, and prefers them, would take the caller's value
-/// there instead, so a required field may not be named in the query at all.
+/// reads parameters from the query, and prefers them, would take the value there
+/// instead, so a required field may not be named in the query at all: not by the
+/// caller, and not by a value presented alongside, since anyone can seal one that
+/// injects a query parameter.
 fn required_form_fields_are_not_in_the_query(
     matched: &BTreeMap<&FieldName, (usize, &Rule)>,
     head: &RequestHead<'_>,
@@ -323,6 +327,21 @@ fn required_form_fields_are_not_in_the_query(
             return Err(BrokerError::for_field(
                 ErrorCode::PolicyDenied,
                 "the query names a form field this field's rule requires",
+                field,
+            ));
+        }
+    }
+    for (field, (_, rule)) in matched {
+        let Inject::Query { name } = &rule.inject else {
+            continue;
+        };
+        let required = matched
+            .values()
+            .any(|(_, other)| other.require_form.contains_key(name));
+        if required {
+            return Err(BrokerError::for_field(
+                ErrorCode::PolicyDenied,
+                "this field injects a query parameter that a presented rule requires in the form",
                 field,
             ));
         }

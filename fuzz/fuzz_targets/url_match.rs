@@ -16,6 +16,7 @@ fuzz_target!(|data: &str| {
         host: Host::new("api.example.com").expect("a valid host"),
         port: None,
         path_prefix: Some("/v2/".to_owned()),
+        path: None,
     };
     if target.matches(&destination) {
         assert_eq!(target.host, "api.example.com");

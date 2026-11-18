@@ -67,8 +67,11 @@ pub enum Outcome {
     Refused,
     /// Failed after the provider may have received the request.
     Failed,
-    /// The caller went away.
+    /// The caller went away, or seal stopped.
     Cancelled,
+    /// A Postgres session logged in. A session may last hours, so its use is recorded
+    /// when it begins, and what it did in a second record when it ends.
+    Started,
 }
 
 /// A record could not be written.

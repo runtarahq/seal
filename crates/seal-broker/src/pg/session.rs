@@ -241,6 +241,24 @@ impl PgSession {
         })?;
         progress.pg_auth = Some(method.as_str());
 
+        // The session is the caller's from here, for as long as it lasts, so it is
+        // recorded before the caller hears of it: the record of its end may be hours
+        // away, and is lost if seal is killed first.
+        if let Some(record) = &self.record {
+            let mut started = record.clone();
+            started.outcome = Outcome::Started;
+            started.path = progress.database.clone();
+            started.pg_auth = progress.pg_auth;
+            started.ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.audit.record(&started).map_err(|_| {
+                Some(Refusal::new(
+                    ErrorCode::Internal,
+                    "08006",
+                    "could not write the audit record",
+                ))
+            })?;
+        }
+
         let mut hello = before_ok;
         hello.extend_from_slice(&wire::authentication_ok());
         // A caller that does not read would otherwise hold the session here, before

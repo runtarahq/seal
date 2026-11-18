@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures_util::{Stream, StreamExt, stream};
+use futures_util::{Stream, stream};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
@@ -66,7 +66,8 @@ pub struct ServiceLimits {
     pub rate_per_keyset: Rate,
     /// How many keysets' rate buckets to keep.
     pub max_tracked_keysets: usize,
-    /// How long a stream may take to send its first message.
+    /// How long a stream may take to send its first message, and how long a caller
+    /// may leave a piece of a response untaken.
     pub head_timeout: Duration,
 }
 
@@ -144,6 +145,7 @@ impl Service {
         if !self.per_caller.allow(&caller.name) {
             return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
         }
+        self.audit_ready()?;
         let keyset = KeysetId::new(request.get_ref().keyset.clone()).ok();
         // A name that is no keyset's is refused as malformed by the call itself.
         let allowed = keyset
@@ -160,6 +162,15 @@ impl Service {
             "administrative calls need an admin caller"
         };
         Err(self.denied(op, &caller, &keyset, reason))
+    }
+
+    /// Refuses while the audit sink cannot write, before a key is made or destroyed:
+    /// an administrative call is recorded once it is done, and destroying a keyset
+    /// cannot be undone for want of its record.
+    fn audit_ready(&self) -> Result<(), Status> {
+        self.audit
+            .ready()
+            .map_err(|_| refusal(ErrorCode::Internal, "the audit log cannot be written"))
     }
 
     /// Refuses a caller something it is not allowed, and leaves an audit record: what
@@ -241,6 +252,7 @@ impl Service {
             ));
         }
         let keyset = keyset.ok_or_else(|| bad("the keyset is not valid"))?;
+        self.audit_ready()?;
         let result = self.keyring.destroy(&keyset).await;
         self.audit_admin(
             "destroy_keyset",
@@ -479,11 +491,19 @@ fn presented(
 type SendStream = Pin<Box<dyn Stream<Item = Result<SendOut, Status>> + Send>>;
 type ConnectStream = Pin<Box<dyn Stream<Item = Result<ConnectOut, Status>> + Send>>;
 
-/// The response, as messages: the head, then body chunks of at most 64 KiB, then a
-/// trailer if the body failed. The stream permit is held until it ends.
+/// A response as the stream's messages: the head, the body in pieces, and a trailer if
+/// the body fails.
+///
+/// The body is read by a task of its own, not when the caller takes a message. Its
+/// deadlines are checked only as it is read, and its audit record is written only
+/// when it ends, so a caller that stopped taking messages would otherwise hold the
+/// stream, and keep the record of a request the provider has already had from being
+/// written, for as long as it liked. A message the caller does not take within
+/// `stall` ends the stream, and the record with it.
 fn response_stream(
     response: seal_broker::SendResponse,
     permit: OwnedSemaphorePermit,
+    stall: Duration,
 ) -> SendStream {
     let head = SendOut {
         f: Some(send_out::F::Head(ResponseHead {
@@ -508,42 +528,83 @@ fn response_stream(
                 .collect(),
         })),
     };
-    let body = stream::unfold(
-        (Some(response.body), Bytes::new(), permit),
-        |(body, mut pending, permit)| async move {
-            let mut body = body?;
-            loop {
-                if !pending.is_empty() {
-                    let chunk = pending.split_to(pending.len().min(MAX_BODY_CHUNK));
-                    let out = SendOut {
-                        f: Some(send_out::F::Body(chunk.to_vec())),
-                    };
-                    return Some((Ok(out), (Some(body), pending, permit)));
-                }
-                match body.frame().await {
-                    Some(Ok(frame)) => {
-                        if let Ok(data) = frame.into_data() {
-                            pending = data;
-                        }
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<SendOut, Status>>(1);
+    let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gave_up = Arc::clone(&stalled);
+    let mut body = response.body;
+    tokio::spawn(async move {
+        let _permit = permit;
+        // Whether the caller took the message in time. If not, or if it has gone, the
+        // body is dropped here, which ends the request and writes its record.
+        let offer = |message: SendOut| {
+            let sender = sender.clone();
+            let gave_up = Arc::clone(&gave_up);
+            async move {
+                match tokio::time::timeout(stall, sender.send(Ok(message))).await {
+                    Ok(sent) => sent.is_ok(),
+                    Err(_) => {
+                        gave_up.store(true, std::sync::atomic::Ordering::Release);
+                        false
                     }
-                    Some(Err(error)) => {
-                        let trailer = SendOut {
-                            f: Some(send_out::F::Trailer(Trailer {
-                                code: seal_proto::v1::ErrorCode::from_str_name(
-                                    error.code().as_str(),
-                                )
-                                .map_or(0, |code| code as i32),
-                                detail: error.detail().to_owned(),
-                            })),
-                        };
-                        return Some((Ok(trailer), (None, Bytes::new(), permit)));
-                    }
-                    None => return None,
                 }
             }
+        };
+        if !offer(head).await {
+            return;
+        }
+        loop {
+            let frame = tokio::select! {
+                frame = body.frame() => frame,
+                () = sender.closed() => return,
+            };
+            match frame {
+                Some(Ok(frame)) => {
+                    let Ok(mut pending) = frame.into_data() else {
+                        continue;
+                    };
+                    while !pending.is_empty() {
+                        let chunk = pending.split_to(pending.len().min(MAX_BODY_CHUNK));
+                        let out = SendOut {
+                            f: Some(send_out::F::Body(chunk.to_vec())),
+                        };
+                        if !offer(out).await {
+                            return;
+                        }
+                    }
+                }
+                Some(Err(error)) => {
+                    let trailer = SendOut {
+                        f: Some(send_out::F::Trailer(Trailer {
+                            code: seal_proto::v1::ErrorCode::from_str_name(error.code().as_str())
+                                .map_or(0, |code| code as i32),
+                            detail: error.detail().to_owned(),
+                        })),
+                    };
+                    offer(trailer).await;
+                    return;
+                }
+                None => return,
+            }
+        }
+    });
+    Box::pin(stream::unfold(
+        (receiver, stalled),
+        |(mut receiver, stalled)| async move {
+            match receiver.recv().await {
+                Some(item) => Some((item, (receiver, stalled))),
+                // The stream was ended on the caller, not by the response: say so,
+                // so that what it has is not taken for the whole of it.
+                None if stalled.swap(false, std::sync::atomic::Ordering::AcqRel) => Some((
+                    Err(refusal(
+                        ErrorCode::UpstreamTimeout,
+                        "the caller did not take the response in time",
+                    )),
+                    (receiver, stalled),
+                )),
+                None => None,
+            }
         },
-    );
-    Box::pin(stream::once(async move { Ok(head) }).chain(body))
+    ))
 }
 
 /// Runs a session, with the caller's messages as its input and its output as
@@ -681,7 +742,11 @@ impl Seal for Service {
             .send(send)
             .await
             .map_err(|error| broker_status(&error))?;
-        Ok(Response::new(response_stream(response, permit)))
+        Ok(Response::new(response_stream(
+            response,
+            permit,
+            self.head_timeout,
+        )))
     }
 
     async fn connect(
@@ -992,5 +1057,116 @@ mod tests {
         assert!(presented(sealed.clone(), stray).is_err());
         let bad_item = HashMap::from([("client_secret".to_owned(), String::new())]);
         assert!(presented(sealed, bad_item).is_err());
+    }
+    /// A sink that says it cannot write, as one does once it has missed a record.
+    #[derive(Default)]
+    struct NotReady {
+        records: std::sync::Mutex<Vec<AuditRecord>>,
+        not_ready: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuditSink for NotReady {
+        fn record(&self, record: &AuditRecord) -> Result<(), seal_broker::audit::AuditFailed> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+
+        fn ready(&self) -> Result<(), seal_broker::audit::AuditFailed> {
+            if self.not_ready.load(std::sync::atomic::Ordering::Acquire) {
+                Err(seal_broker::audit::AuditFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn no_key_is_made_or_destroyed_while_the_audit_log_cannot_be_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let kek = directory.path().join("kek");
+        crate::cli::create_wrapping_key(&kek).unwrap();
+        let config = crate::config::Config::parse(&format!(
+            r#"
+            [listen]
+            unix = "/unused"
+
+            [[callers]]
+            name = "ops"
+            unix_uid = 990
+            keysets = ["*"]
+            admin = true
+            destroy_keysets = true
+
+            [keys]
+            source = {{ dir = {keys:?} }}
+            wrap = {{ file = {kek:?} }}
+            lock_memory = "off"
+            "#,
+            keys = directory.path().join("keys"),
+        ))
+        .unwrap();
+        let (source, wrap) = crate::serve::key_parts(&config).unwrap();
+        let keyring = Keyring::new(source, wrap, config.keyring()).unwrap();
+        let audit = Arc::new(NotReady::default());
+        let sink: Arc<dyn AuditSink> = Arc::clone(&audit) as Arc<dyn AuditSink>;
+        let broker = Broker::new(
+            crate::serve::broker_config(&config).unwrap(),
+            Arc::new(keyring.clone()),
+            seal_broker::Environment::production(Arc::clone(&sink)).unwrap(),
+        )
+        .unwrap();
+        let service = Service::new(
+            Arc::new(broker),
+            keyring.clone(),
+            Arc::new(CallerMap::new(&config.callers)),
+            sink,
+            ServiceLimits {
+                max_concurrent_streams: 8,
+                rate_per_caller: config.limits.rate_per_caller,
+                rate_per_keyset: config.limits.rate_per_keyset,
+                max_tracked_keysets: 16,
+                head_timeout: Duration::from_secs(1),
+            },
+            ServiceInfo {
+                mode: "unix",
+                buffer_cap: 1 << 20,
+            },
+        );
+        let request = |keyset: &str| {
+            let mut request = Request::new(KeysetRequest {
+                keyset: keyset.to_owned(),
+            });
+            request.extensions_mut().insert(Identity::Uid(990));
+            request
+        };
+        let acme = KeysetId::new("acme").unwrap();
+        service.generate_keyset(request("acme")).await.unwrap();
+
+        audit
+            .not_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        let written = audit.records.lock().unwrap().len();
+        for refused in [
+            service.generate_keyset(request("other")).await.err(),
+            service.rotate(request("acme")).await.err(),
+            service.destroy_keyset(request("acme")).await.err(),
+        ] {
+            assert_eq!(refused.unwrap().code(), tonic::Code::Internal);
+        }
+        // Nothing was done, so there is nothing that went unrecorded.
+        assert_eq!(audit.records.lock().unwrap().len(), written);
+        assert_eq!(keyring.public_keys(&acme).await.unwrap().len(), 1);
+        assert!(
+            keyring
+                .public_keys(&KeysetId::new("other").unwrap())
+                .await
+                .is_err()
+        );
+
+        audit
+            .not_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        service.destroy_keyset(request("acme")).await.unwrap();
+        assert!(keyring.public_keys(&acme).await.is_err());
     }
 }
