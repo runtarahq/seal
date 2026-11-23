@@ -26,6 +26,9 @@ GitHub Security Advisories.
 - `seal-sealer`, a program that seals a secret under an offer outside a browser, and
   has no code that could open one. See
   [`docs/operations.md`](docs/operations.md#sealing-from-a-terminal).
+- A release now has, besides the image, the WebAssembly sealer as `seal-wasm.tar.gz` and
+  `seal-sealer` as static binaries for Linux on amd64 and arm64, each with a signed
+  statement of where it was built.
 - `limits.max_intake_lifetime`, how far ahead an intake envelope's time may be: `15m`
   by default.
 - An `admit` audit record has `policies`, the digest of the policy each field was to be

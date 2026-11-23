@@ -369,6 +369,47 @@ fn only_the_image_that_was_tested_is_published() {
 }
 
 #[test]
+fn only_the_files_that_were_checked_are_released() {
+    // As for the image: the release job takes each file by name, and attaches it only
+    // if it is the file the job that built and checked it saved.
+    let workflow = fs::read_to_string(workspace_root().join(".github/workflows/ci.yml")).unwrap();
+    let release = workflow.split("\n  release:\n").nth(1).unwrap();
+    assert!(!release.contains("pattern:"));
+    assert!(!release.contains("merge-multiple"));
+    // Only on a tag, and only once the image of the same commit is published.
+    assert!(release.contains("if: github.ref_type == 'tag'"));
+    assert!(release.contains("      - publish\n"));
+    let check = release.find("sha256sum --check --strict").unwrap();
+    let attest = release
+        .find("uses: actions/attest-build-provenance@")
+        .unwrap();
+    let create = release.find("gh release create").unwrap();
+    assert!(check < attest && attest < create);
+    for (artifact, output) in [
+        ("sealer-amd64", "needs.sealer.outputs.amd64"),
+        ("sealer-arm64", "needs.sealer.outputs.arm64"),
+        ("wasm", "needs.wasm.outputs.archive"),
+    ] {
+        assert!(
+            release.contains(&format!("name: {artifact}\n")),
+            "{artifact}"
+        );
+        assert!(release.contains(output), "{output}");
+    }
+    // The sealer is built by itself, so that it has none of the service's features, and
+    // the module that is packed is the one that was loaded and checked.
+    let sealer = workflow.split("\n  sealer:\n").nth(1).unwrap();
+    let sealer = sealer.split("\n  image:\n").next().unwrap();
+    assert!(sealer.contains("cargo build --release --locked --package seal-sealer --target"));
+    assert!(sealer.contains("seal-format feature \"open\""));
+    let wasm = workflow.split("\n  wasm:\n").nth(1).unwrap();
+    assert!(wasm.contains("scripts/package-wasm.sh seal-wasm.tar.gz"));
+    // No job but these two may write to the repository or sign for it.
+    assert_eq!(workflow.matches("contents: write").count(), 1);
+    assert_eq!(workflow.matches("id-token: write").count(), 2);
+}
+
+#[test]
 fn the_image_is_built_from_a_base_named_by_digest() {
     let dockerfile =
         fs::read_to_string(workspace_root().join("deploy/container/Dockerfile")).unwrap();
