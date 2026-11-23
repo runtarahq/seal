@@ -239,6 +239,8 @@ pub enum Operation {
     Verify,
     /// Sign a URL with it.
     Presign,
+    /// Have an intake envelope's fields sealed as stored values.
+    Admit,
 }
 
 impl Operation {
@@ -250,6 +252,7 @@ impl Operation {
             Self::Connect => "connect",
             Self::Verify => "verify",
             Self::Presign => "presign",
+            Self::Admit => "admit",
         }
     }
 }
@@ -504,6 +507,8 @@ pub struct LimitsConfig {
     pub max_stream_duration: Option<Interval>,
     /// The longest Postgres session.
     pub pg_max_session: Interval,
+    /// How far ahead an intake envelope's `not_after` may be.
+    pub max_intake_lifetime: Interval,
     /// How long requests under way may take to finish once seal is told to stop.
     /// Those still running then are ended, so that their audit records are written.
     pub shutdown_grace: Interval,
@@ -530,6 +535,7 @@ impl Default for LimitsConfig {
             buffered_total_timeout: Interval(Duration::from_secs(60)),
             max_stream_duration: None,
             pg_max_session: Interval(Duration::from_secs(8 * 3600)),
+            max_intake_lifetime: Interval(Duration::from_secs(15 * 60)),
             shutdown_grace: Interval(Duration::from_secs(30)),
             rate_per_caller: Rate {
                 count: 1000,

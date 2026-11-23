@@ -1,5 +1,6 @@
 //! seal as a service, over a Unix socket or mutual TLS.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,6 +26,7 @@ use tokio::net::{TcpStream, UnixStream};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::ServiceExt;
 
+use crate::AdmitRequest;
 use crate::{
     Body, ConnectRequest, ErrorCode, Info, Mode, PgStream, PresignRequest, PublicKeyInfo,
     SealClient, SealError, SendRequest, SendResponse, VerifyRequest, WrappedKey,
@@ -478,6 +480,51 @@ impl SealClient for GrpcClient {
             .await?;
         // Moved out, and the reply wipes what is left of itself.
         Ok(Zeroizing::new(std::mem::take(&mut reply.url)))
+    }
+
+    async fn admit(
+        &self,
+        request: AdmitRequest,
+    ) -> Result<BTreeMap<FieldName, Envelope>, SealError> {
+        let message = seal_proto::v1::AdmitRequest {
+            keyset: request.keyset.to_string(),
+            item: request.item.to_string(),
+            sealed: request
+                .envelope
+                .to_json()
+                .map_err(|_| transport("an envelope could not be written"))?,
+            outputs: request
+                .outputs
+                .into_iter()
+                .map(|(field, output)| {
+                    let policy = output
+                        .policy
+                        .canonical_json()
+                        .ok()
+                        .and_then(|json| String::from_utf8(json).ok())
+                        .ok_or_else(|| transport("a policy could not be written"))?;
+                    Ok(seal_proto::v1::AdmitOutput {
+                        field: field.to_string(),
+                        policy,
+                        optional: output.optional,
+                    })
+                })
+                .collect::<Result<_, SealError>>()?,
+        };
+        let reply = self
+            .call(|mut client| async move { client.admit(message).await })
+            .await?;
+        reply
+            .sealed
+            .into_iter()
+            .map(|(field, json)| {
+                let field = FieldName::new(field)
+                    .map_err(|_| transport("seal returned a field name that is not valid"))?;
+                let envelope = Envelope::from_json(json.as_bytes())
+                    .map_err(|_| transport("seal returned an envelope that is not valid"))?;
+                Ok((field, envelope))
+            })
+            .collect()
     }
 
     async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError> {

@@ -18,7 +18,7 @@ pub use zeroize::Zeroizing;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::combinators::UnsyncBoxBody;
-use seal_format::{Envelope, FieldName, ItemId, KeysetId};
+use seal_format::{Envelope, FieldName, ItemId, KeysetId, Policy};
 
 pub use grpc::{ClientTls, GrpcClient, mtls, unix};
 #[cfg(feature = "in-process")]
@@ -74,6 +74,12 @@ pub enum ErrorCode {
     PgAuthFailed,
     LimitExceeded,
     Internal,
+    /// An intake envelope is past its time, or a policy is no longer the one it names:
+    /// make a new offer and have the secret sealed again.
+    IntakeStale,
+    /// An intake envelope's secret is not an object of fields, lacks a field that is
+    /// not optional, or holds one too large to seal.
+    IntakeInvalid,
     /// seal could not be reached, or did not say why.
     Transport,
 }
@@ -98,6 +104,8 @@ impl ErrorCode {
         ("PG_AUTH_FAILED", Self::PgAuthFailed),
         ("LIMIT_EXCEEDED", Self::LimitExceeded),
         ("INTERNAL", Self::Internal),
+        ("INTAKE_STALE", Self::IntakeStale),
+        ("INTAKE_INVALID", Self::IntakeInvalid),
         ("TRANSPORT", Self::Transport),
     ];
 
@@ -242,6 +250,30 @@ pub struct VerifyRequest {
     pub message: Bytes,
     /// The code that came with the message, decoded to bytes.
     pub mac: Vec<u8>,
+}
+
+/// One field to have sealed from an intake envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmitOutput {
+    /// The policy to seal it under: the one the application derived when it made the
+    /// offer, derived again. seal refuses any other.
+    pub policy: Policy,
+    /// Whether the field may be absent, such as one the user left blank. An absent
+    /// optional field has no value in the answer.
+    pub optional: bool,
+}
+
+/// An intake envelope to admit: secrets sealed where they were entered, under an
+/// [`Offer`](seal_format::Offer). It holds no credentials the application can read.
+pub struct AdmitRequest {
+    /// The keyset the envelope is sealed to.
+    pub keyset: KeysetId,
+    /// The record the envelope is bound to.
+    pub item: ItemId,
+    /// The intake envelope.
+    pub envelope: Envelope,
+    /// The fields to seal, by name.
+    pub outputs: BTreeMap<FieldName, AdmitOutput>,
 }
 
 /// A Postgres session to open through seal. It holds no credentials.
@@ -409,6 +441,17 @@ pub trait SealClient: Send + Sync {
     /// signature but cannot make one. A code that does not match is `Ok(false)`.
     async fn verify(&self, request: VerifyRequest) -> Result<bool, SealError>;
 
+    /// Has the fields of an intake envelope sealed as values to store, each bound to
+    /// the envelope's record and to the field of its name. seal seals a field only
+    /// under the policy the envelope names for it, so the policies here must be the
+    /// ones the offer was made from. Either every field asked for comes back, or the
+    /// call fails. [`ErrorCode::IntakeStale`] means the secret has to be sealed again
+    /// under a new offer.
+    async fn admit(
+        &self,
+        request: AdmitRequest,
+    ) -> Result<BTreeMap<FieldName, Envelope>, SealError>;
+
     /// Opens a Postgres session. seal logs in with the sealed credential; the stream
     /// then carries the session.
     async fn connect_pg(&self, request: ConnectRequest) -> Result<PgStream, SealError>;
@@ -422,7 +465,8 @@ pub trait SealClient: Send + Sync {
     /// Administrative: adds a key, which becomes current.
     async fn rotate(&self, keyset: &KeysetId) -> Result<WrappedKey, SealError>;
 
-    /// Administrative: a keyset's public keys, oldest first.
+    /// A keyset's public keys, oldest first: the last is the one to seal to. Over gRPC
+    /// the caller must be allowed to use the keyset, or administer it.
     async fn public_keys(&self, keyset: &KeysetId) -> Result<Vec<PublicKeyInfo>, SealError>;
 
     /// Deletes every key of a keyset from the key source, when a tenant leaves. This

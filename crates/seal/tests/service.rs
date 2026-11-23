@@ -195,10 +195,21 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
             .code,
         ErrorCode::CallerDenied
     );
+    // The public keys of a keyset it may use are its to read, though not another's.
     assert_eq!(
         instance
             .client
             .public_keys(&keyset)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        ErrorCode::KeysetUnknown
+    );
+    assert_eq!(
+        instance
+            .client
+            .public_keys(&support::keyset())
             .await
             .err()
             .unwrap()
@@ -219,6 +230,7 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
     let records = instance.setup.audit_records();
     let refused: Vec<(&str, &str)> = records
         .iter()
+        .filter(|record| record["code"] != "KEYSET_UNKNOWN")
         .map(|record| {
             assert_eq!(record["outcome"], "refused");
             assert_eq!(record["code"], "CALLER_DENIED");
@@ -236,7 +248,7 @@ async fn a_caller_is_limited_to_its_keysets_and_admin_calls_need_admin() {
             ("verify", "acme"),
             ("presign", "acme"),
             ("generate", "other"),
-            ("public_keys", "other"),
+            ("public_keys", "acme"),
             ("destroy_keyset", "other"),
         ]
     );
@@ -289,6 +301,23 @@ async fn a_caller_is_limited_to_the_operations_it_lists() {
     };
     let error = instance.client.presign(presign).await.err().unwrap();
     assert_eq!(error.code, ErrorCode::CallerDenied);
+    let admit = seal_client::AdmitRequest {
+        keyset: keyset(),
+        item: item(),
+        envelope: instance
+            .setup
+            .seal("intake", b"{}", &token_policy(&provider))
+            .await,
+        outputs: std::collections::BTreeMap::from([(
+            field("token"),
+            seal_client::AdmitOutput {
+                policy: token_policy(&provider),
+                optional: false,
+            },
+        )]),
+    };
+    let error = instance.client.admit(admit).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
 
     // The call it lists is answered: a signature that is wrong is `false`, not refused.
     let webhook =
@@ -318,7 +347,85 @@ async fn a_caller_is_limited_to_the_operations_it_lists() {
             record["op"].as_str().unwrap()
         })
         .collect();
-    assert_eq!(refused, ["send", "connect", "presign"]);
+    assert_eq!(refused, ["send", "connect", "presign", "admit"]);
+}
+
+/// An application needs no administrative rights to take in a secret: the public key of
+/// a keyset it may use is its to read, and admitting is an operation like sending.
+#[tokio::test]
+async fn a_caller_that_is_not_an_admin_makes_an_offer_and_admits() {
+    let provider = MockProvider::plain().await;
+    let uid = nix::unistd::getuid().as_raw();
+    let callers = format!("[[callers]]\nname = \"app\"\nunix_uid = {uid}\nkeysets = [\"acme\"]\n");
+    let options = Options {
+        callers: Some(callers),
+        ..Options::default()
+    };
+    let instance = start(Mode::Unix, options, &[&provider]).await;
+    let policy = token_policy(&provider);
+    let token = field("token");
+
+    let keys = instance.client.public_keys(&keyset()).await.unwrap();
+    let key = keys.last().unwrap();
+    let (kid, public) = instance.setup.current_key().await;
+    assert_eq!(
+        (key.kid.clone(), key.public.clone()),
+        (kid.to_string(), public.to_base64url())
+    );
+    let record = instance.setup.audit_records().pop().unwrap();
+    assert_eq!(
+        (&record["op"], &record["caller"], &record["outcome"]),
+        (&json!("public_keys"), &json!("app"), &json!("ok"))
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let offer = seal_format::Offer::for_intake(
+        seal_format::PublicKey::from_base64url(&key.public).unwrap(),
+        seal_format::KeyId::new(key.kid.clone()).unwrap(),
+        keyset(),
+        item(),
+        &std::collections::BTreeMap::from([(token.clone(), policy.clone())]),
+        now + 60,
+    )
+    .unwrap();
+    instance
+        .setup
+        .canaries
+        .lock()
+        .unwrap()
+        .register(&seal_testkit::canary::Canary::from_value(
+            "SEALCANARY-entered",
+        ));
+    let members = std::collections::BTreeMap::from([(
+        token.clone(),
+        seal_format::intake::Value::Text("SEALCANARY-entered"),
+    )]);
+    let envelope = offer.seal(&seal_format::intake::object(&members)).unwrap();
+
+    let sealed = instance
+        .client
+        .admit(seal_client::AdmitRequest {
+            keyset: keyset(),
+            item: item(),
+            envelope,
+            outputs: std::collections::BTreeMap::from([(
+                token.clone(),
+                seal_client::AdmitOutput {
+                    policy,
+                    optional: false,
+                },
+            )]),
+        })
+        .await
+        .unwrap();
+    let (secret, _) = instance.setup.open("token", &sealed[&token]).await;
+    assert_eq!(secret, b"SEALCANARY-entered");
+
+    // It still makes no keys.
+    let error = instance.client.rotate(&keyset()).await.err().unwrap();
+    assert_eq!(error.code, ErrorCode::CallerDenied);
 }
 
 /// Making keysets and ending them are separate permissions: an admin caller cannot

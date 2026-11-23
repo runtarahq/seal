@@ -17,11 +17,15 @@ service Seal {
   // A presigned URL for one object, where the value's rule allows it. What comes back
   // is a credential the caller can copy: it works without seal until it expires.
   rpc Presign(PresignRequest) returns (PresignReply);
+  // Seals the fields of an intake envelope, each under a policy the envelope names by
+  // its digest: secrets sealed where they were entered become stored values, and the
+  // caller holds none of them. Either every field asked for is sealed, or none is.
+  rpc Admit(AdmitRequest) returns (AdmitReply);
   // Administrative: makes a keyset's first key.
   rpc GenerateKeyset(KeysetRequest) returns (WrappedKeyReply);
   // Administrative: adds a key, which becomes current.
   rpc Rotate(KeysetRequest) returns (WrappedKeyReply);
-  // Administrative: a keyset's public keys.
+  // A keyset's public keys, for a caller that may use the keyset or administers it.
   rpc PublicKeys(KeysetRequest) returns (PublicKeysReply);
   // Deletes every key of a keyset from the key source, which cannot be undone: nothing
   // sealed to it opens again. Only for a caller that may destroy keysets and may use
@@ -163,6 +167,31 @@ message PresignReply {
   string url = 1;
 }
 
+message AdmitRequest {
+  // The keyset the envelope is sealed to. The values stay in it.
+  string keyset = 1;
+  // The record the envelope is bound to. The values are bound to it.
+  string item = 2;
+  // The intake envelope's JSON.
+  string sealed = 3;
+  // The fields to seal. A field named twice is refused.
+  repeated AdmitOutput outputs = 4;
+}
+
+message AdmitOutput {
+  // The field's name in the envelope's object, and the field its value is sealed as.
+  string field = 1;
+  // The policy's JSON. Its digest must be the one the envelope names for the field.
+  string policy = 2;
+  // Whether the field may be absent, in which case the reply has no value for it.
+  bool optional = 3;
+}
+
+message AdmitReply {
+  // Field name to envelope JSON.
+  map<string, string> sealed = 1;
+}
+
 message KeysetRequest {
   string keyset = 1;
 }
@@ -217,4 +246,6 @@ enum ErrorCode {
   PG_AUTH_FAILED = 16;
   LIMIT_EXCEEDED = 17;
   INTERNAL = 18;
+  INTAKE_STALE = 19;
+  INTAKE_INVALID = 20;
 }

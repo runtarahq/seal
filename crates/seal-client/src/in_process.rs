@@ -2,15 +2,17 @@
 //! the only gain is that plaintext stays inside seal's code, so it does not leak into
 //! logs, errors or responses by accident.
 
+use std::collections::BTreeMap;
 use std::sync::Once;
 use zeroize::Zeroizing;
 
 use async_trait::async_trait;
 use http_body_util::BodyExt;
 use seal_broker::{Broker, BrokerError};
-use seal_format::KeysetId;
+use seal_format::{Envelope, FieldName, KeysetId};
 use seal_keys::Keyring;
 
+use crate::AdmitRequest;
 use crate::{
     ConnectRequest, ErrorCode, Info, Mode, PgStream, PresignRequest, PublicKeyInfo, SealClient,
     SealError, SendRequest, SendResponse, VerifyRequest, WrappedKey,
@@ -148,6 +150,32 @@ impl SealClient for InProcessClient {
                 method: request.method,
                 url: request.url,
                 expires_s: request.expires_s,
+            })
+            .await
+            .map_err(|error| from_broker(&error))
+    }
+
+    async fn admit(
+        &self,
+        request: AdmitRequest,
+    ) -> Result<BTreeMap<FieldName, Envelope>, SealError> {
+        self.broker
+            .admit(seal_broker::AdmitRequest {
+                caller: "in-process".to_owned(),
+                keyset: request.keyset,
+                item: request.item,
+                envelope: request.envelope,
+                outputs: request
+                    .outputs
+                    .into_iter()
+                    .map(|(field, output)| {
+                        let output = seal_broker::AdmitOutput {
+                            policy: output.policy,
+                            optional: output.optional,
+                        };
+                        (field, output)
+                    })
+                    .collect(),
             })
             .await
             .map_err(|error| from_broker(&error))
