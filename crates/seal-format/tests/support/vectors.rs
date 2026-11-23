@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use seal_format::id::KeyId;
+use seal_format::intake::{self, INTAKE_FIELD};
 use seal_format::policy::builder::{self, JwtOptions, OAuthClientAuth, OAuthConfig, PartSource};
 use seal_format::policy::{
-    AzureService, JwtAlg, JwtAudience, JwtClaims, JwtHeader, PayloadMode, ResponseFormat,
+    AzureService, HmacHash, JwtAlg, JwtAudience, JwtClaims, JwtHeader, PayloadMode, ResponseFormat,
 };
 use seal_format::seal::{associated_data, seal_with_ephemeral_ikm};
 use seal_format::{Binding, FieldName, ItemId, KeysetId, Policy, PrivateKey};
@@ -153,7 +154,74 @@ fn valid_policies() -> Vec<(&'static str, Policy)> {
             )
             .unwrap(),
         ),
+        ("intake naming two outputs", intake_policy()),
     ]
+}
+
+/// What an intake envelope in the vectors holds: each field's secret, whether it is
+/// text, and the policy it is to be sealed under.
+fn intake_outputs() -> Vec<(&'static str, Vec<u8>, bool, Policy)> {
+    vec![
+        (
+            "api_key",
+            b"sk-live \"quoted\" \\ and\ttabbed\n".to_vec(),
+            true,
+            builder::bearer("https://api.example.com/v2/").unwrap(),
+        ),
+        (
+            "signing_secret",
+            vec![0x00, 0xfb, 0xff, 0xfe, 0x3e, 0x3f, 0x80],
+            false,
+            builder::webhook_hmac(HmacHash::Sha256).unwrap(),
+        ),
+    ]
+}
+
+/// A time for vectors only: 2027-01-15T08:00:00Z.
+const INTAKE_NOT_AFTER: u64 = 1_800_000_000;
+
+fn intake_policy() -> Policy {
+    let outputs = intake_outputs()
+        .into_iter()
+        .map(|(name, _, _, policy)| (FieldName::new(name).unwrap(), policy))
+        .collect();
+    Policy::for_intake(&outputs, INTAKE_NOT_AFTER).unwrap()
+}
+
+/// The secret of the intake envelope: one object of every field.
+fn intake_object() -> Vec<u8> {
+    let outputs = intake_outputs();
+    let members = outputs
+        .iter()
+        .map(|(name, secret, is_text, _)| {
+            let value = if *is_text {
+                intake::Value::Text(std::str::from_utf8(secret).unwrap())
+            } else {
+                intake::Value::Bytes(secret)
+            };
+            (FieldName::new(*name).unwrap(), value)
+        })
+        .collect();
+    intake::object(&members).to_vec()
+}
+
+/// What admitting the intake envelope gives: for each field, the value seal makes. A
+/// real one is sealed with a new ephemeral key, so only its binding and plaintext are
+/// fixed.
+fn admitted() -> Value {
+    intake_outputs()
+        .iter()
+        .map(|(name, secret, _, policy)| {
+            let value = json!({
+                "field": name,
+                "secret_hex": hex(secret),
+                "policy_digest": policy.digest().unwrap().to_base64url(),
+                "plaintext": plaintext_of(policy, secret),
+            });
+            ((*name).to_owned(), value)
+        })
+        .collect::<serde_json::Map<String, Value>>()
+        .into()
 }
 
 /// One rule's worth of JSON that a validator must refuse, by reason.
@@ -169,6 +237,27 @@ fn invalid_policies() -> Vec<(&'static str, Value)> {
     };
     vec![
         ("no rules", json!({ "rules": [] })),
+        (
+            "intake with a rule beside it",
+            json!({
+                "rules": [{ "destination": https, "inject": bearer }],
+                "intake": {
+                    "outputs": { "api_key": "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU" },
+                    "not_after": INTAKE_NOT_AFTER
+                }
+            }),
+        ),
+        (
+            "intake naming no outputs",
+            json!({ "intake": { "outputs": {}, "not_after": INTAKE_NOT_AFTER } }),
+        ),
+        (
+            "intake naming a policy itself, not its digest",
+            json!({ "intake": {
+                "outputs": { "api_key": { "rules": [{ "destination": https, "inject": bearer }] } },
+                "not_after": INTAKE_NOT_AFTER
+            } }),
+        ),
         (
             "unknown field",
             json!({ "rules": [{ "destination": https, "inject": bearer, "extra": 1 }] }),
@@ -264,6 +353,8 @@ struct Case {
     secret: Vec<u8>,
     policy: Policy,
     ephemeral_ikm: [u8; 32],
+    /// For an intake envelope: what admitting it gives.
+    admitted: Option<Value>,
 }
 
 fn cases() -> Vec<Case> {
@@ -278,6 +369,7 @@ fn cases() -> Vec<Case> {
             secret: "sk-live-example".as_bytes().to_vec(),
             policy: bearer.clone(),
             ephemeral_ikm: [0x11; 32],
+            admitted: None,
         },
         Case {
             name: "binary secret covering every base64url character class",
@@ -288,6 +380,7 @@ fn cases() -> Vec<Case> {
             secret: vec![0x00, 0xfb, 0xff, 0xfe, 0x3e, 0x3f, 0x80],
             policy: bearer.clone(),
             ephemeral_ikm: [0x22; 32],
+            admitted: None,
         },
         Case {
             name: "empty secret",
@@ -298,6 +391,7 @@ fn cases() -> Vec<Case> {
             secret: Vec::new(),
             policy: bearer,
             ephemeral_ikm: [0x33; 32],
+            admitted: None,
         },
         Case {
             name: "identifiers using the full alphabet, with a rotating OAuth policy",
@@ -308,6 +402,18 @@ fn cases() -> Vec<Case> {
             secret: b"client-secret-example".to_vec(),
             policy: oauth_policy(),
             ephemeral_ikm: [0x44; 32],
+            admitted: None,
+        },
+        Case {
+            name: "intake envelope: an object of fields, under a policy naming each field's policy",
+            keyset: "acme",
+            kid: "k3",
+            item: "c_123",
+            field: INTAKE_FIELD,
+            secret: intake_object(),
+            policy: intake_policy(),
+            ephemeral_ikm: [0x55; 32],
+            admitted: Some(admitted()),
         },
     ]
 }
@@ -344,7 +450,7 @@ fn envelope_vectors() -> Value {
                 &case.ephemeral_ikm,
             )
             .unwrap();
-            json!({
+            let mut vector = json!({
                 "name": case.name,
                 "keyset": case.keyset,
                 "kid": case.kid,
@@ -362,7 +468,11 @@ fn envelope_vectors() -> Value {
                     { "change": "kid", "value": "other-kid" },
                     { "change": "private_key_hex", "value": hex(&OTHER_PRIVATE_KEY) },
                 ],
-            })
+            });
+            if let Some(admitted) = &case.admitted {
+                vector["admitted"] = admitted.clone();
+            }
+            vector
         })
         .collect();
 

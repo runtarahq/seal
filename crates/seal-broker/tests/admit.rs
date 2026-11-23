@@ -722,3 +722,37 @@ async fn nothing_is_admitted_while_the_audit_log_cannot_be_written() {
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::Internal);
 }
+
+/// The published vector of an intake envelope reads as the fields it says it holds.
+#[test]
+fn the_published_intake_vector_reads_as_its_fields() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vectors/envelope.json");
+    let vectors: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let unhex = |text: &str| -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
+            .collect()
+    };
+    let cases: Vec<&serde_json::Value> = vectors["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case.get("admitted").is_some())
+        .collect();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let members =
+            seal_broker::intake::parse(&unhex(case["secret_hex"].as_str().unwrap())).unwrap();
+        let admitted = case["admitted"].as_object().unwrap();
+        assert_eq!(members.len(), admitted.len());
+        for (name, expected) in admitted {
+            assert_eq!(
+                members[&field(name)].expose(<[u8]>::to_vec),
+                unhex(expected["secret_hex"].as_str().unwrap()),
+                "{name}"
+            );
+        }
+    }
+}

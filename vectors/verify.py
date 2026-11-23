@@ -171,6 +171,29 @@ def check_case(vectors, case):
         raise AssertionError(f"opened with a changed {change['change']}")
 
 
+def check_intake(case):
+    """An intake envelope: its secret is an object of fields, and its policy names the
+    policy each field is to be sealed under by the SHA-256 of its canonical JSON."""
+    named = json.loads(case["plaintext"])["policy"]["intake"]["outputs"]
+    members = json.loads(bytes.fromhex(case["secret_hex"]))
+    assert case["field"] == "intake"
+    assert set(named) == set(members) == set(case["admitted"])
+    for field, admitted in case["admitted"].items():
+        # A string is its UTF-8 bytes; bytes that are not text are {"b64": "..."}.
+        value = members[field]
+        secret = value.encode() if isinstance(value, str) else unb64url(value["b64"])
+        assert secret.hex() == admitted["secret_hex"], f"{field}: the secret differs"
+
+        # What seal makes of the field: the same plaintext as any sealed value, under
+        # the policy the envelope names.
+        plaintext = admitted["plaintext"]
+        before, after = '{"policy":', ',"secret":{"b64":"' + b64url(secret) + '"}}'
+        assert plaintext.startswith(before) and plaintext.endswith(after)
+        canonical = plaintext[len(before) : -len(after)]
+        digest = b64url(hashlib.sha256(canonical.encode()).digest())
+        assert digest == admitted["policy_digest"] == named[field], f"{field}: the digest differs"
+
+
 def main():
     path = pathlib.Path(__file__).with_name("envelope.json")
     vectors = json.loads(path.read_text())
@@ -178,6 +201,8 @@ def main():
     assert public_bytes(bytes.fromhex(vectors["private_key_hex"])).hex() == vectors["public_key_hex"]
     for case in vectors["cases"]:
         check_case(vectors, case)
+        if "admitted" in case:
+            check_intake(case)
         print(f"ok: {case['name']}")
     print(f"verified the RFC 9180 vector and {len(vectors['cases'])} cases")
 
