@@ -39,9 +39,24 @@ pub struct Binding<'a> {
     pub field: &'a FieldName,
 }
 
-/// A keyset's public key. Sealing needs nothing else.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A keyset's public key. Sealing needs nothing else. In JSON it is base64url.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct PublicKey([u8; KEY_BYTES]);
+
+impl TryFrom<String> for PublicKey {
+    type Error = FormatError;
+
+    fn try_from(value: String) -> Result<Self, FormatError> {
+        Self::from_base64url(&value)
+    }
+}
+
+impl From<PublicKey> for String {
+    fn from(value: PublicKey) -> Self {
+        value.to_base64url()
+    }
+}
 
 impl PublicKey {
     /// Wraps a public key's bytes.

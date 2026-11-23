@@ -260,7 +260,7 @@ fn a_policy_may_verify_instead_of_having_rules() {
     }
     assert_eq!(
         parse(&json!({})).unwrap_err(),
-        FormatError::InvalidPolicy("a policy needs a rule or a verification")
+        FormatError::InvalidPolicy("a policy needs a rule, a verification or an intake")
     );
     // A definition's rules are what a sealed token gets, so it always has some.
     parse(&json!({
@@ -1509,4 +1509,139 @@ fn a_rule_cannot_require_a_field_it_injects_or_require_on_postgres() {
         "require_form": { "a": ["b"] }
     }] }));
     pg.unwrap_err();
+}
+
+fn digest_of(policy: &Value) -> String {
+    parse(policy).unwrap().digest().unwrap().to_base64url()
+}
+
+fn intake(change: impl FnOnce(&mut Value)) -> Result<Policy, FormatError> {
+    let mut policy = json!({ "intake": {
+        "outputs": { "api_key": digest_of(&json!({ "rules": [bearer_rule()] })) },
+        "not_after": 1_800_000_000_u64
+    } });
+    change(&mut policy);
+    parse(&policy)
+}
+
+#[test]
+fn an_intake_policy_names_outputs_and_a_time_and_nothing_else() {
+    let policy = intake(|_| {}).unwrap();
+    let named = policy.intake.as_ref().unwrap();
+    assert_eq!(named.not_after, 1_800_000_000);
+    assert_eq!(named.outputs.len(), 1);
+    // The canonical form reads back as the same policy.
+    assert_eq!(
+        Policy::from_json(&policy.canonical_json().unwrap()).unwrap(),
+        policy
+    );
+
+    let alone = FormatError::InvalidPolicy("an intake policy has nothing but its intake");
+    assert_eq!(
+        intake(|policy| policy["rules"] = json!([bearer_rule()])).unwrap_err(),
+        alone
+    );
+    assert_eq!(
+        intake(|policy| policy["shared"] = json!(true)).unwrap_err(),
+        alone
+    );
+    assert_eq!(
+        intake(|policy| policy["verify"] = json!({ "hmac": { "hash": "sha256" } })).unwrap_err(),
+        alone
+    );
+    assert_eq!(
+        intake(|policy| policy["definitions"] = json!({ "p": { "rules": [bearer_rule()] } }))
+            .unwrap_err(),
+        alone
+    );
+}
+
+#[test]
+fn an_intake_refuses_what_it_cannot_hold_to() {
+    assert_eq!(
+        intake(|policy| policy["intake"]["outputs"] = json!({})).unwrap_err(),
+        FormatError::InvalidPolicy("an intake names no outputs")
+    );
+    let digest = digest_of(&json!({ "rules": [bearer_rule()] }));
+    let many = |count: usize| -> Value {
+        (0..count)
+            .map(|index| (format!("f{index}"), json!(digest)))
+            .collect::<serde_json::Map<String, Value>>()
+            .into()
+    };
+    intake(|policy| policy["intake"]["outputs"] = many(MAX_INTAKE_OUTPUTS)).unwrap();
+    assert_eq!(
+        intake(|policy| policy["intake"]["outputs"] = many(MAX_INTAKE_OUTPUTS + 1)).unwrap_err(),
+        FormatError::InvalidPolicy("an intake names too many outputs")
+    );
+    for bad in [
+        json!({ "outputs": { "api_key": digest } }),
+        json!({ "not_after": 1 }),
+        json!({ "outputs": { "api_key": digest }, "not_after": -1 }),
+        json!({ "outputs": { "api_key": digest }, "not_after": "1" }),
+        json!({ "outputs": { "api_key": digest }, "not_after": 1, "context": "x" }),
+        json!({ "outputs": { "api key": digest }, "not_after": 1 }),
+        json!({ "outputs": { "api_key": "" }, "not_after": 1 }),
+        json!({ "outputs": { "api_key": &digest[1..] }, "not_after": 1 }),
+        json!({ "outputs": { "api_key": format!("{digest}=") }, "not_after": 1 }),
+        json!({ "outputs": { "api_key": format!("{digest}A") }, "not_after": 1 }),
+        json!({ "outputs": { "api_key": digest.replace(['-', '_'], "+") + "+" }, "not_after": 1 }),
+        json!({ "outputs": { "api_key": { "rules": [bearer_rule()] } }, "not_after": 1 }),
+    ] {
+        assert!(
+            intake(|policy| policy["intake"] = bad.clone()).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn a_digest_is_of_the_canonical_form_and_tells_policies_apart() {
+    let rule = bearer_rule();
+    let spaced = format!("{{ \"rules\" : [ {rule} ] }}");
+    let policy = Policy::from_json(spaced.as_bytes()).unwrap();
+    assert_eq!(
+        policy.digest().unwrap().to_base64url(),
+        digest_of(&json!({ "rules": [rule] }))
+    );
+    let mut other = bearer_rule();
+    other["destination"]["host"] = json!("api.example.org");
+    assert_ne!(
+        policy.digest().unwrap(),
+        parse(&json!({ "rules": [other] }))
+            .unwrap()
+            .digest()
+            .unwrap()
+    );
+    // Whether a value is shared is part of what is named.
+    assert_ne!(
+        policy.digest().unwrap(),
+        parse(&json!({ "rules": [bearer_rule()], "shared": true }))
+            .unwrap()
+            .digest()
+            .unwrap()
+    );
+    let text = policy.digest().unwrap().to_base64url();
+    assert_eq!(text.len(), 43);
+    assert_eq!(
+        PolicyDigest::from_base64url(&text).unwrap(),
+        policy.digest().unwrap()
+    );
+}
+
+#[test]
+fn an_intake_is_built_from_its_outputs_and_none_is_an_intake() {
+    let api_key = FieldName::new("api_key").unwrap();
+    let bearer = parse(&json!({ "rules": [bearer_rule()] })).unwrap();
+    let built =
+        Policy::for_intake(&BTreeMap::from([(api_key.clone(), bearer.clone())]), 7).unwrap();
+    assert_eq!(
+        built.intake.as_ref().unwrap().outputs[&api_key],
+        bearer.digest().unwrap()
+    );
+    assert_eq!(
+        Policy::for_intake(&BTreeMap::from([(api_key, built)]), 7).unwrap_err(),
+        FormatError::InvalidPolicy("an intake's output cannot be an intake")
+    );
+    Policy::for_intake(&BTreeMap::new(), 7).unwrap_err();
 }

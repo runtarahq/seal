@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::id::FieldName;
 
 use super::{
-    AwsScope, Definition, Destination, Inject, JwtAudience, JwtClaims, JwtHeader, MAX_POLICY_BYTES,
-    Part, PgTls, Policy, ResponseFormat, Rule, RuleLimits, Scheme, SealResponse,
+    AwsScope, Definition, Destination, Inject, JwtAudience, JwtClaims, JwtHeader,
+    MAX_INTAKE_OUTPUTS, MAX_POLICY_BYTES, Part, PgTls, Policy, ResponseFormat, Rule, RuleLimits,
+    Scheme, SealResponse,
 };
 use crate::error::FormatError;
 use crate::id::PolicyName;
@@ -56,10 +57,27 @@ pub(super) fn policy(policy: &Policy) -> Result<(), FormatError> {
         policy.definitions.len() <= MAX_DEFINITIONS,
         "too many definitions",
     )?;
+    // An intake envelope's secrets go only where its outputs say, through `admit`, so
+    // the policy itself allows nothing.
+    if let Some(intake) = &policy.intake {
+        require(
+            policy.rules.is_empty()
+                && policy.definitions.is_empty()
+                && !policy.shared
+                && policy.verify.is_none(),
+            "an intake policy has nothing but its intake",
+        )?;
+        require(!intake.outputs.is_empty(), "an intake names no outputs")?;
+        require(
+            intake.outputs.len() <= MAX_INTAKE_OUTPUTS,
+            "an intake names too many outputs",
+        )?;
+        return Ok(());
+    }
     // A policy that only verifies sends its secret nowhere, and has no rules.
     require(
         !policy.rules.is_empty() || policy.verify.is_some(),
-        "a policy needs a rule or a verification",
+        "a policy needs a rule, a verification or an intake",
     )?;
     if !policy.rules.is_empty() {
         rules(&policy.rules, &policy.definitions)?;

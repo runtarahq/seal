@@ -65,6 +65,12 @@ jobs:
         run: |
           cargo build --release --locked --package seal --features aws-kms --target x86_64-unknown-linux-musl
           file target/x86_64-unknown-linux-musl/release/seal | tee /dev/stderr | grep -q "static-pie linked"
+      # Built by itself, so that it is compiled without the opening code the service has.
+      - name: The sealer is static, and has no opening code
+        run: |
+          cargo build --release --locked --package seal-sealer --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/seal-sealer | tee /dev/stderr | grep -q "static-pie linked"
+          ! cargo tree --locked --package seal-sealer --edges features,no-dev | grep -F 'seal-format feature "open"'
 
   # The container image, started by the same tests in place of the binary they built, on
   # each architecture it is published for.
@@ -193,7 +199,7 @@ jobs:
         run: cargo test --package seal-format --features wasm --target wasm32-unknown-unknown --test wasm --locked
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-      - name: Seal in WebAssembly and open natively
+      - name: Seal in WebAssembly, open natively, and admit an intake envelope
         run: scripts/wasm-roundtrip.sh
 
   vectors:
@@ -227,6 +233,7 @@ jobs:
           - pg_auth_messages
           - proto_send_head
           - jwt_claims
+          - intake_object
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -6,9 +6,11 @@ flows, and [`operations.md`](operations.md) running seal itself.
 
 - **Store envelopes, not secrets.** Keep each secret field's envelope where the
   plaintext used to be; keep non-secret fields in plaintext.
-- **Know the item id before sealing.** Allocate the record's id first, then seal, in
-  the browser with the WASM sealer where possible. The envelope is bound to the item,
-  so it cannot be moved to another record.
+- **Know the item id before sealing.** Allocate the record's id first, then seal. The
+  envelope is bound to the item, so it cannot be moved to another record.
+- **Do not receive a secret readable where you can avoid it.** Have it sealed where it
+  is entered, as [below](#taking-in-a-secret-without-holding-it), and refuse one that
+  arrives readable.
 - **Build policies with the builder**, from the integration's definition: base URL,
   auth scheme, token endpoint. The application owns the mapping from its connection
   types to policies.
@@ -23,7 +25,8 @@ flows, and [`operations.md`](operations.md) running seal itself.
 - **Do not log envelopes in bulk.** They are not secret in the cryptographic sense, but
   anyone who can call seal can use them.
 - **Treat seal's error codes as the interface.** `POLICY_DENIED` is a bug or an attack,
-  not a retryable error; `KEYS_UNAVAILABLE` and `UPSTREAM_*` may be retried. The codes
+  not a retryable error; `KEYS_UNAVAILABLE` and `UPSTREAM_*` may be retried;
+  `INTAKE_STALE` means the secret has to be sealed again under a new offer. The codes
   are in [`protocol.md`](protocol.md).
 - **Pick the mode deliberately, and surface it.** In-process mode means the application
   can read every credential.
@@ -49,3 +52,53 @@ flows, and [`operations.md`](operations.md) running seal itself.
 - **OAuth callbacks land on the application**, not on seal, which need not be reachable
   from the internet. The authorization code alone is not enough to redeem: that needs
   the sealed client secret and the PKCE verifier, and the tokens come back sealed.
+
+## Taking in a secret without holding it
+
+An application that receives a secret readable holds it for that long, and so does
+whatever carried it there: a proxy, a request log. Sealing in the browser alone does not
+fix that, because whoever seals chooses the policy, and the application cannot read what
+was chosen. So the application chooses first, and seal holds the sealer to it:
+
+1. **The page sends the fields that are not secret**, such as a base URL, when the form
+   is submitted. Nothing changes for the person filling it in.
+2. **The application answers with an offer.** It allocates the record's id, derives the
+   policy of each secret field as it always has, reads the keyset's current public key
+   (`public_keys`, which it may cache), and calls `Offer::for_intake` with a `not_after`
+   a few minutes ahead. The offer is JSON with nothing secret in it: `public_key`, `kid`,
+   `keyset`, `item`, `field` and `policy`.
+3. **The page seals the secrets as one JSON object** of field name to value, with the
+   WASM sealer and the parts of the offer, which it need not understand:
+
+   ```js
+   const object = new TextEncoder().encode(JSON.stringify({ api_key, api_secret }));
+   const envelope = seal(offer.public_key, offer.kid, offer.keyset, offer.item,
+                         offer.field, object, JSON.stringify(offer.policy));
+   ```
+
+   A field the user left blank is left out. Bytes that are not text go in as
+   `{"b64": "…"}`, in base64url. A script or an API client does the same with
+   [`seal-sealer`](operations.md#sealing-from-a-terminal).
+4. **The page saves** the envelope with the same fields that are not secret.
+5. **The application derives the policies again** from what it received and calls
+   `admit` with them. It gets one envelope per field, each bound to the record and to
+   the field of its name, and stores them as it stores any other.
+
+What to hold to:
+
+- **Derive, do not remember.** The application keeps nothing between the offer and the
+  save. If what it derives the second time differs, because the fields changed or the
+  application was deployed in between, seal answers `INTAKE_STALE`: make a new offer and
+  have the page seal again. The same for a form left open past `not_after`.
+- **Mark a field `optional`** where it may be left blank. An absent field that is not
+  optional fails the whole call with `INTAKE_INVALID`, and nothing is stored.
+- **Keep `not_after` short.** Minutes, within the operator's
+  `limits.max_intake_lifetime`. The application's clock sets it and seal's checks it.
+- **Serve the WASM module of the seal you run.** An older module refuses an intake
+  policy, and an older seal refuses an intake envelope.
+- **What this is for.** An application compromised after a secret was sealed cannot
+  send it anywhere but where the offer said: an intake envelope in a log is worth no
+  more than the values it becomes, and nothing once it is past its time. An application
+  already compromised when it makes the offer names a destination of its own, as one
+  that serves a changed page reads what is typed
+  ([`threat-model.md`](threat-model.md#accepted-by-design)).

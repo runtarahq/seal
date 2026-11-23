@@ -319,13 +319,14 @@ mod tests {
             Operation::Connect,
             Operation::Verify,
             Operation::Presign,
+            Operation::Admit,
         ];
         let app = map.get(&Identity::Uid(1)).unwrap();
         assert!(all.iter().all(|operation| app.may(*operation)));
         let intake = map.get(&Identity::Uid(2)).unwrap();
         assert_eq!(
             all.map(|operation| intake.may(operation)),
-            [false, false, true, false]
+            [false, false, true, false, false]
         );
         // The keyset is still its own question.
         assert!(intake.may_use(&KeysetId::new("acme").unwrap()));

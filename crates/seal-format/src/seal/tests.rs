@@ -331,6 +331,7 @@ fn sealing_refuses_an_invalid_policy() {
         definitions: std::collections::BTreeMap::new(),
         shared: false,
         verify: None,
+        intake: None,
     };
     let (keyset, item, field) = (keyset(), item(), field());
     let result = seal(

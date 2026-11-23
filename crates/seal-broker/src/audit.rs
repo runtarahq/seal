@@ -55,6 +55,9 @@ pub struct AuditRecord {
     pub verified: Option<bool>,
     /// For `presign`: how long the URL lasts, in seconds.
     pub expires_s: Option<u32>,
+    /// For `admit`: the policy each field was to be sealed under, as `field=digest`,
+    /// the digest being the SHA-256 of the policy's canonical JSON in base64url.
+    pub policies: Vec<String>,
 }
 
 /// How a request ended.
@@ -211,6 +214,7 @@ mod tests {
             pg_auth: None,
             verified: None,
             expires_s: None,
+            policies: vec![],
         }
     }
 
@@ -241,6 +245,7 @@ mod tests {
                 "outcome",
                 "path",
                 "pg_auth",
+                "policies",
                 "rules",
                 "shared",
                 "status",

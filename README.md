@@ -29,7 +29,10 @@ that expire. The limits of the guarantee are in the [threat model](docs/threat-m
   certificates
 - **Postgres** sessions
 - **Webhooks**: checking a signature against a sealed signing secret
-- **Sealing in the browser**, with a WASM build that needs only the public key
+- **Sealing in the browser**, with a WASM build that needs only the public key, and in
+  scripts with `seal-sealer`
+- **Taking in secrets the application never holds**: sealed where they are entered,
+  under policies the application named and seal holds them to
 
 ## Deployment modes
 

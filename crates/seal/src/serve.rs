@@ -216,6 +216,7 @@ pub fn broker_config(config: &Config) -> Result<BrokerConfig, String> {
             buffered_total_timeout: limits.buffered_total_timeout.0,
             max_stream_duration: limits.max_stream_duration.map(|interval| interval.0),
             pg_max_session: limits.pg_max_session.0,
+            max_intake_lifetime: limits.max_intake_lifetime.0,
         },
     })
 }

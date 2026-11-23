@@ -162,6 +162,7 @@ pub fn webhook_hmac(hash: HmacHash) -> Result<Policy, FormatError> {
         definitions: BTreeMap::new(),
         shared: false,
         verify: Some(Verify::Hmac { hash }),
+        intake: None,
     })
 }
 
@@ -178,6 +179,7 @@ pub fn webhook_token() -> Result<Policy, FormatError> {
         definitions: BTreeMap::new(),
         shared: false,
         verify: Some(Verify::Equals),
+        intake: None,
     })
 }
 
@@ -216,6 +218,7 @@ pub fn registered_webhook_token(
         definitions: BTreeMap::new(),
         shared: false,
         verify: Some(Verify::Equals),
+        intake: None,
     })
 }
 
@@ -335,6 +338,7 @@ pub fn oauth_client(config: &OAuthConfig) -> Result<OAuthPolicies, FormatError> 
             definitions: definitions.clone(),
             shared: config.shared,
             verify: None,
+            intake: None,
         })?,
         // A resource owner's password is theirs, never shared.
         password: finish(Policy {
@@ -342,6 +346,7 @@ pub fn oauth_client(config: &OAuthConfig) -> Result<OAuthPolicies, FormatError> 
             definitions,
             shared: false,
             verify: None,
+            intake: None,
         })?,
     })
 }
@@ -500,6 +505,7 @@ impl Policy {
             definitions: BTreeMap::new(),
             shared: false,
             verify: None,
+            intake: None,
         }
     }
 }

@@ -8,6 +8,66 @@
       }
     },
     {
+      "name": "intake with a rule beside it",
+      "policy": {
+        "intake": {
+          "not_after": 1800000000,
+          "outputs": {
+            "api_key": "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+          }
+        },
+        "rules": [
+          {
+            "destination": {
+              "host": "api.example.com",
+              "scheme": "https"
+            },
+            "inject": {
+              "header": {
+                "format": "Bearer {}",
+                "name": "Authorization"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "intake naming no outputs",
+      "policy": {
+        "intake": {
+          "not_after": 1800000000,
+          "outputs": {}
+        }
+      }
+    },
+    {
+      "name": "intake naming a policy itself, not its digest",
+      "policy": {
+        "intake": {
+          "not_after": 1800000000,
+          "outputs": {
+            "api_key": {
+              "rules": [
+                {
+                  "destination": {
+                    "host": "api.example.com",
+                    "scheme": "https"
+                  },
+                  "inject": {
+                    "header": {
+                      "format": "Bearer {}",
+                      "name": "Authorization"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "unknown field",
       "policy": {
         "rules": [
@@ -345,6 +405,10 @@
     {
       "canonical": "{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"*.example.com\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}}]}",
       "name": "host pattern"
+    },
+    {
+      "canonical": "{\"intake\":{\"outputs\":{\"api_key\":\"ksDuskwoEUsOeEeE5i_NObMkhp-_ZJmlJ2CK1cmBYWQ\",\"signing_secret\":\"pzLeGqSSkVqCIif-KjedcMI-ewPffAqrmrL0FFoStRI\"},\"not_after\":1800000000}}",
+      "name": "intake naming two outputs"
     }
   ]
 }

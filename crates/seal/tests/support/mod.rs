@@ -487,6 +487,15 @@ impl SealClient for ScanningClient {
         result
     }
 
+    async fn admit(
+        &self,
+        request: seal_client::AdmitRequest,
+    ) -> Result<std::collections::BTreeMap<FieldName, Envelope>, SealError> {
+        let result = self.inner.admit(request).await;
+        self.keep(&result);
+        result
+    }
+
     async fn connect_pg(
         &self,
         request: seal_client::ConnectRequest,

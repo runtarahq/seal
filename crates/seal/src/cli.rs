@@ -136,7 +136,8 @@ pub struct Resealed {
 /// nothing to change, is written out as it is.
 ///
 /// A new policy cannot change whether a value is shared: that would let it serve every
-/// record, or stop it serving them, without anyone having sealed it so.
+/// record, or stop it serving them, without anyone having sealed it so. An intake
+/// envelope is not resealed, and no value is made one.
 ///
 /// # Errors
 ///
@@ -177,6 +178,13 @@ pub async fn reseal(
             policy
                 .validate()
                 .map_err(|_| format!("line {number}: its new policy is not valid"))?;
+            // An intake's secrets become values only through `admit`, under the
+            // policies it names.
+            if policy.intake.is_some() {
+                return Err(format!(
+                    "line {number}: a value cannot be made an intake envelope"
+                ));
+            }
         }
         if new_policy.is_some() || *entry.envelope.kid() != current_kid {
             let binding = Binding {
@@ -191,6 +199,14 @@ pub async fn reseal(
             let opened = seal_format::open(&key, &entry.envelope, binding)
                 .map_err(|_| format!("line {number} did not open"))?;
             drop(key);
+            // It is not a stored value: it is admitted while it lasts, and what it
+            // holds is every secret of a record. Giving it a policy here would be a
+            // way around what it names.
+            if opened.policy.intake.is_some() {
+                return Err(format!(
+                    "line {number} is an intake envelope, which is admitted and not resealed"
+                ));
+            }
             let rewritten = new_policy.filter(|policy| *policy != opened.policy);
             if let Some(policy) = &rewritten
                 && policy.shared != opened.policy.shared

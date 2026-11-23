@@ -159,6 +159,60 @@
       "name": "identifiers using the full alphabet, with a rotating OAuth policy",
       "plaintext": "{\"policy\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path\":\"/oauth/token\"},\"inject\":{\"form_field\":{\"name\":\"client_secret\"}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}},{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path\":\"/oauth/revoke\"},\"inject\":{\"form_field\":{\"name\":\"client_secret\"}}}],\"definitions\":{\"api\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\",\"path_prefix\":\"/v2/\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}},{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path\":\"/oauth/revoke\"},\"inject\":{\"form_field\":{\"name\":\"token\"}}}]},\"refresh\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path\":\"/oauth/token\"},\"inject\":{\"form_field\":{\"name\":\"refresh_token\"}},\"seal_response\":{\"format\":\"json\",\"fields\":[{\"at\":\"/access_token\",\"as\":\"access_token\",\"policy\":\"api\"},{\"at\":\"/refresh_token\",\"as\":\"refresh_token\",\"policy\":\"refresh\"}]}},{\"destination\":{\"scheme\":\"https\",\"host\":\"auth.example.com\",\"path\":\"/oauth/revoke\"},\"inject\":{\"form_field\":{\"name\":\"token\"}}}]}}},\"secret\":{\"b64\":\"Y2xpZW50LXNlY3JldC1leGFtcGxl\"}}",
       "secret_hex": "636c69656e742d7365637265742d6578616d706c65"
+    },
+    {
+      "aad_hex": "7365616c2f76312f61616401000461636d6500026b330005635f3132330006696e74616b65",
+      "admitted": {
+        "api_key": {
+          "field": "api_key",
+          "plaintext": "{\"policy\":{\"rules\":[{\"destination\":{\"scheme\":\"https\",\"host\":\"api.example.com\",\"path_prefix\":\"/v2/\"},\"inject\":{\"header\":{\"name\":\"Authorization\",\"format\":\"Bearer {}\"}}}]},\"secret\":{\"b64\":\"c2stbGl2ZSAicXVvdGVkIiBcIGFuZAl0YWJiZWQK\"}}",
+          "policy_digest": "ksDuskwoEUsOeEeE5i_NObMkhp-_ZJmlJ2CK1cmBYWQ",
+          "secret_hex": "736b2d6c697665202271756f74656422205c20616e64097461626265640a"
+        },
+        "signing_secret": {
+          "field": "signing_secret",
+          "plaintext": "{\"policy\":{\"verify\":{\"hmac\":{\"hash\":\"sha256\"}}},\"secret\":{\"b64\":\"APv__j4_gA\"}}",
+          "policy_digest": "pzLeGqSSkVqCIif-KjedcMI-ewPffAqrmrL0FFoStRI",
+          "secret_hex": "00fbfffe3e3f80"
+        }
+      },
+      "envelope": {
+        "ct": "lILeHHes2W6tyPTegKGCUBZjYfC_WI7VuI0DXhmGrFtHwFiv_gk6FpRb53npnYsaG2cy9yEjeuOdy8q6q9BXCLvryiYHjHG2x-F06Oy6WXyst3TSQ-r1B-h4DUa-VnKF4KWqQIu66QkOfueisu-pQ8ugmBUwsx4PaZ_XsGns4YqpVuZNvtSYCDiTI7iXNpBxbbUjBfYySiJRYF0UvzfInEv3jux4ck2kp04z5TEqwDkjZH9G7SaUfBzUDy6gx493xlt1xtP843A49Wbwjy8V4znYK0AHTRyPwLRFXti3i03dTC9CUfK_3BaPSNlPQP2iXUjUqtli14IozYdiXmihWbjRZiJw2cYcoOpGsEdrkp3ak25LkmNhzsrFMOQ4XP8nr1qykeW_LOnVJ6NRMG_trzIfTd9VDDNPPwP7CbG-fB08IbTK3iflpjBtCbtDq6NrPbot_Q",
+        "enc": "edMlGCMt14KSqsbI4ija3IVKNRJLvLQQwkEFu41LUi8",
+        "keyset": "acme",
+        "kid": "k3",
+        "v": 1
+      },
+      "ephemeral_ikm_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "field": "intake",
+      "item": "c_123",
+      "keyset": "acme",
+      "kid": "k3",
+      "must_not_open": [
+        {
+          "change": "item",
+          "value": "other-item"
+        },
+        {
+          "change": "field",
+          "value": "other_field"
+        },
+        {
+          "change": "keyset",
+          "value": "other-keyset"
+        },
+        {
+          "change": "kid",
+          "value": "other-kid"
+        },
+        {
+          "change": "private_key_hex",
+          "value": "4848484848484848484848484848484848484848484848484848484848484848"
+        }
+      ],
+      "name": "intake envelope: an object of fields, under a policy naming each field's policy",
+      "plaintext": "{\"policy\":{\"intake\":{\"outputs\":{\"api_key\":\"ksDuskwoEUsOeEeE5i_NObMkhp-_ZJmlJ2CK1cmBYWQ\",\"signing_secret\":\"pzLeGqSSkVqCIif-KjedcMI-ewPffAqrmrL0FFoStRI\"},\"not_after\":1800000000}},\"secret\":{\"b64\":\"eyJhcGlfa2V5Ijoic2stbGl2ZSBcInF1b3RlZFwiIFxcIGFuZFx1MDAwOXRhYmJlZFx1MDAwYSIsInNpZ25pbmdfc2VjcmV0Ijp7ImI2NCI6IkFQdl9fajRfZ0EifX0\"}}",
+      "secret_hex": "7b226170695f6b6579223a22736b2d6c697665205c2271756f7465645c22205c5c20616e645c75303030397461626265645c7530303061222c227369676e696e675f736563726574223a7b22623634223a224150765f5f6a345f6741227d7d"
     }
   ],
   "description": "Sealed values with fixed ephemeral keys. See docs/format.md. The keys are for these vectors only.",

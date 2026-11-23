@@ -175,3 +175,35 @@ fn every_invalid_policy_vector_is_refused() {
         );
     }
 }
+
+/// An intake envelope names each field's policy by the digest of its canonical form,
+/// and what admitting it gives is that policy with the field's secret.
+#[test]
+fn the_intake_vector_names_the_policies_its_fields_are_admitted_under() {
+    let vectors = read_json("envelope.json");
+    let cases: Vec<&Value> = vectors["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case.get("admitted").is_some())
+        .collect();
+    assert!(!cases.is_empty());
+    for case in cases {
+        assert_eq!(string(case, "field"), seal_format::INTAKE_FIELD);
+        let plaintext: Value = serde_json::from_str(string(case, "plaintext")).unwrap();
+        let policy = Policy::from_json(plaintext["policy"].to_string().as_bytes()).unwrap();
+        let intake = policy.intake.expect("an intake policy");
+        let admitted = case["admitted"].as_object().unwrap();
+        assert_eq!(intake.outputs.len(), admitted.len());
+        for (name, value) in admitted {
+            let sealed: Value = serde_json::from_str(string(value, "plaintext")).unwrap();
+            let output = Policy::from_json(sealed["policy"].to_string().as_bytes()).unwrap();
+            let digest = output.digest().unwrap();
+            assert_eq!(digest.to_base64url(), string(value, "policy_digest"));
+            assert_eq!(
+                intake.outputs[&FieldName::new(name.as_str()).unwrap()],
+                digest
+            );
+        }
+    }
+}

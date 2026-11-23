@@ -3,6 +3,8 @@
 Status: reviewed against what was built, in the hardening pass before the first release.
 It describes seal as built: the HTTP broker with every injection and signing scheme,
 response sealing, Postgres sessions, the service and its callers, and the keyring.
+Admitting secrets sealed where they were entered was added after that pass, and is
+described here as built.
 
 ## What seal is for
 
@@ -20,18 +22,20 @@ working afterwards.
 | Key-wrapping key | A file readable only by seal's user, or a KMS (OVHcloud KMS or AWS KMS), which it never leaves | Unwraps the private keys |
 | KMS credentials | An access certificate's key, a token or an AWS secret access key, in a file readable only by seal's user; in seal's memory for the life of the process (OVHcloud) or of one request (AWS). Or, for AWS, whatever the SDK finds: a key in the environment or the shared files, or a role's temporary credentials from the host, which the SDK keeps in memory until they are about to expire | Ask the KMS to unwrap any private key seal has a wrapped copy of |
 | Key source credentials | An access key for the bucket that holds the wrapped keys, in a file readable only by seal's user; in seal's memory during one request | Read, add and delete wrapped keys: take keys away from seal or put deleted ones back. They open nothing |
-| Opened secrets | In seal's memory, during one `send`, or a Postgres session until its login ends | The credentials themselves |
+| Opened secrets | In seal's memory, during one `send` or `admit`, or a Postgres session until its login ends | The credentials themselves |
 | Client-certificate private keys | In a TLS configuration, while its identity exists | Credentials kept beyond one request (see Residual risks) |
 | SigV4 signing keys | In seal's memory, during one request or chunked upload | Sign requests for one day, region and service |
 | Sealed values and policies | In the application's storage, and passing through seal | Unreadable, but usable by anyone who can call seal with them |
+| Intake envelopes | Passing from whoever enters a record's secrets, through the application, to seal; not stored | Unreadable, and good only for the values their policy names, until their `not_after` |
 | Audit records | Written by seal to its configured sink | The record of use after a breach |
 
 ## Actors
 
 | Actor | Can | Should not be able to |
 |---|---|---|
-| Application, working normally | Seal values, and ask seal to use them | Read a secret |
-| Compromised application | Use any value it can present, for any request a value's policy allows, by the operations its caller is allowed | Read a secret, change a policy, reach a destination no policy allows, or hide its use |
+| Application, working normally | Seal values, have seal admit secrets it never held, and ask seal to use them | Read a secret |
+| Compromised application | Use any value it can present, for any request a value's policy allows, by the operations its caller is allowed. Name the policies of secrets it is offered from then on | Read a secret, change a policy, reach a destination no policy allows, give a secret already sealed for intake a policy its envelope does not name, or hide its use |
+| Whoever enters a secret, in a browser or a script | Seal what they already know, under any policy | Have seal give a secret a policy the application did not name, where the application takes secrets in through `admit` |
 | Administrative caller | Generate and rotate keys | Read a private key, which never leaves seal unwrapped. Destroy a keyset, which needs `destroy_keysets` |
 | Caller that may destroy keysets | Make every value of the keysets it may use unreadable, for good | Read a value, or touch a keyset it may not use |
 | Provider | Receive the credentials sealed for it | Receive another destination's credentials |
@@ -50,6 +54,8 @@ working afterwards.
    by the encryption, so a caller cannot move a value or change its policy. Only a
    value whose policy is `shared` serves another record's request, and the caller
    must be allowed its keyset too.
+   An intake envelope is such a value whose policy allows nothing: its secrets leave
+   it only through `admit`, each under the policy whose digest it names.
 3. **Caller's request to the policy.** Every caller-supplied part of a request is
    untrusted. It must match a rule, and it cannot set anything the rule injects or
    signs.
@@ -78,6 +84,7 @@ working afterwards.
 |---|---|---|
 | Caller to seal | Peer credentials, or the client certificate's subject, compared attribute by attribute, or one of its subject alternative names; configured keysets, including a shared value's; an audit record of each refusal | `crates/seal/tests/service.rs`; `a_certificate_subject_is_compared_by_attribute`; `a_caller_needs_the_platform_keyset_to_use_a_shared_value` |
 | Sealed value to seal | HPKE with associated data; the policy inside the ciphertext; the `shared` flag | `crates/seal-format/tests/acceptance.rs`, the published vectors, `a_value_from_another_record_is_refused_unless_shared` |
+| Intake envelope to stored values | The digest of each field's policy inside the ciphertext; refusal of anything but an intake; the envelope's item and keyset; `not_after` and the operator's limit on it; a strict reading of the object | `crates/seal-broker/tests/admit.rs`; `acceptance_secrets_sealed_where_they_were_entered_are_admitted_and_used`; the `intake_object` fuzz target; `vectors/verify.py` |
 | Caller's request to the policy | The matcher, a pure function over untrusted policies; strict URL parsing; refused headers | `crates/seal-broker/src/matcher/tests.rs` (with property tests), `url_match` and other fuzz targets, `caller_set_amz_headers_are_refused_before_dns` |
 | seal to provider | Address checks after DNS on every address; TLS; no redirects | `acceptance_a_private_address_is_refused_after_dns_with_no_connection`, `acceptance_redirects_are_returned_not_followed` |
 | seal to a Postgres server | TLS before sending; SCRAM with the server's signature, and channel binding when the server offers it; no login without the password being asked for | `the_server_must_offer_tls_and_prove_its_name`, `a_server_that_cannot_prove_it_knows_the_password_is_refused`, `a_server_that_never_asks_for_the_password_is_refused`, Postgres 14–18 in containers |
@@ -216,6 +223,23 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   that value. A compromised application can therefore store or present values of its
   own, including alongside genuine ones, so seal must treat every value it opens as
   untrusted input when combining them.
+- **An application compromised when it makes an offer names where the secret goes.**
+  With `admit`, the application derives a secret's policy before the secret is sealed,
+  and seal holds whoever seals and whoever admits to it. One that is already compromised
+  then puts a destination of its own in the offer, or a public key of its own, and
+  receives the secret. What intake adds is for afterwards: a secret sealed under an
+  honest offer goes nowhere else, whoever later holds its envelope.
+- **An intake envelope can be admitted again until its time.** seal keeps no record of
+  what it admitted. Admitting again gives the same fields under the same policies and
+  nothing else, so an envelope in a log is worth what the stored values are, and nothing
+  after `not_after`. Whoever seals writes that time, so seal refuses one further ahead
+  than `limits.max_intake_lifetime`; within it, a sealer of its own making can only
+  lengthen the life of what it sealed itself.
+- **A value can still be sealed with any policy, by whoever has the public key.** Intake
+  holds the secrets that come through it. An application that also accepts envelopes
+  sealed directly stores whatever policy their sealer chose, as before; that is how an
+  operator seals a platform's credential with `seal-sealer`, and is right only for
+  someone trusted to choose.
 - **A shared value serves every record its callers can name.** A platform credential
   sealed with `shared` set, such as a shared OAuth app's client secret, can be used
   with any tenant's request by a caller allowed the platform keyset, for whatever its
@@ -247,7 +271,9 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
   schemes against RustFS and Azurite.
 - **A running application controls its browser sealer.** A compromised application
   that serves the console's script can change it to capture a secret as it is typed.
-  Sealing in the browser protects against server-side capture, not this.
+  Sealing in the browser protects against server-side capture, not this, and an intake
+  envelope no more: it is sealed by the same script. `seal-sealer` is trusted likewise
+  by whoever runs it, with what they type into it.
 
 ### Copies seal cannot erase
 
@@ -288,6 +314,10 @@ Known risks the design accepts. Each needs to stay true and documented as seal i
 
 ### Timing limits
 
+- **An intake envelope's time is checked by seal's clock.** The application sets
+  `not_after` by its own clock and seal compares it with its own, so the two hosts'
+  clocks should agree to well within `limits.max_intake_lifetime`. Past its time an
+  envelope is refused; nothing made from it before is affected.
 - **A deleted key keeps working for a bounded time.** Other instances see a deletion
   within `max_stale`, and an unwrapped key is dropped after `max_unwrap_age`.
 - **The wrapping key file is read once.** seal holds it for the life of the process,

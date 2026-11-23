@@ -110,6 +110,13 @@ identifier!(
     64,
     false
 );
+impl FieldName {
+    /// A name written in this crate, which a test checks is valid.
+    pub(crate) fn known(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 identifier!(
     /// The name of an entry in a policy's `definitions`.
     PolicyName,

@@ -57,6 +57,76 @@ fn post_form(url: &str, sealed: &[(&str, &seal_format::Envelope)]) -> seal_clien
 
 const SIGNING_SECRET: &[u8] = b"SEALCANARY-signing-secret";
 
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// What an application does before a secret is entered: reads the keyset's public key
+/// and names the policies the record's fields are to have. The offer crosses to the
+/// sealer as JSON, and that is all the sealer has.
+async fn offer_for(
+    instance: &Instance,
+    outputs: &[(&str, &Policy)],
+    not_after: u64,
+) -> seal_format::Offer {
+    let keys = instance.client.public_keys(&keyset()).await.unwrap();
+    let key = keys.last().unwrap();
+    let offer = seal_format::Offer::for_intake(
+        seal_format::PublicKey::from_base64url(&key.public).unwrap(),
+        seal_format::KeyId::new(key.kid.clone()).unwrap(),
+        keyset(),
+        item(),
+        &outputs
+            .iter()
+            .map(|(name, policy)| (field(name), (*policy).clone()))
+            .collect(),
+        not_after,
+    )
+    .unwrap();
+    seal_format::Offer::from_json(offer.to_json().unwrap().as_bytes()).unwrap()
+}
+
+/// What whoever enters the secrets does: seals them as one object under the offer.
+fn seal_under(
+    instance: &Instance,
+    offer: &seal_format::Offer,
+    members: &[(&str, &str)],
+) -> seal_format::Envelope {
+    let mut canaries = instance.setup.canaries.lock().unwrap();
+    for (_, secret) in members {
+        canaries.register(&Canary::from_value(*secret));
+    }
+    let members = members
+        .iter()
+        .map(|(name, secret)| (field(name), seal_format::intake::Value::Text(secret)))
+        .collect();
+    offer.seal(&seal_format::intake::object(&members)).unwrap()
+}
+
+fn admit_request(
+    envelope: &seal_format::Envelope,
+    outputs: &[(&str, &Policy)],
+) -> seal_client::AdmitRequest {
+    seal_client::AdmitRequest {
+        keyset: keyset(),
+        item: item(),
+        envelope: envelope.clone(),
+        outputs: outputs
+            .iter()
+            .map(|(name, policy)| {
+                let output = seal_client::AdmitOutput {
+                    policy: (*policy).clone(),
+                    optional: false,
+                };
+                (field(name), output)
+            })
+            .collect(),
+    }
+}
+
 fn hmac_sha256(message: &[u8]) -> Vec<u8> {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, SIGNING_SECRET);
     ring::hmac::sign(&key, message).as_ref().to_vec()
@@ -196,6 +266,55 @@ mode_matrix! {
         let error = instance.client.verify(verify_request(&token, message, mac)).await.err().unwrap();
         assert_eq!(error.code, ErrorCode::PolicyDenied);
         assert!(provider.received().is_empty());
+    };
+
+    acceptance_secrets_sealed_where_they_were_entered_are_admitted_and_used => |mode: Mode| async move {
+        let (instance, provider) = simple(mode).await;
+        provider.respond("/quiet", CannedResponse::ok("text/plain", b"ok"));
+        let api = policy(&json!({ "rules": [plain_rule(&provider, &bearer())] }));
+        let webhook = seal_format::policy::builder::webhook_hmac(seal_format::policy::HmacHash::Sha256).unwrap();
+        let outputs = [("api_key", &api), ("signing_secret", &webhook)];
+        let offer = offer_for(&instance, &outputs, now() + 60).await;
+        let envelope = seal_under(&instance, &offer, &[("api_key", "SEALCANARY-entered-api-key"), ("signing_secret", std::str::from_utf8(SIGNING_SECRET).unwrap())]);
+
+        let sealed = instance.client.admit(admit_request(&envelope, &outputs)).await.unwrap();
+        assert_eq!(sealed.len(), 2);
+        let record = instance.setup.audit_records().pop().unwrap();
+        assert_eq!((&record["op"], &record["outcome"], &record["fields"]), (&json!("admit"), &json!("ok"), &json!(["api_key", "signing_secret"])));
+        assert_eq!(record["policies"], json!([format!("api_key={}", api.digest().unwrap()), format!("signing_secret={}", webhook.digest().unwrap())]));
+
+        // What came back is used like any stored value, and has the policy that was named.
+        let response = instance.client.send(get(&url(&provider, "/quiet"), &[("api_key", &sealed[&field("api_key")])])).await.unwrap();
+        text(response).await;
+        assert_eq!(provider.received().last().unwrap().header("authorization"), Some("Bearer SEALCANARY-entered-api-key"));
+        let message = b"v0:1700000000:{}".to_vec();
+        assert!(instance.client.verify(verify_request(&sealed[&field("signing_secret")], message.clone(), hmac_sha256(&message))).await.unwrap());
+        assert_eq!(instance.setup.open("api_key", &sealed[&field("api_key")]).await.1, api);
+
+        // Another destination for the secret is refused, and so is a policy the envelope names for another field.
+        let elsewhere = seal_format::policy::builder::bearer("https://attacker.example.com").unwrap();
+        let error = instance.client.admit(admit_request(&envelope, &[("api_key", &elsewhere)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::IntakeStale);
+        let error = instance.client.admit(admit_request(&envelope, &[("api_key", &webhook)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::IntakeStale);
+        let record = instance.setup.audit_records().pop().unwrap();
+        assert_eq!((&record["op"], &record["outcome"], &record["code"]), (&json!("admit"), &json!("refused"), &json!("INTAKE_STALE")));
+
+        // The envelope itself serves no request, and a stored value is not admitted.
+        let received = provider.received().len();
+        let error = instance.client.send(get(&url(&provider, "/quiet"), &[("intake", &envelope)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        let error = instance.client.verify(seal_client::VerifyRequest { field: field("intake"), ..verify_request(&envelope, message.clone(), hmac_sha256(&message)) }).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert_eq!(provider.received().len(), received);
+        let stored = instance.setup.seal("intake", b"{\"api_key\":\"SEALCANARY-stored-api-key\"}", &api).await;
+        let error = instance.client.admit(admit_request(&stored, &[("api_key", &elsewhere)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+
+        // Past its time, the secret has to be sealed again.
+        let late = seal_under(&instance, &offer_for(&instance, &outputs, now() - 1).await, &[("api_key", "SEALCANARY-entered-api-key")]);
+        let error = instance.client.admit(admit_request(&late, &[("api_key", &api)])).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::IntakeStale);
     };
 
     a_webhook_token_is_checked_without_leaving_seal => |mode: Mode| async move {

@@ -6,6 +6,7 @@
 pub mod envelope;
 pub mod error;
 pub mod id;
+pub mod intake;
 pub mod policy;
 pub mod seal;
 pub mod secret;
@@ -15,6 +16,7 @@ pub mod wasm;
 pub use envelope::Envelope;
 pub use error::FormatError;
 pub use id::{FieldName, ItemId, KeyId, KeysetId, PolicyName};
+pub use intake::{INTAKE_FIELD, Offer, intake_field};
 pub use policy::Policy;
 pub use seal::{Binding, PublicKey, seal};
 #[cfg(feature = "open")]

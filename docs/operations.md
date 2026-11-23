@@ -80,8 +80,8 @@ configuration file that its group or others can write.
 | `name` | The name in audit records |
 | `unix_uid`, `cert_subject` or `cert_san` | Exactly one, matching the listener |
 | `keysets` | The keysets it may use, or `["*"]` for all |
-| `operations` | What it may do with the values of those keysets: any of `send`, `connect`, `verify` and `presign`. Absent means all four. An application that only checks webhooks has `["verify"]`, so that taking it over gives no way to send a request with a value it is handed. `[]` is for a caller that only administers |
-| `admin` | Whether it may generate keysets, rotate and list public keys. Default `false`. It holds for every keyset, whatever `keysets` lists: `keysets` says which a caller may use, and a platform that makes a keyset for each new tenant could not list one that does not exist yet. So an admin caller can add keys to any keyset, within its rate, though it reads no private key and can destroy nothing |
+| `operations` | What it may do with the values of those keysets: any of `send`, `connect`, `verify`, `presign` and `admit`. Absent means all five. An application that only checks webhooks has `["verify"]`, so that taking it over gives no way to send a request with a value it is handed. `[]` is for a caller that only administers. Whatever it lists, a caller may read the public keys of the keysets it may use |
+| `admin` | Whether it may generate keysets and rotate, and list the public keys of keysets it may not use. Default `false`. It holds for every keyset, whatever `keysets` lists: `keysets` says which a caller may use, and a platform that makes a keyset for each new tenant could not list one that does not exist yet. So an admin caller can add keys to any keyset, within its rate, though it reads no private key and can destroy nothing |
 | `admin_keysets` | The keysets an admin caller may generate, rotate and list the keys of, where that should not be every one: the names, or `*`. Absent means every keyset. Only for a caller with `admin` |
 | `destroy_keysets` | Whether it may [destroy](#destroying-a-keyset) the keysets it may use, which cannot be undone. Separate from `admin`. Default `false` |
 
@@ -153,6 +153,7 @@ coming from inside. `deny_cidrs` wins over both.
 | `limits.first_byte_timeout` | `60s` | Once the request is sent |
 | `limits.buffered_total_timeout` | `60s` | For a request holding a capped buffer |
 | `limits.max_stream_duration` | none | An optional total deadline for streams |
+| `limits.max_intake_lifetime` | `15m` | How far ahead an [intake envelope](format.md#intake-envelopes)'s `not_after` may be when it is admitted. Whoever seals the envelope writes that time, so this is what bounds it. Keep the hosts' clocks closer than this |
 | `limits.shutdown_grace` | `30s` | Once told to stop, how long requests under way may take to finish. Those still running are then ended, so that each writes its audit record. Give seal's supervisor longer than this before it kills the process |
 | `limits.rate_per_caller` | `1000/s` | |
 | `limits.rate_per_keyset` | `200/s` | Counted against the request's keyset and against the keyset each presented value was sealed to |
@@ -501,6 +502,32 @@ seal reseal --config /etc/seal/seal.toml --keyset acme --rewrite-policies \
   its key is not the current one. The output has no policies, so it can be run again.
 - For OAuth, give the refresh token the builder's `refresh` definition as its policy,
   and the access token the `api` one, or wait for the next refresh to replace it.
+- An [intake envelope](format.md#intake-envelopes) is not a stored value: a line that
+  would open one fails the run, and no value is given an intake as its policy.
+
+### Sealing from a terminal
+
+`seal-sealer` seals a secret outside a browser: for a script or an API client that sends
+an application secrets, and for an operator who seals a platform's credential by hand.
+It is a program of its own, built with `cargo build --release --package seal-sealer`,
+and has no code that could open a value, so it needs no more trust than a browser does.
+
+```sh
+# The secrets of a record, under an offer the application made:
+seal-sealer --offer offer.json --text api_key=key.txt --bytes client_key=client.der
+
+# One secret, as it is, from standard input:
+seal-sealer --offer offer.json --trim-newline < secret.txt
+```
+
+The offer is JSON: `public_key`, `kid`, `keyset`, `item`, `field` and `policy`. An
+application makes one for an [intake](integrating.md#taking-in-a-secret-without-holding-it),
+and then the secrets are named as fields and sealed as one object. Written by hand, with
+the policy the value is to have and the field it is stored as, it seals one secret as a
+stored value; that is right only for someone trusted to choose a policy, since the
+application stores the envelope without having read it. A secret is never an argument:
+it comes from a file or standard input, and `--trim-newline` leaves out the line ending
+an editor adds. What is printed is the envelope.
 
 ### Destroying a keyset
 
@@ -528,7 +555,10 @@ names, matched rule indexes, method, host, path without the query string, status
 each way, duration, outcome (`ok`, `refused`, `failed`, `cancelled` or `started`) and error code. A
 `verify` record has `verified`, whether the code matched: a run of `false` for one value
 is someone guessing. A `presign` record has `expires_s`, how long the URL lasts: what is
-done with a URL afterwards never reaches seal. Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
+done with a URL afterwards never reaches seal. An `admit` record has `policies`, each
+field with the digest of the policy it was to be sealed under, as `field=digest`: it
+says afterwards which policy a secret was given, and a refused one what was asked for.
+Never headers, bodies, query strings or values. With `on_failure = "fail_closed"`, a record
 that cannot be written fails the request rather than leave it unaudited.
 
 A Postgres session leaves two records: one with outcome `started` when it has logged in,

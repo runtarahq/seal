@@ -952,7 +952,7 @@ proptest! {
     ) {
         let authority = request_port.map_or(request_host.clone(), |port| format!("{request_host}:{port}"));
         let url = format!("{request_scheme}://{authority}{request_path}");
-        let policy = Policy { rules: vec![rule.clone()], definitions: BTreeMap::new(), shared: false, verify: None };
+        let policy = Policy { rules: vec![rule.clone()], definitions: BTreeMap::new(), shared: false, verify: None, intake: None };
         prop_assume!(policy.validate().is_ok());
         let target = Target::parse(&url).unwrap();
         let plain = BTreeSet::new();
@@ -975,7 +975,7 @@ proptest! {
     ) {
         let authority = request_port.map_or(request_host.clone(), |port| format!("{request_host}:{port}"));
         let target = Target::parse(&format!("{request_scheme}://{authority}{request_path}")).unwrap();
-        let policy = Policy { rules: vec![rule.clone()], definitions: BTreeMap::new(), shared: false, verify: None };
+        let policy = Policy { rules: vec![rule.clone()], definitions: BTreeMap::new(), shared: false, verify: None, intake: None };
         prop_assume!(policy.validate().is_ok());
         let plain = BTreeSet::new();
         let accepted = decide(
@@ -1005,7 +1005,7 @@ proptest! {
         request_path in path(),
     ) {
         let target = Target::parse(&format!("https://{request_host}{request_path}")).unwrap();
-        let wrap = |rule: Rule| Policy { rules: vec![rule], definitions: BTreeMap::new(), shared: false, verify: None };
+        let wrap = |rule: Rule| Policy { rules: vec![rule], definitions: BTreeMap::new(), shared: false, verify: None, intake: None };
         let (first, second) = (wrap(first), wrap(second));
         prop_assume!(first.validate().is_ok() && second.validate().is_ok());
         let plain = BTreeSet::new();
@@ -1024,7 +1024,7 @@ proptest! {
         attacker.inject = Inject::FormField { name };
         attacker.destination = rule_destination();
         attacker.allow_plain_http = false;
-        let attacker = Policy { rules: vec![attacker], definitions: BTreeMap::new(), shared: false, verify: None };
+        let attacker = Policy { rules: vec![attacker], definitions: BTreeMap::new(), shared: false, verify: None, intake: None };
         prop_assume!(attacker.validate().is_ok());
         let target = Target::parse(API).unwrap();
         let plain = BTreeSet::new();

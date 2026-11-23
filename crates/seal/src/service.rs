@@ -14,17 +14,18 @@ use http_body_util::{BodyExt, StreamBody};
 use seal_broker::audit::{AuditRecord, AuditSink, Outcome};
 use seal_broker::client::RequestBody;
 use seal_broker::{
-    Broker, BrokerError, ConnectRequest, ErrorCode, Presented, SendRequest, VerifyRequest,
+    AdmitOutput, Broker, BrokerError, ConnectRequest, ErrorCode, Presented, SendRequest,
+    VerifyRequest,
 };
-use seal_format::{Envelope, FieldName, ItemId, KeysetId};
+use seal_format::{Envelope, FieldName, ItemId, KeysetId, Policy};
 use seal_keys::{KeyError, Keyring};
 use seal_proto::v1::seal_server::Seal;
+use seal_proto::v1::{AdmitReply, AdmitRequest, PresignReply, PresignRequest};
 use seal_proto::v1::{
     ConnectIn, ConnectOut, Empty, Header, InfoReply, KeysetRequest, PublicKey, PublicKeysReply,
     ResponseHead, SendHead, SendIn, SendOut, Trailer, VerifyIn, VerifyReply, WrappedKeyReply,
     connect_in, connect_out, send_in, send_out, verify_in,
 };
-use seal_proto::v1::{PresignReply, PresignRequest};
 use seal_proto::{ERROR_CODE_METADATA, MAX_BODY_CHUNK};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status, Streaming};
@@ -183,6 +184,32 @@ impl Service {
         Err(self.denied(op, &caller, &keyset, reason))
     }
 
+    /// The caller, if it may read a keyset's public keys: one that may use the keyset,
+    /// which needs them to have a secret sealed to it, or that administers it. A public
+    /// key is not secret, but which keysets exist is not for every caller to learn.
+    fn reader(&self, request: &Request<KeysetRequest>) -> Result<Caller, Status> {
+        let caller = self.caller(request)?;
+        if !self.per_caller.allow(&caller.name) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
+        }
+        self.audit_ready()?;
+        let keyset = KeysetId::new(request.get_ref().keyset.clone()).ok();
+        // A name that is no keyset's is refused as malformed by the call itself.
+        let allowed = keyset.as_ref().map_or(caller.admin, |keyset| {
+            caller.may_use(keyset) || caller.may_administer(keyset)
+        });
+        if allowed {
+            return Ok(caller);
+        }
+        let keyset = keyset.map(|keyset| keyset.to_string()).unwrap_or_default();
+        Err(self.denied(
+            "public_keys",
+            &caller,
+            &keyset,
+            "the caller may neither use nor administer this keyset",
+        ))
+    }
+
     /// Refuses while the audit sink cannot write, before a key is made or destroyed:
     /// an administrative call is recorded once it is done, and destroying a keyset
     /// cannot be undone for want of its record.
@@ -243,6 +270,7 @@ impl Service {
             pg_auth: None,
             verified: None,
             expires_s: None,
+            policies: Vec::new(),
         };
         self.audit
             .record(&record)
@@ -960,6 +988,64 @@ impl Seal for Service {
         }))
     }
 
+    async fn admit(&self, request: Request<AdmitRequest>) -> Result<Response<AdmitReply>, Status> {
+        let caller = self.caller(&request)?;
+        if !self.per_caller.allow(&caller.name) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the caller's rate"));
+        }
+        let request = request.into_inner();
+        let keyset = KeysetId::new(request.keyset).map_err(|_| bad("the keyset is not valid"))?;
+        self.allowed(Operation::Admit, &caller, &keyset)?;
+        if !caller.may_use(&keyset) {
+            return Err(self.denied(
+                "admit",
+                &caller,
+                keyset.as_str(),
+                "the caller may not use this keyset",
+            ));
+        }
+        if !self.per_keyset.allow(&keyset) {
+            return Err(refusal(ErrorCode::LimitExceeded, "over the keyset's rate"));
+        }
+        let envelope = Envelope::from_json(request.sealed.as_bytes())
+            .map_err(|_| bad("the envelope is not valid"))?;
+        let mut outputs = BTreeMap::new();
+        for output in request.outputs {
+            let field =
+                FieldName::new(output.field).map_err(|_| bad("a field name is not valid"))?;
+            let policy = Policy::from_json(output.policy.as_bytes())
+                .map_err(|_| bad("a policy is not valid"))?;
+            let output = AdmitOutput {
+                policy,
+                optional: output.optional,
+            };
+            if outputs.insert(field, output).is_some() {
+                return Err(bad("a field is named twice"));
+            }
+        }
+        let sealed = self
+            .broker
+            .admit(seal_broker::AdmitRequest {
+                caller: caller.name,
+                keyset,
+                item: ItemId::new(request.item).map_err(|_| bad("the item is not valid"))?,
+                envelope,
+                outputs,
+            })
+            .await
+            .map_err(|error| broker_status(&error))?;
+        let sealed = sealed
+            .into_iter()
+            .map(|(field, envelope)| {
+                let json = envelope
+                    .to_json()
+                    .map_err(|_| refusal(ErrorCode::Internal, "could not write an envelope"))?;
+                Ok((field.to_string(), json))
+            })
+            .collect::<Result<_, Status>>()?;
+        Ok(Response::new(AdmitReply { sealed }))
+    }
+
     async fn generate_keyset(
         &self,
         request: Request<KeysetRequest>,
@@ -978,7 +1064,7 @@ impl Seal for Service {
         &self,
         request: Request<KeysetRequest>,
     ) -> Result<Response<PublicKeysReply>, Status> {
-        let caller = self.admin("public_keys", &request)?;
+        let caller = self.reader(&request)?;
         let name = request.into_inner().keyset;
         let keyset = KeysetId::new(name.clone()).map_err(|_| bad("the keyset is not valid"))?;
         let result = self.keyring.public_keys(&keyset).await;

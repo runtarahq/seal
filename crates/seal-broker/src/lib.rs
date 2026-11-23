@@ -11,6 +11,7 @@ pub mod client;
 pub mod error;
 pub mod identity;
 pub mod inject;
+pub mod intake;
 mod json;
 pub mod matcher;
 pub mod net;
@@ -22,7 +23,7 @@ pub mod target;
 pub mod verify;
 
 pub use broker::{
-    Broker, BrokerConfig, ConnectRequest, Environment, Limits, Presented, PresignRequest,
-    SendRequest, SendResponse, VerifyRequest,
+    AdmitOutput, AdmitRequest, Broker, BrokerConfig, ConnectRequest, Environment, Limits,
+    Presented, PresignRequest, SendRequest, SendResponse, VerifyRequest,
 };
 pub use error::{BrokerError, ErrorCode};

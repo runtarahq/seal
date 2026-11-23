@@ -11,7 +11,10 @@ mod validate;
 
 use std::collections::BTreeMap;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::FormatError;
 use crate::id::{FieldName, PolicyName};
@@ -23,8 +26,12 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// The most fields an intake policy may name.
+pub const MAX_INTAKE_OUTPUTS: usize = 16;
+
 /// The rules for using one secret. A request must match one of `rules`; checking a
-/// message against the secret needs `verify`.
+/// message against the secret needs `verify`; a policy with `intake` allows neither,
+/// and names the policies its secrets may be sealed under instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -45,6 +52,81 @@ pub struct Policy {
     /// answer is only yes or no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<Verify>,
+    /// Makes this the policy of an intake envelope: secrets sealed where they were
+    /// entered, which seal alone turns into values under the policies named here. Such
+    /// a policy has nothing else, and its value serves no request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake: Option<Intake>,
+}
+
+/// What an intake envelope's secrets may become.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Intake {
+    /// Each field that may be sealed from the envelope, and the digest of the only
+    /// policy it may be sealed under. Up to [`MAX_INTAKE_OUTPUTS`].
+    pub outputs: BTreeMap<FieldName, PolicyDigest>,
+    /// Seconds since the Unix epoch after which the envelope is refused.
+    pub not_after: u64,
+}
+
+/// The SHA-256 of a policy's canonical JSON, written in base64url.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PolicyDigest([u8; 32]);
+
+impl PolicyDigest {
+    /// Parses a digest from base64url.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidPolicy`] if it is not 32 bytes in base64url with
+    /// no padding.
+    pub fn from_base64url(encoded: &str) -> Result<Self, FormatError> {
+        let mut bytes = [0_u8; 32];
+        // 32 bytes are 43 characters, which decode to at most 33.
+        let mut decoded = [0_u8; 33];
+        let length = URL_SAFE_NO_PAD
+            .decode_slice(encoded, &mut decoded)
+            .map_err(|_| FormatError::InvalidPolicy("a policy digest is malformed"))?;
+        if length != bytes.len() {
+            return Err(FormatError::InvalidPolicy("a policy digest is malformed"));
+        }
+        bytes.copy_from_slice(&decoded[..length]);
+        Ok(Self(bytes))
+    }
+
+    /// The digest in base64url.
+    #[must_use]
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.0)
+    }
+
+    /// The digest's bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for PolicyDigest {
+    type Error = FormatError;
+
+    fn try_from(value: String) -> Result<Self, FormatError> {
+        Self::from_base64url(&value)
+    }
+}
+
+impl From<PolicyDigest> for String {
+    fn from(value: PolicyDigest) -> Self {
+        value.to_base64url()
+    }
+}
+
+impl std::fmt::Display for PolicyDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base64url())
+    }
 }
 
 impl Policy {
@@ -101,7 +183,52 @@ impl Policy {
             // A token belongs to the record it was sealed for.
             shared: false,
             verify: None,
+            intake: None,
         })
+    }
+
+    /// The SHA-256 of the canonical form: what an intake policy names a policy by.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidPolicy`] if serialisation fails.
+    pub fn digest(&self) -> Result<PolicyDigest, FormatError> {
+        Ok(PolicyDigest(Sha256::digest(self.canonical_json()?).into()))
+    }
+
+    /// The policy of an intake envelope whose fields may be sealed under `outputs`,
+    /// until `not_after` in seconds since the Unix epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidPolicy`] if an output's policy is not valid or is
+    /// itself an intake, or there are none or too many.
+    pub fn for_intake(
+        outputs: &BTreeMap<FieldName, Self>,
+        not_after: u64,
+    ) -> Result<Self, FormatError> {
+        let mut digests = BTreeMap::new();
+        for (field, policy) in outputs {
+            policy.validate()?;
+            if policy.intake.is_some() {
+                return Err(FormatError::InvalidPolicy(
+                    "an intake's output cannot be an intake",
+                ));
+            }
+            digests.insert(field.clone(), policy.digest()?);
+        }
+        let policy = Self {
+            rules: Vec::new(),
+            definitions: BTreeMap::new(),
+            shared: false,
+            verify: None,
+            intake: Some(Intake {
+                outputs: digests,
+                not_after,
+            }),
+        };
+        policy.validate()?;
+        Ok(policy)
     }
 }
 

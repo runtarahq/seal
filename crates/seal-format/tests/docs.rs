@@ -95,6 +95,9 @@ const OPTIONS: &[&str] = &[
     "allow_presign",
     "max_expiry_s",
     "allow_injected_path",
+    "intake",
+    "outputs",
+    "not_after",
 ];
 
 fn policy_doc() -> String {
@@ -110,13 +113,17 @@ fn json_examples(document: &str) -> Vec<&str> {
 }
 
 /// Every key in a JSON value, at any depth, except the names of definitions, extra
-/// claims and required form fields, which are chosen by the author.
+/// claims, required form fields and an intake's outputs, which are chosen by the author.
 fn collect_keys(value: &Value, keys: &mut BTreeSet<String>) {
     match value {
         Value::Object(object) => {
             for (key, child) in object {
                 keys.insert(key.clone());
-                if key == "definitions" || key == "extra" || key == "require_form" {
+                if key == "definitions"
+                    || key == "extra"
+                    || key == "require_form"
+                    || key == "outputs"
+                {
                     for grandchild in child.as_object().unwrap().values() {
                         collect_keys(grandchild, keys);
                     }
