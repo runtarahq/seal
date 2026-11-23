@@ -2991,6 +2991,7 @@ dependencies = [
  "seal-format",
  "serde",
  "serde_json",
+ "sha2",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-test",
