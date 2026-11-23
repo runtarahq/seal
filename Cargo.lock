@@ -3047,6 +3047,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "seal-sealer"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "seal-format",
+ "serde_json",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "seal-testkit"
 version = "0.2.0"
 dependencies = [

@@ -24,6 +24,7 @@ const CRATES: &[(&str, &[&str])] = &[
         "seal",
         &["seal-broker", "seal-format", "seal-keys", "seal-proto"],
     ),
+    ("seal-sealer", &["seal-format"]),
     ("seal-testkit", &[]),
 ];
 
@@ -237,6 +238,12 @@ fn the_webassembly_build_has_no_opening_code() {
     let wasm = manifest["features"]["wasm"].as_array().unwrap();
     assert!(!wasm.iter().any(|feature| feature.as_str() == Some("open")));
     assert!(!feature_tree("seal-format", &["--features", "wasm"]).contains(OPEN_FEATURE));
+}
+
+/// The program that seals outside a browser is trusted no more than a browser is.
+#[test]
+fn the_sealer_binary_has_no_opening_code() {
+    assert!(!feature_tree("seal-sealer", &[]).contains(OPEN_FEATURE));
 }
 
 #[test]
