@@ -78,6 +78,35 @@ when sealing and after opening.
 
 The whole plaintext plus the 16-byte tag must fit in the 64 KiB limit on `ct`.
 
+## Intake envelopes
+
+An intake envelope holds the secrets of one record, sealed where they were entered, for
+seal alone to turn into the values an application stores
+([`integrating.md`](integrating.md#taking-in-a-secret-without-holding-it)). It is an
+ordinary envelope, with three things fixed:
+
+- **Its field is `intake`**, whatever the fields of its secrets are called. The item is
+  the record's, and is what holds the envelope to its record.
+- **Its policy is an [intake](policy.md#intake)**: it names each field the envelope may
+  be turned into, and the SHA-256 of the canonical form of the only policy that field
+  may be sealed under.
+- **Its secret is one JSON object** of field name to value:
+
+```
+{"api_key":"sk-live-example","client_key":{"b64":"…"}}
+```
+
+A value is a string, which is sealed as its UTF-8 bytes, or `{"b64":"…"}` for bytes
+that are not text, in base64url as in the plaintext. A name is a field name, and
+appears once. seal refuses the whole envelope for anything else: a name that repeats,
+however it is escaped, a number, a nested object, an array, anything after the object.
+A sealer may write the object any way JSON allows; `seal_format::intake::object` writes
+it with no whitespace and the names in order.
+
+The object is base64url inside the plaintext like any secret, so about 48 KiB of text
+fits in one envelope, or 36 KiB of bytes. Each value seal makes from it must also fit
+beside its own policy.
+
 ## Security properties
 
 - **Sealing needs only the public key**, and a build without the `open` feature
@@ -89,7 +118,9 @@ The whole plaintext plus the 16-byte tag must fit in the 64 KiB limit on `ct`.
   the new value holds only what its sealer already knew. It does mean an
   application should treat a stored envelope's policy as chosen by whoever could
   write to that store, and seal's guarantee covers secrets sealed by a trusted
-  sealer, such as a browser, before an attacker has access.
+  sealer, such as a browser, before an attacker has access. Where the sealer is not
+  to choose the policy, it seals an [intake envelope](#intake-envelopes) instead, and
+  seal gives each secret the policy the application named.
 
 ## Versioning
 
@@ -101,7 +132,7 @@ the committed vectors fail if the format changes by accident.
 
 | File | Contents |
 |---|---|
-| [`vectors/envelope.json`](../vectors/envelope.json) | Sealed values with fixed ephemeral keys: inputs, associated data, plaintext, envelope, and changed bindings that must not open |
+| [`vectors/envelope.json`](../vectors/envelope.json) | Sealed values with fixed ephemeral keys: inputs, associated data, plaintext, envelope, and changed bindings that must not open. One is an intake envelope, with what admitting it gives under `admitted`: each field's secret, its policy's digest, and the plaintext of the value seal makes |
 | [`vectors/policy.json`](../vectors/policy.json) | Policies to accept, in canonical form, and to refuse |
 
 The ephemeral key comes from `DeriveKeyPair(ephemeral_ikm_hex)`, as in RFC 9180, and

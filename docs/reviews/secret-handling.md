@@ -48,6 +48,9 @@ left out.
 | `broker.rs:631` (`verify`) | A signing secret | `ring`'s HMAC key, for one comparison; the code is never returned | `ring`'s HMAC key is a dependency's copy |
 | `inject/sigv4.rs:409` (`set`) | `Authorization`, `X-Amz-Security-Token` | Marked sensitive; the date and hash are not secrets | Sound |
 | `inject/azure.rs:276` | `Authorization` | Marked sensitive | Sound |
+| `broker/admit.rs:197` (`admit`) | An intake envelope's object, every secret of a record | Read as it was written by `intake::parse`, into one `Secret` per field; the object's own `Secret` is dropped once they are made | Sound |
+| `intake.rs:83, 100` (`value`, `text`) | One field of the object | A string without escapes is copied once into a wiped buffer no longer than it was written, and with escapes undone into the same; bytes are decoded into a wiped buffer sized first. `serde_json` hands each value over as it was written, and makes no copy of it | Sound |
+| `broker/admit.rs:234` (`admit`) | One field's secret | Sealed at once under the policy the envelope names, in `seal-format`'s wiped plaintext | Sound |
 
 Postgres sessions read their password and key through `Sources::part`, above, and hold
 them until the login ends. `postgres-protocol`'s SCRAM keeps its own copies.

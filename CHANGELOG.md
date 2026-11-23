@@ -5,6 +5,42 @@ All notable changes to seal are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Security fixes are also announced as
 GitHub Security Advisories.
 
+## [Unreleased]
+
+### Added
+
+- An application can take in a secret without ever holding it. It derives the policies
+  of a record's secret fields first and hands whoever enters them an offer; they seal
+  the secrets as one object under an intake policy, which allows nothing and names each
+  field's policy by its digest; and `admit` seals each field as a stored value under the
+  policy named for it, and under no other. An application compromised after a secret
+  was sealed therefore cannot choose where it goes. See
+  [`docs/integrating.md`](docs/integrating.md#taking-in-a-secret-without-holding-it),
+  [`docs/policy.md`](docs/policy.md#intake) and
+  [`docs/protocol.md`](docs/protocol.md#admit).
+- `rpc Admit` in `seal.v1`, `SealClient::admit`, and an `admit` operation a caller may
+  list. A caller that lists no operations may admit, as it may do everything else.
+- Error codes `INTAKE_STALE`, for an envelope past its time or a policy that is no
+  longer the one it names, and `INTAKE_INVALID`, for an envelope whose secret is not
+  what an intake holds.
+- `seal-sealer`, a program that seals a secret under an offer outside a browser, and
+  has no code that could open one. See
+  [`docs/operations.md`](docs/operations.md#sealing-from-a-terminal).
+- `limits.max_intake_lifetime`, how far ahead an intake envelope's time may be: `15m`
+  by default.
+- An `admit` audit record has `policies`, the digest of the policy each field was to be
+  sealed under. Every audit record now has the field, empty for other calls.
+
+### Changed
+
+- `PublicKeys` answers a caller that may use the keyset, not only an `admin` one: an
+  application needs the public key to have a secret sealed to it.
+- `seal reseal` fails on a line that would open an intake envelope, or give a value an
+  intake as its policy.
+- A 0.2.0 seal refuses an intake envelope with `OPEN_FAILED`, and the 0.2.0 WASM module
+  refuses to seal under an intake policy: upgrade seal and the module an application
+  serves before making offers. Values sealed before open as before.
+
 ## [0.2.0]
 
 ### Added

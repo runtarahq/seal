@@ -13,6 +13,7 @@ is limited to 16 rules (in each list), 8 definitions and 16 KiB in canonical for
 
 Besides `rules`, a policy may have `definitions` ([Response sealing](#response-sealing)),
 `shared` ([Shared values](#shared-values)) and `verify` ([Verification](#verification)).
+A policy with `intake` ([Intake](#intake)) has nothing else.
 
 ## Rules
 
@@ -646,6 +647,43 @@ A platform's own webhook secret, such as one Slack app's for every tenant, can a
 
 A policy may have both `rules` and `verify`. A value sealed from a response never has
 `verify`.
+
+## Intake
+
+A policy is chosen by whoever seals, so a secret sealed in a browser or a script has
+whatever policy that browser or script gave it. Where the application is to decide
+where a secret may go and still never hold it, the secret is sealed under an intake
+policy instead: one that allows nothing, and names the policy each secret is to have.
+seal's `admit` then seals each secret under the policy named, and under no other
+([`integrating.md`](integrating.md#taking-in-a-secret-without-holding-it)).
+
+```json
+{
+  "intake": {
+    "outputs": {
+      "api_key": "ksDuskwoEUsOeEeE5i_NObMkhp-_ZJmlJ2CK1cmBYWQ",
+      "signing_secret": "pzLeGqSSkVqCIif-KjedcMI-ewPffAqrmrL0FFoStRI"
+    },
+    "not_after": 1800000000
+  }
+}
+```
+
+- `outputs` names each field of the [intake envelope](format.md#intake-envelopes) that
+  may become a stored value, and the SHA-256 of that value's policy in canonical form,
+  in base64url. One to 16 fields. The digest covers the whole policy, `shared` included,
+  so a value is shared only if the policy named for it is.
+- `not_after` is a time in seconds since the Unix epoch, after which seal refuses to
+  admit the envelope. Whoever seals the envelope writes it, so seal also refuses one
+  further ahead than the operator's `limits.max_intake_lifetime`.
+
+A policy with `intake` has no `rules`, `definitions` or `verify` and is not `shared`.
+Its value serves no request: `send`, `connect`, `verify` and `presign` refuse it with
+`POLICY_DENIED`. An output's policy is never itself an intake.
+
+`Policy::for_intake(outputs, not_after)` makes this policy from the outputs' policies,
+and `Offer::for_intake` the whole of what a sealer is handed. `Policy::digest` is the
+digest alone.
 
 ## Limits
 

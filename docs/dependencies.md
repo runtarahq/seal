@@ -17,6 +17,7 @@ dependencies are listed separately.
 | `rustls`, `tokio-rustls` | TLS toward providers, Postgres, a KMS and a bucket of keys, and mTLS from callers | `seal-keys`, `seal-broker`, `seal-client`, `seal` | `ring` provider only; no `aws-lc-rs`, so no C build |
 | `webpki-roots` | The public roots providers and a KMS are verified against | `seal-broker`, `seal-keys` | Mozilla's set, compiled in; operators add more |
 | `postgres-protocol` | SCRAM-SHA-256(-PLUS) and the MD5 hash for Postgres logins | `seal-broker` | From the `rust-postgres` project; its SCRAM state is not wiped (threat model) |
+| `sha2` | The digest an intake policy names a policy by | `seal-format` | RustCrypto, and already there under `hpke`. Not `ring`, which `seal-format` does not have: it builds for WebAssembly |
 | `zeroize` | Wiping buffers that hold secrets | all but `seal-proto` | |
 | `getrandom` | Randomness for sealing, in the WASM build too | `seal-format` | |
 | `x509-parser` | Reading a caller certificate's subject, to name the caller | `seal` | Parses only certificates that rustls has already verified |
@@ -60,7 +61,7 @@ image is built with it. With it the binary's tree has about 50 more crates.
 
 | Crate | For |
 |---|---|
-| `clap` | The command line |
+| `clap` | The command line, of `seal` and of `seal-sealer`. Nothing else is in `seal-sealer` but `seal-format` and `zeroize` |
 | `nix` | Peer credentials on Unix sockets, and hardening: `PR_SET_DUMPABLE`, `RLIMIT_CORE`, `mlockall`, refusing root |
 | `tracing`, `tracing-subscriber` | Logs, which never include a secret (checked by the canary scan). `seal-keys` uses `tracing` too, to say why a KMS refused |
 | `metrics`, `metrics-exporter-prometheus` | The metrics endpoint |
