@@ -243,6 +243,7 @@ impl Service {
             pg_auth: None,
             verified: None,
             expires_s: None,
+            policies: Vec::new(),
         };
         self.audit
             .record(&record)

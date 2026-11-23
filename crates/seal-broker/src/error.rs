@@ -44,6 +44,12 @@ pub enum ErrorCode {
     PgAuthFailed,
     /// A concurrency limit was reached. May be retried.
     LimitExceeded,
+    /// An intake envelope is past its time, or a policy is not the one it names. A new
+    /// offer is needed, and the secret sealed again.
+    IntakeStale,
+    /// An intake envelope's secret is not an object of fields, a field is absent, or
+    /// one does not fit in a value.
+    IntakeInvalid,
     /// seal failed, or could not write an audit record.
     Internal,
 }
@@ -70,6 +76,8 @@ impl ErrorCode {
             Self::UpstreamReset => "UPSTREAM_RESET",
             Self::PgAuthFailed => "PG_AUTH_FAILED",
             Self::LimitExceeded => "LIMIT_EXCEEDED",
+            Self::IntakeStale => "INTAKE_STALE",
+            Self::IntakeInvalid => "INTAKE_INVALID",
             Self::Internal => "INTERNAL",
         }
     }

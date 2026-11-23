@@ -270,7 +270,7 @@ impl Harness {
         }
     }
 
-    fn register(&self, secret: &[u8]) {
+    pub fn register(&self, secret: &[u8]) {
         if let Ok(text) = std::str::from_utf8(secret)
             && text.len() >= 8
         {

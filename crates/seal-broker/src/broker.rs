@@ -32,6 +32,10 @@ use crate::relay::RelayLimits;
 use crate::response_seal::seal_response_fields;
 use crate::target::Target;
 
+mod admit;
+
+pub use admit::{AdmitOutput, AdmitRequest};
+
 /// The default for most timeouts and caps matches the configuration reference in
 /// `docs/operations.md`.
 const MEGABYTE: u64 = 1024 * 1024;
@@ -55,6 +59,9 @@ pub struct Limits {
     pub max_stream_duration: Option<Duration>,
     /// The longest a Postgres session may last.
     pub pg_max_session: Duration,
+    /// How far ahead an intake envelope's `not_after` may be. Whoever seals the
+    /// envelope writes that time, so this is what bounds it.
+    pub max_intake_lifetime: Duration,
 }
 
 impl Default for Limits {
@@ -68,6 +75,7 @@ impl Default for Limits {
             buffered_total_timeout: Duration::from_secs(60),
             max_stream_duration: None,
             pg_max_session: Duration::from_secs(8 * 3600),
+            max_intake_lifetime: Duration::from_secs(15 * 60),
         }
     }
 }
@@ -101,6 +109,7 @@ impl Limits {
                 (None, limit) => limit.map(|limit| Duration::from_secs(u64::from(limit))),
             },
             pg_max_session: seconds(self.pg_max_session, rule.pg_max_session_s),
+            max_intake_lifetime: self.max_intake_lifetime,
         }
     }
 }
@@ -352,6 +361,7 @@ impl Broker {
             pg_auth: None,
             verified: None,
             expires_s: None,
+            policies: Vec::new(),
         };
         match self.prepare_session(request, &mut record).await {
             Ok(session) => Ok(session),
@@ -763,6 +773,7 @@ impl Broker {
             pg_auth: None,
             verified: None,
             expires_s: None,
+            policies: Vec::new(),
         }
     }
 
@@ -1097,6 +1108,15 @@ impl Broker {
                 },
             );
             drop(key);
+            // An intake envelope's secrets are for `admit` alone. It has no rule to
+            // match and nothing to verify with, but that is not left to follow.
+            if opened.policy.intake.is_some() {
+                return Err(BrokerError::for_field(
+                    ErrorCode::PolicyDenied,
+                    "an intake envelope can only be admitted",
+                    field,
+                ));
+            }
             // Only a value its sealer marked shared may serve another record, so a
             // tenant's tokens can never be presented with another tenant's request.
             let elsewhere = value_keyset != keyset || value_item != item;
