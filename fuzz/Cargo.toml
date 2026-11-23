@@ -18,6 +18,7 @@ seal = { path = "../crates/seal" }
 seal-broker = { path = "../crates/seal-broker" }
 seal-format = { path = "../crates/seal-format" }
 seal-proto = { path = "../crates/seal-proto" }
+serde = "1"
 tokio = { version = "1", features = ["io-util", "rt"] }
 # As seal-broker builds it. Not `arbitrary_precision`: the targets must fuzz seal as it
 # ships, and Cargo would turn the feature on for seal too.
@@ -114,6 +115,13 @@ bench = false
 [[bin]]
 name = "jwt_claims"
 path = "fuzz_targets/jwt_claims.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intake_object"
+path = "fuzz_targets/intake_object.rs"
 test = false
 doc = false
 bench = false

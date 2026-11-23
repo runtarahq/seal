@@ -2195,6 +2195,7 @@ dependencies = [
  "hpke",
  "serde",
  "serde_json",
+ "sha2",
  "url",
  "zeroize",
 ]
@@ -2212,6 +2213,7 @@ dependencies = [
  "seal-broker",
  "seal-format",
  "seal-proto",
+ "serde",
  "serde_json",
  "tokio",
  "zeroize",
