@@ -99,7 +99,9 @@ jobs:
       - name: The sealer is static, and has no opening code
         run: |
           cargo build --release --locked --package seal-sealer --target "$TARGET"
-          file "target/$TARGET/release/seal-sealer" | tee /dev/stderr | grep -q "static-pie linked"
+          # Position-independent on amd64 and not on arm64, which is the target's own
+          # default; static on both.
+          file "target/$TARGET/release/seal-sealer" | tee /dev/stderr | grep -q -E "static-pie linked|statically linked"
           ! cargo tree --locked --package seal-sealer --edges features,no-dev | grep -F 'seal-format feature "open"'
       - name: Save the binary
         id: save
