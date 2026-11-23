@@ -902,9 +902,24 @@ async fn reseal_gives_a_value_a_new_policy_only_when_told_to() {
         json!({ "header": { "name": "Host", "format": "{}" } });
     let mut shared = moved;
     shared["policy"]["shared"] = json!(true);
+    // An intake envelope is admitted, not stored: it gets no policy here, and no value
+    // is made one.
+    let outputs = std::collections::BTreeMap::from([(field("token"), token_policy(&provider))]);
+    let intake = seal_format::Policy::for_intake(&outputs, u64::MAX).unwrap();
+    let mut from_intake = line(
+        "intake",
+        &setup
+            .seal("intake", b"{\"token\":\"SEALCANARY-entered\"}", &intake)
+            .await,
+    );
+    from_intake["policy"] = api_key.clone();
+    let mut to_intake = line("token", &envelope);
+    to_intake["policy"] = serde_json::to_value(&intake).unwrap();
     for (name, line, reason) in [
         ("invalid", invalid, "its new policy is not valid"),
         ("shared", shared, "cannot change whether a value is shared"),
+        ("from-intake", from_intake, "is an intake envelope"),
+        ("to-intake", to_intake, "cannot be made an intake envelope"),
     ] {
         let (ok, printed, written) = run_reseal(setup, name, &[line], &["--rewrite-policies"]);
         assert!(!ok && printed.contains(reason), "{printed}");
