@@ -65,12 +65,54 @@ jobs:
         run: |
           cargo build --release --locked --package seal --features aws-kms --target x86_64-unknown-linux-musl
           file target/x86_64-unknown-linux-musl/release/seal | tee /dev/stderr | grep -q "static-pie linked"
-      # Built by itself, so that it is compiled without the opening code the service has.
+
+  # The program that seals outside a browser, as it is released: static, for each
+  # architecture, and built by itself, so that it is compiled without the opening code
+  # the service has.
+  sealer:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+    # The SHA-256 of the binary each architecture saved, which the release job holds
+    # what it downloads to.
+    outputs:
+      amd64: ${{ steps.save.outputs.amd64 }}
+      arm64: ${{ steps.save.outputs.arm64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: rustup toolchain install && rustup target add "$TARGET"
+      - run: cargo test --package seal-sealer --locked --target "$TARGET"
       - name: The sealer is static, and has no opening code
         run: |
-          cargo build --release --locked --package seal-sealer --target x86_64-unknown-linux-musl
-          file target/x86_64-unknown-linux-musl/release/seal-sealer | tee /dev/stderr | grep -q "static-pie linked"
+          cargo build --release --locked --package seal-sealer --target "$TARGET"
+          file "target/$TARGET/release/seal-sealer" | tee /dev/stderr | grep -q "static-pie linked"
           ! cargo tree --locked --package seal-sealer --edges features,no-dev | grep -F 'seal-format feature "open"'
+      - name: Save the binary
+        id: save
+        run: |
+          cp "target/$TARGET/release/seal-sealer" "seal-sealer-linux-$ARCH"
+          echo "$ARCH=$(sha256sum "seal-sealer-linux-$ARCH" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sealer-${{ matrix.arch }}
+          path: seal-sealer-linux-${{ matrix.arch }}
+          retention-days: 1
+          if-no-files-found: error
 
   # The container image, started by the same tests in place of the binary they built, on
   # each architecture it is published for.
@@ -185,6 +227,10 @@ jobs:
 
   wasm:
     runs-on: ubuntu-latest
+    # The SHA-256 of the archive saved here, which the release job holds what it
+    # downloads to.
+    outputs:
+      archive: ${{ steps.pack.outputs.archive }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -201,6 +247,20 @@ jobs:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
       - name: Seal in WebAssembly, open natively, and admit an intake envelope
         run: scripts/wasm-roundtrip.sh
+      # The sealer as a page or a bundler takes it. The script loads the module it
+      # packs and opens what that seals, so what is released is what was checked.
+      - name: Pack the module as it is released
+        id: pack
+        run: |
+          scripts/package-wasm.sh seal-wasm.tar.gz
+          echo "archive=$(sha256sum seal-wasm.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm
+          path: seal-wasm.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
   vectors:
     runs-on: ubuntu-latest
@@ -258,6 +318,7 @@ jobs:
       - clippy
       - test-linux
       - test-musl
+      - sealer
       - image
       - containers
       - test-macos
@@ -337,3 +398,84 @@ jobs:
           subject-name: ${{ steps.push.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  # On a tag, a GitHub release with what an application needs besides the image: the
+  # WebAssembly sealer it serves, and `seal-sealer` for scripts. Only once the image of
+  # the same commit is published, only the files the jobs above saved and checked, and
+  # each with a signed statement of where it was built, which
+  # `gh attestation verify <file> --repo runtarahq/seal` checks.
+  release:
+    if: github.ref_type == 'tag'
+    needs:
+      - publish
+      - sealer
+      - wasm
+    runs-on: ubuntu-latest
+    permissions:
+      # To create the release.
+      contents: write
+      # To sign the statements of where the files were built, and store them.
+      id-token: write
+      attestations: write
+    concurrency:
+      group: release-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Each by its own name, and nothing else a job of this run may have uploaded.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sealer-amd64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sealer-arm64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm
+      - name: The files are the ones that were checked
+        run: |
+          test -n "$AMD64" && test -n "$ARM64" && test -n "$WASM"
+          printf '%s  %s\n' \
+            "$AMD64" seal-sealer-linux-amd64 \
+            "$ARM64" seal-sealer-linux-arm64 \
+            "$WASM" seal-wasm.tar.gz > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+        env:
+          AMD64: ${{ needs.sealer.outputs.amd64 }}
+          ARM64: ${{ needs.sealer.outputs.arm64 }}
+          WASM: ${{ needs.wasm.outputs.archive }}
+      - name: Take the release's notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes() {
+            awk -v heading="## [$1]" '
+              index($0, heading) == 1 { found = 1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md
+          }
+          notes "$version" > notes.md
+          # A pre-release is of what is not released yet.
+          case "$version" in
+            *-*) grep -q '[^[:space:]]' notes.md || notes Unreleased > notes.md ;;
+          esac
+          # A release that the changelog says nothing of is a mistake in one of them.
+          grep -q '[^[:space:]]' notes.md
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            seal-sealer-linux-amd64
+            seal-sealer-linux-arm64
+            seal-wasm.tar.gz
+      - name: Create the release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # A pre-release, such as 1.2.3-rc.1, does not become the latest release.
+          case "$version" in *-*) set -- --prerelease ;; *) set -- ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$version" \
+            --notes-file notes.md "$@" \
+            seal-sealer-linux-amd64 seal-sealer-linux-arm64 seal-wasm.tar.gz SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

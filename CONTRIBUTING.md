@@ -84,6 +84,7 @@ CI also runs these, which need more tools:
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
   cargo test --package seal-format --features wasm --target wasm32-unknown-unknown --test wasm --locked
 scripts/wasm-roundtrip.sh
+scripts/package-wasm.sh
 
 # The musl target and a musl C compiler (musl-tools): the released binary is static
 cargo test --workspace --locked --target x86_64-unknown-linux-musl

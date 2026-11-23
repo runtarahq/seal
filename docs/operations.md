@@ -45,6 +45,11 @@ gh attestation verify oci://ghcr.io/runtarahq/seal:sha-<commit> --repo runtarahq
 docker pull ghcr.io/runtarahq/seal@sha256:<the digest it printed>
 ```
 
+A release also has, on its GitHub page, what an application needs besides the image,
+each with such a statement: `seal-wasm.tar.gz`, the
+[WebAssembly sealer](integrating.md#taking-in-a-secret-without-holding-it) to serve, and
+[`seal-sealer`](#sealing-from-a-terminal) for Linux on amd64 and arm64.
+
 Callers present a client
 certificate from the CA in `listen.tls.client_ca`, and are identified by its subject.
 Certificates are short-lived: seal checks its certificate files every
@@ -509,8 +514,12 @@ seal reseal --config /etc/seal/seal.toml --keyset acme --rewrite-policies \
 
 `seal-sealer` seals a secret outside a browser: for a script or an API client that sends
 an application secrets, and for an operator who seals a platform's credential by hand.
-It is a program of its own, built with `cargo build --release --package seal-sealer`,
-and has no code that could open a value, so it needs no more trust than a browser does.
+It is a program of its own, and has no code that could open a value, so it needs no
+more trust than a browser does. Each release has it as a static binary for Linux,
+`seal-sealer-linux-amd64` and `seal-sealer-linux-arm64`; check one before running it
+with `gh attestation verify seal-sealer-linux-amd64 --repo runtarahq/seal`. Elsewhere,
+build it with `cargo build --release --package seal-sealer`: by itself, since a build of
+the whole workspace compiles it with the service's features.
 
 ```sh
 # The secrets of a record, under an offer the application made:

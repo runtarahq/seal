@@ -95,7 +95,9 @@ What to hold to:
 - **Keep `not_after` short.** Minutes, within the operator's
   `limits.max_intake_lifetime`. The application's clock sets it and seal's checks it.
 - **Serve the WASM module of the seal you run.** An older module refuses an intake
-  policy, and an older seal refuses an intake envelope.
+  policy, and an older seal refuses an intake envelope. Each release has the module as
+  `seal-wasm.tar.gz`: `web/` for a page to load as it is, and `bundler/` for webpack or
+  Vite. `scripts/package-wasm.sh` builds the same from source.
 - **What this is for.** An application compromised after a secret was sealed cannot
   send it anywhere but where the offer said: an intake envelope in a log is worth no
   more than the values it becomes, and nothing once it is past its time. An application
