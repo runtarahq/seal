@@ -2127,7 +2127,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "seal-broker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2189,7 +2189,7 @@ dependencies = [
 
 [[package]]
 name = "seal-format"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "hpke",
@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "seal-keys"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "seal-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "protox",
