@@ -5,6 +5,15 @@ All notable changes to seal are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Security fixes are also announced as
 GitHub Security Advisories.
 
+## [Unreleased]
+
+### Changed
+
+- `seal-wasm.tar.gz` is an npm package, `seal-wasm`, so an application installs it by
+  the URL of the release's file. `seal-wasm/web` is the module for a page to load, with
+  `seal-wasm/web/seal_format_bg.wasm` beside it, and `seal-wasm` the one for a bundler.
+  The files in the archive are where they were.
+
 ## [0.3.0]
 
 ### Added
