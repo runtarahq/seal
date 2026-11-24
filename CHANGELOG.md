@@ -5,7 +5,7 @@ All notable changes to seal are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Security fixes are also announced as
 GitHub Security Advisories.
 
-## [Unreleased]
+## [0.3.1]
 
 ### Changed
 
@@ -180,6 +180,7 @@ The first release.
 - The [threat model](docs/threat-model.md) states what seal does and does not protect
   against.
 
+[0.3.1]: https://github.com/runtarahq/seal/releases/tag/v0.3.1
 [0.3.0]: https://github.com/runtarahq/seal/releases/tag/v0.3.0
 [0.2.0]: https://github.com/runtarahq/seal/releases/tag/v0.2.0
 [0.1.0]: https://github.com/runtarahq/seal/releases/tag/v0.1.0
