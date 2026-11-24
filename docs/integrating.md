@@ -96,8 +96,11 @@ What to hold to:
   `limits.max_intake_lifetime`. The application's clock sets it and seal's checks it.
 - **Serve the WASM module of the seal you run.** An older module refuses an intake
   policy, and an older seal refuses an intake envelope. Each release has the module as
-  `seal-wasm.tar.gz`: `web/` for a page to load as it is, and `bundler/` for webpack or
-  Vite. `scripts/package-wasm.sh` builds the same from source.
+  `seal-wasm.tar.gz`, which is an npm package: install it by the URL of the release's
+  file, as `"seal-wasm": "https://github.com/runtarahq/seal/releases/download/v0.3.1/seal-wasm.tar.gz"`.
+  `seal-wasm/web` is the module for a page to load, given the URL of
+  `seal-wasm/web/seal_format_bg.wasm`, and `seal-wasm` the one for a bundler that loads
+  WebAssembly itself. `scripts/package-wasm.sh` builds the same from source.
 - **What this is for.** An application compromised after a secret was sealed cannot
   send it anywhere but where the offer said: an intake envelope in a log is worth no
   more than the values it becomes, and nothing once it is past its time. An application
